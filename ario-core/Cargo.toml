@@ -1,0 +1,22 @@
+[package]
+name = "ario-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes = "1"
+ct-codecs = "1.1"
+derive-where = { version = "1.5", features = ["zeroize"] }
+digest = "0.10"
+maybe-owned = "0.3"
+rsa = "0.10.0-rc.3"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_repr = "0.1"
+sha2 = { version = "0.10", features = ["sha2-asm"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+zeroize = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+anyhow = "1.0"

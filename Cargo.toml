@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["ario-core", "ario-client", "arfs", "ars3nal"]
+
+[workspace.dependencies]
+serde = "1.0"
+zeroize = "1.8"
