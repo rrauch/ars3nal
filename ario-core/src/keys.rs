@@ -1,7 +1,8 @@
 use crate::base64::UrlSafeNoPadding;
 use crate::serde::Base64SerdeStrategy;
-use crate::typed::Typed;
+use crate::typed::{FromInner, Typed};
 use crate::{Address, BigUint, RsaError};
+use derive_where::derive_where;
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::Deserialize;
@@ -12,6 +13,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub type TypedSecretKey<T> = Typed<T, SecretKeyInner<T>, (), ()>;
 
+#[derive_where(Debug, Clone)]
 pub struct SecretKeyInner<T> {
     inner: RsaPrivateKey,
     pkey: TypedPublicKey<T>,
@@ -33,11 +35,10 @@ impl<T> TypedSecretKey<T> {
 
         let pkey = inner.to_public_key();
 
-        Ok(SecretKeyInner {
+        Ok(Self::from_inner(SecretKeyInner {
             inner,
             pkey: TypedPublicKey::new(pkey),
-        }
-        .into())
+        }))
     }
 
     pub fn public_key(&self) -> &TypedPublicKey<T> {
@@ -122,6 +123,7 @@ struct RsaJwk<'a> {
 
 pub type TypedPublicKey<T> = Typed<T, PublicKeyInner<T>>;
 
+#[derive_where(Debug, Clone)]
 pub struct PublicKeyInner<T> {
     inner: RsaPublicKey,
     address: Address<T>,
@@ -131,12 +133,11 @@ pub struct PublicKeyInner<T> {
 impl<T> TypedPublicKey<T> {
     fn new(inner: RsaPublicKey) -> Self {
         let address = rsa_public_key_to_address(&inner);
-        PublicKeyInner {
+        Self::from_inner(PublicKeyInner {
             inner,
             address,
             ph: PhantomData,
-        }
-        .into()
+        })
     }
 
     pub fn address(&self) -> &Address<T> {
@@ -147,7 +148,7 @@ impl<T> TypedPublicKey<T> {
 fn rsa_public_key_to_address<T>(pk: &RsaPublicKey) -> Address<T> {
     // sha256 hash from bytes representing a big-endian encoded modulus
     let hash: [u8; 32] = Sha256::digest(pk.n_bytes()).into();
-    Address::from(hash)
+    Address::from_inner(hash)
 }
 
 mod tests {

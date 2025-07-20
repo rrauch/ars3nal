@@ -1,10 +1,11 @@
 use crate::BigUint;
 use crate::base64::{FromBase64, ToBase64};
 use crate::stringify::Stringify;
-use crate::typed::Typed;
+use crate::typed::{FromInner, Typed};
 use bytes::Bytes;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
@@ -57,6 +58,12 @@ impl FromBytes for Bytes {
     }
 }
 
+impl AsBytes for Bytes {
+    fn as_bytes(&self) -> impl Into<Cow<'_, [u8]>> {
+        self.as_ref()
+    }
+}
+
 impl FromBytes for BigUint {
     type Error = Infallible;
 
@@ -65,6 +72,12 @@ impl FromBytes for BigUint {
         Self: Sized,
     {
         Ok(BigUint::from_be_slice_vartime(input.as_ref()))
+    }
+}
+
+impl AsBytes for BigUint {
+    fn as_bytes(&self) -> impl Into<Cow<'_, [u8]>> {
+        self.to_be_bytes_trimmed_vartime().into_vec()
     }
 }
 
@@ -91,19 +104,19 @@ impl<const N: usize> FromBytes for [u8; N] {
     }
 }
 
-pub(crate) trait AsBytes {
-    fn as_bytes(&self) -> &[u8];
+impl<const N: usize> AsBytes for [u8; N] {
+    fn as_bytes(&self) -> impl Into<Cow<'_, [u8]>> {
+        self.as_slice()
+    }
 }
 
-impl<T: AsRef<[u8]>> AsBytes for T {
-    fn as_bytes(&self) -> &[u8] {
-        self.as_ref()
-    }
+pub(crate) trait AsBytes {
+    fn as_bytes(&self) -> impl Into<Cow<'_, [u8]>>;
 }
 
 pub struct DefaultSerdeStrategy;
 
-impl<T, I, STR> Serialize for Typed<T, I, DefaultSerdeStrategy, STR>
+impl<T, I, STR, DBG> Serialize for Typed<T, I, DefaultSerdeStrategy, STR, DBG>
 where
     I: Serialize,
 {
@@ -115,21 +128,22 @@ where
     }
 }
 
-impl<'de, T, I, STR> Deserialize<'de> for Typed<T, I, DefaultSerdeStrategy, STR>
+impl<'de, T, I, STR, DBG> Deserialize<'de> for Typed<T, I, DefaultSerdeStrategy, STR, DBG>
 where
     I: Deserialize<'de>,
+    Self: FromInner<I>,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        Ok(I::deserialize(deserializer)?.into())
+        Ok(Self::from_inner(I::deserialize(deserializer)?))
     }
 }
 
 pub struct StringifySerdeStrategy;
 
-impl<T, I, STR> Serialize for Typed<T, I, StringifySerdeStrategy, STR>
+impl<T, I, STR, DBG> Serialize for Typed<T, I, StringifySerdeStrategy, STR, DBG>
 where
     STR: Stringify<I>,
 {
@@ -163,9 +177,10 @@ where
     }
 }
 
-impl<'de, T, I, STR> Deserialize<'de> for Typed<T, I, StringifySerdeStrategy, STR>
+impl<'de, T, I, STR, DBG> Deserialize<'de> for Typed<T, I, StringifySerdeStrategy, STR, DBG>
 where
     STR: Stringify<I>,
+    Self: FromInner<I>,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -173,14 +188,14 @@ where
     {
         let inner: I =
             deserializer.deserialize_str(StringifyVisitor::<T, I, STR>(PhantomData::default()))?;
-        Ok(inner.into())
+        Ok(Self::from_inner(inner))
     }
 }
 
 pub struct Base64SerdeStrategy<V, const MAX_LEN: usize = { usize::MAX }>(PhantomData<V>);
 
-impl<T, I, V, const MAX_LEN: usize, STR> Serialize
-    for Typed<T, I, Base64SerdeStrategy<V, MAX_LEN>, STR>
+impl<T, I, V, const MAX_LEN: usize, STR, DBG> Serialize
+    for Typed<T, I, Base64SerdeStrategy<V, MAX_LEN>, STR, DBG>
 where
     I: ToBase64<V>,
 {
@@ -218,10 +233,11 @@ where
     }
 }
 
-impl<'de, T, I, V, const MAX_LEN: usize, STR> Deserialize<'de>
-    for Typed<T, I, Base64SerdeStrategy<V, MAX_LEN>, STR>
+impl<'de, T, I, V, const MAX_LEN: usize, STR, DBG> Deserialize<'de>
+    for Typed<T, I, Base64SerdeStrategy<V, MAX_LEN>, STR, DBG>
 where
     I: FromBase64<V, MAX_LEN>,
+    Self: FromInner<I>,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -231,6 +247,6 @@ where
             deserializer.deserialize_str(
                 Base64Visitor::<T, I, Base64SerdeStrategy<V, MAX_LEN>>(PhantomData::default()),
             )?;
-        Ok(inner.into())
+        Ok(Self::from_inner(inner))
     }
 }

@@ -85,7 +85,7 @@ pub(crate) trait ToBase64<V> {
 
 impl<T: AsBytes> ToBase64<UrlSafeNoPadding> for T {
     fn to_base64(&self) -> String {
-        base64_enc_urlsafe_nopadding(self.as_bytes())
+        base64_enc_urlsafe_nopadding(self.as_bytes().into())
     }
 }
 

@@ -1,12 +1,9 @@
-use crate::base64::UrlSafeNoPadding;
-use crate::serde::Base64SerdeStrategy;
+use crate::blob::{BlobName, TypedBlob};
 use crate::serde::{de_empty_string_as_none, ser_none_as_empty_string};
-use crate::typed::Typed;
 use crate::{Address, id};
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug};
 
 const MAX_TX_DATA_LEN: usize = 1024 * 1024 * 12;
 
@@ -57,9 +54,7 @@ pub struct TxData {
     pub signature: String,      // todo: rsa signature
 }
 
-pub type TxPayload = Typed<TxKind, Bytes, Base64SerdeStrategy<UrlSafeNoPadding, MAX_TX_DATA_LEN>>;
-impl Debug for TxPayload {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(format!("[tx_payload={}b]", self.0.len()).as_str())
-    }
+pub type TxPayload = TypedBlob<TxKind, MAX_TX_DATA_LEN>;
+impl BlobName for TxKind {
+    const NAME: &'static str = "tx_payload";
 }

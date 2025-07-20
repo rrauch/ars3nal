@@ -1,7 +1,8 @@
-use crate::typed::Typed;
+use crate::typed::{FromInner, Typed};
 use std::borrow::Cow;
 use std::fmt::Display;
 use std::marker::PhantomData;
+use std::str::FromStr;
 use uuid::Uuid;
 
 pub trait Stringify<T> {
@@ -33,22 +34,46 @@ where
     }
 }
 
-impl<T, I, S> Stringify<Self> for Typed<T, I, S>
-where
-    S: Stringify<I>,
-{
-    type Error = <S as Stringify<I>>::Error;
+pub struct DisplayFromStrStringify<T>(PhantomData<T>);
 
-    fn to_str(input: &Self) -> impl Into<Cow<str>> {
-        <S as Stringify<I>>::to_str(&input.0)
+impl<T> Stringify<T> for DisplayFromStrStringify<T>
+where
+    T: Display + FromStr,
+    <T as FromStr>::Err: Display,
+{
+    type Error = <T as FromStr>::Err;
+
+    fn to_str(input: &T) -> impl Into<Cow<str>> {
+        input.to_string()
     }
 
-    fn try_from_str<IN: AsRef<str>>(input: IN) -> Result<Self, Self::Error>
+    fn try_from_str<S: AsRef<str>>(input: S) -> Result<T, Self::Error>
     where
         Self: Sized,
     {
-        let inner: I = <S as Stringify<I>>::try_from_str(input.as_ref()).map(Into::into)?;
+        let inner = <T as FromStr>::from_str(input.as_ref())?;
         Ok(inner.into())
+    }
+}
+
+impl<T, I, SER, STR, DBG> Stringify<Self> for Typed<T, I, SER, STR, DBG>
+where
+    STR: Stringify<I>,
+{
+    type Error = <STR as Stringify<I>>::Error;
+
+    fn to_str(input: &Self) -> impl Into<Cow<str>> {
+        <STR as Stringify<I>>::to_str(&input.0)
+    }
+
+    #[allow(private_bounds)]
+    fn try_from_str<IN: AsRef<str>>(input: IN) -> Result<Self, Self::Error>
+    where
+        Self: Sized,
+        Self: FromInner<I>,
+    {
+        let inner: I = <STR as Stringify<I>>::try_from_str(input.as_ref()).map(Into::into)?;
+        Ok(Self::from_inner(inner))
     }
 }
 

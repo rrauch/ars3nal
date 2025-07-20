@@ -6,6 +6,7 @@ pub mod id;
 pub mod tx;
 
 mod base64;
+pub mod blob;
 pub mod keys;
 pub(crate) mod serde;
 mod stringify;
