@@ -33,6 +33,7 @@ pub type Typed256B64Id<T> =
 pub type TypedBigUintB64Id<T> =
     TypedId<T, BigUint, StringifySerdeStrategy, Base64Stringify<UrlSafeNoPadding, { 1024 * 10 }>>;
 
+#[cfg(test)]
 mod tests {
     use crate::id::{Typed256B64Id, TypedBigUintB64Id, TypedUuid};
     use std::str::FromStr;

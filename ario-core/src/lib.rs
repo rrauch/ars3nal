@@ -8,6 +8,7 @@ pub mod tx;
 mod base64;
 pub mod blob;
 pub mod keys;
+pub mod money;
 pub(crate) mod serde;
 mod stringify;
 pub mod typed;

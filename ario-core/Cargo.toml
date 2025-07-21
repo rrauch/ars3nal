@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bigdecimal = { version = "0.4", features = ["serde-json"] }
 bytes = "1"
 ct-codecs = "1.1"
 derive-where = { version = "1.5", features = ["zeroize"] }

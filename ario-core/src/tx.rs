@@ -1,9 +1,10 @@
 use crate::blob::{BlobName, TypedBlob};
+use crate::money::{TypedMoney, Winston};
 use crate::serde::{de_empty_string_as_none, ser_none_as_empty_string};
 use crate::{Address, id};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use std::fmt::{Debug};
+use std::fmt::Debug;
 
 const MAX_TX_DATA_LEN: usize = 1024 * 1024 * 12;
 
@@ -40,7 +41,7 @@ pub struct TxData {
     pub target: Option<Address<()>>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub quantity: Option<String>, // todo: numerical string (winstons)
+    pub quantity: Option<Quantity>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_root: Option<String>, // todo: Merkle Root
@@ -49,12 +50,25 @@ pub struct TxData {
         deserialize_with = "de_empty_string_as_none",
         serialize_with = "ser_none_as_empty_string"
     )]
-    pub data: Option<TxPayload>,
-    pub reward: Option<String>, // todo: numerical string (winstons)
-    pub signature: String,      // todo: rsa signature
+    pub data: Option<Payload>,
+    pub reward: Option<Reward>,
+    pub signature: String, // todo: rsa signature
 }
 
-pub type TxPayload = TypedBlob<TxKind, MAX_TX_DATA_LEN>;
+pub type Payload = TypedBlob<TxKind, MAX_TX_DATA_LEN>;
 impl BlobName for TxKind {
     const NAME: &'static str = "tx_payload";
+}
+
+pub struct TxQuantityKind;
+pub type Quantity = TypedMoney<TxQuantityKind, Winston>;
+
+pub struct TxRewardKind;
+pub type Reward = TypedMoney<TxRewardKind, Winston>;
+
+mod tests {
+    #[test]
+    fn tx_data_ok() -> anyhow::Result<()> {
+        Ok(())
+    }
 }
