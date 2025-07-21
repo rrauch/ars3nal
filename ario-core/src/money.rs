@@ -588,20 +588,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ar_to_winston_conversion_explicit() {
-        let ar = Money::<AR>::try_from(1).unwrap(); // 1 AR
-        let winston: Money<Winston> = ar.convert_with(&());
-        assert_eq!(winston.to_plain_string(), "1000000000000"); // 1 trillion winston
-    }
-
-    #[test]
-    fn test_winston_to_ar_conversion_explicit() {
-        let winston = Money::<Winston>::try_from(1000000000000u64).unwrap(); // 1 trillion winston
-        let ar: Money<AR> = winston.convert_with(&());
-        assert_eq!(ar.to_plain_string(), "1.000000000000"); // 1 AR
-    }
-
-    #[test]
     fn test_ar_to_winston_conversion_implicit() {
         let ar = Money::<AR>::try_from(1).unwrap(); // 1 AR
         let winston: Money<Winston> = ar.convert();
@@ -629,14 +615,14 @@ mod tests {
     #[test]
     fn test_fractional_ar_to_winston_conversion() {
         let ar = Money::<AR>::try_from(BigDecimal::from_str("0.5").unwrap()).unwrap(); // 0.5 AR
-        let winston: Money<Winston> = ar.convert_with(&());
+        let winston: Money<Winston> = ar.convert();
         assert_eq!(winston.to_plain_string(), "500000000000"); // 0.5 trillion winston
     }
 
     #[test]
     fn test_fractional_winston_to_ar_conversion() {
         let winston = Money::<Winston>::try_from(500000000000u64).unwrap(); // 0.5 trillion winston
-        let ar: Money<AR> = winston.convert_with(&());
+        let ar: Money<AR> = winston.convert();
         assert_eq!(ar.to_plain_string(), "0.500000000000"); // 0.5 AR
     }
 
@@ -644,7 +630,7 @@ mod tests {
     fn test_conversion_with_rounding() {
         // Test conversion that requires rounding
         let winston = Money::<Winston>::try_from(1).unwrap(); // 1 winston
-        let ar: Money<AR> = winston.convert_with(&());
+        let ar: Money<AR> = winston.convert();
         // 1 winston = 0.000000000001 AR
         assert_eq!(ar.to_plain_string(), "0.000000000001");
     }
@@ -679,11 +665,11 @@ mod tests {
     #[test]
     fn test_negative_conversion() {
         let ar = Money::<AR>::try_from(BigDecimal::from_str("-1.5").unwrap()).unwrap();
-        let winston: Money<Winston> = ar.convert_with(&());
+        let winston: Money<Winston> = ar.convert();
         assert_eq!(winston.to_plain_string(), "-1500000000000");
 
         let winston = Money::<Winston>::try_from(-2000000000000i64).unwrap();
-        let ar: Money<AR> = winston.convert_with(&());
+        let ar: Money<AR> = winston.convert();
         assert_eq!(ar.to_plain_string(), "-2.000000000000");
     }
 
@@ -691,12 +677,12 @@ mod tests {
     fn test_large_number_conversion() {
         let large_ar =
             Money::<AR>::try_from(BigDecimal::from_str("999999.123456789012").unwrap()).unwrap();
-        let winston: Money<Winston> = large_ar.convert_with(&());
+        let winston: Money<Winston> = large_ar.convert();
         assert_eq!(winston.to_plain_string(), "999999123456789012");
 
         let large_winston =
             Money::<Winston>::try_from(BigDecimal::from_str("123456789012345").unwrap()).unwrap();
-        let ar: Money<AR> = large_winston.convert_with(&());
+        let ar: Money<AR> = large_winston.convert();
         assert_eq!(ar.to_plain_string(), "123.456789012345");
     }
 
@@ -704,7 +690,7 @@ mod tests {
     fn test_conversion_precision_handling() {
         // Test that conversions maintain proper precision for target currency
         let ar = Money::<AR>::try_from(BigDecimal::from_str("1.123456789012").unwrap()).unwrap();
-        let winston: Money<Winston> = ar.convert_with(&());
+        let winston: Money<Winston> = ar.convert();
         // Converting back should preserve the original value
         let ar_back: Money<AR> = winston.convert();
         assert_eq!(ar_back.to_plain_string(), "1.123456789012");
