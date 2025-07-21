@@ -1,4 +1,3 @@
-use crate::BigUint;
 use crate::base64::{Base64Stringify, UrlSafeNoPadding};
 use crate::serde::StringifySerdeStrategy;
 use crate::stringify::DefaultStringify;
@@ -28,14 +27,14 @@ where
 pub type TypedUuid<T> = TypedId<T, Uuid, StringifySerdeStrategy>;
 
 pub type Typed256B64Id<T> =
-    TypedId<T, [u8; 32], StringifySerdeStrategy, Base64Stringify<UrlSafeNoPadding, 64>>;
+    TypedId<T, [u8; 32], StringifySerdeStrategy, Base64Stringify<UrlSafeNoPadding, 43>>;
 
-pub type TypedBigUintB64Id<T> =
-    TypedId<T, BigUint, StringifySerdeStrategy, Base64Stringify<UrlSafeNoPadding, { 1024 * 10 }>>;
+pub type Typed384B64Id<T> =
+    TypedId<T, [u8; 48], StringifySerdeStrategy, Base64Stringify<UrlSafeNoPadding, 64>>;
 
 #[cfg(test)]
 mod tests {
-    use crate::id::{Typed256B64Id, TypedBigUintB64Id, TypedUuid};
+    use crate::id::{Typed256B64Id, Typed384B64Id, TypedUuid};
     use std::str::FromStr;
 
     #[test]
@@ -47,9 +46,9 @@ mod tests {
     }
 
     #[test]
-    fn test_id_biguint_b64_ok() {
-        let b64_enc = "l8lxft8zbGA39CDjvsCLFnxC97AnAAxmN0X3-pFPoUiqZ_8ipkygrGm16Y0HT9uILuPPxwbes8mGK5xcteUpaxYY58scXcPboyqryXjwUX-xPgMzUipOMleeVtrCnes_QxtVFCihYU2vaAqBYmzocF2xpwlzK7oeEv_CRVMjABtOfgwlVg8jfkfQvhRsOihUCVJiBDU49uuPe-V3KfB0-i3rlm44p5uQ-IxQMc1SyY_3HdvRelDZsKTxIzk3_nf7Tr0Q_4PX6608Ehm3hLmIz4G0tXzGV_pEVdbK5Bq_p7z5wEQUXV08Gv-WZwhtwxqpbbXIpJmTHQnz-Es6QzlEHYy7y2MPwhGQTw5P7s4DZ5r5jFjpLI0G46gifIEMuEpKFPmh1IimsluWEtvaLTj-FrPyFJvP6TDOzT-mRceUmqKFgTlTBuSeB_91JJ2MNpYgmh58JGKwPTVmsrZTIWr2HndJOZSxciZOSb9bNlw2mMUUMaFZNt4pH_vqB9dzV5kf0g-C80bRNd8gOIcEejnDA6SEcQV7a8v5eYPDshdkyMfxpYaAVwb1g-qQyC9n_nWZ8p85lPgW0cyxw-xFTdJItyv9n-2SMDshmtEtuYC2t3cBL0C9GcZTDuLHVXOG92kblSC3q5-lV3gjpZU6FidusfHihGAHs88hmpMHng78WSU";
-        let id = TypedBigUintB64Id::<()>::from_str(b64_enc).unwrap();
+    fn test_id_384_b64_ok() {
+        let b64_enc = "d5FBi46TVGVSSmjCmH1zGJ69I9XMEHL_VMEvQmYC7oBEQuVQ1mYNZvRN2gNknpQb";
+        let id = Typed384B64Id::<()>::from_str(b64_enc).unwrap();
         let str = id.to_string();
         assert_eq!(&str, b64_enc);
     }

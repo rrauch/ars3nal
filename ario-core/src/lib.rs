@@ -13,6 +13,8 @@ pub(crate) mod serde;
 mod stringify;
 pub mod typed;
 pub mod wallet;
+mod hex;
+mod valid;
 
 pub struct DriveKind;
 pub type DriveId = id::TypedUuid<DriveKind>;

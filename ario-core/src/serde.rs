@@ -11,35 +11,6 @@ use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
 use thiserror::Error;
 
-pub(crate) fn de_empty_string_as_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: for<'a> Deserialize<'a>,
-{
-    let s = String::deserialize(deserializer)?;
-    if s.is_empty() {
-        Ok(None)
-    } else {
-        T::deserialize(de::value::StringDeserializer::<D::Error>::new(s))
-            .map(Some)
-            .map_err(de::Error::custom)
-    }
-}
-
-pub(crate) fn ser_none_as_empty_string<S, T>(
-    value: &Option<T>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-    T: Serialize,
-{
-    match value {
-        Some(val) => val.serialize(serializer),
-        None => serializer.serialize_str(""),
-    }
-}
-
 pub trait FromBytes {
     type Error: Display;
     fn try_from_bytes(input: Bytes) -> Result<Self, Self::Error>
@@ -248,5 +219,80 @@ where
                 Base64Visitor::<T, I, Base64SerdeStrategy<V, MAX_LEN>>(PhantomData::default()),
             )?;
         Ok(Self::from_inner(inner))
+    }
+}
+
+pub(crate) mod empty_string_none {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+
+    pub(crate) fn deserialize<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: for<'a> Deserialize<'a>,
+    {
+        let s = <&str>::deserialize(deserializer)?;
+        if s.is_empty() {
+            Ok(None)
+        } else {
+            T::deserialize(de::value::StrDeserializer::<D::Error>::new(s))
+                .map(Some)
+                .map_err(de::Error::custom)
+        }
+    }
+
+    pub(crate) fn serialize<S, T>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        T: Serialize,
+    {
+        match value {
+            Some(val) => val.serialize(serializer),
+            None => serializer.serialize_str(""),
+        }
+    }
+}
+
+pub(crate) mod string_number {
+    use super::*;
+    use std::str::FromStr;
+
+    pub fn serialize<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: Display,
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+    where
+        T: FromStr,
+        T::Err: Display,
+        D: Deserializer<'de>,
+    {
+        let s = <&str>::deserialize(deserializer)?;
+        s.parse().map_err(de::Error::custom)
+    }
+}
+
+pub(crate) mod stringify {
+    use crate::stringify::Stringify;
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    pub fn serialize<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: Stringify<T>,
+        S: Serializer,
+    {
+        serializer.serialize_str(<T as Stringify<T>>::to_str(value).into().as_ref())
+    }
+
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+    where
+        T: Stringify<T>,
+        D: Deserializer<'de>,
+    {
+        let s = <&str>::deserialize(deserializer)?;
+        T::try_from_str(s).map_err(de::Error::custom)
     }
 }

@@ -283,6 +283,7 @@ impl<'de, C: Currency> Deserialize<'de> for Money<C> {
 pub trait CurrencyExt<C: Currency> {
     fn try_new(value: impl TryInto<BigDecimal>) -> Result<Money<C>, MoneyError>;
     fn from_str(value: impl AsRef<str>) -> Result<Money<C>, MoneyError>;
+    fn zero() -> Money<C>;
 }
 
 impl<C: Currency> CurrencyExt<C> for C {
@@ -292,6 +293,10 @@ impl<C: Currency> CurrencyExt<C> for C {
 
     fn from_str(value: impl AsRef<str>) -> Result<Money<C>, MoneyError> {
         Money::from_str(value.as_ref())
+    }
+
+    fn zero() -> Money<C> {
+        Money::zero()
     }
 }
 
