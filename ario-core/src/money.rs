@@ -1,6 +1,6 @@
 use crate::money::MoneyError::{ParseError, PrecisionError, RepresentationError};
 use crate::stringify::Stringify;
-use crate::typed::Typed;
+use crate::typed::{FromInner, Typed};
 use bigdecimal::{BigDecimal, One, ParseBigDecimalError, RoundingMode};
 use derive_where::derive_where;
 use serde::de::Visitor;
@@ -16,6 +16,12 @@ use thiserror::Error;
 
 #[allow(type_alias_bounds)]
 pub type TypedMoney<T, C: Currency> = Typed<T, Money<C>>;
+
+impl<T, C: Currency> TypedMoney<T, C> {
+    pub fn zero() -> Self {
+        Self::from_inner(Money::zero())
+    }
+}
 
 static BIG_ONE: LazyLock<BigDecimal> = LazyLock::new(|| BigDecimal::one());
 
