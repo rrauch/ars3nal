@@ -315,6 +315,27 @@ impl<S> Tx<S> {
             Self::V2(v2) => v2.id(),
         }
     }
+
+    pub fn tags(&self) -> &Vec<Tag> {
+        match self {
+            Self::V1(v1) => v1.tags(),
+            Self::V2(v2) => v2.tags(),
+        }
+    }
+
+    pub fn quantity(&self) -> Option<&Quantity> {
+        match self {
+            Self::V1(v1) => v1.quantity(),
+            Self::V2(v2) => v2.quantity(),
+        }
+    }
+
+    pub fn reward(&self) -> Option<&Reward> {
+        match self {
+            Self::V1(v1) => v1.reward(),
+            Self::V2(v2) => v2.reward(),
+        }
+    }
 }
 
 impl SignedTx {
@@ -343,6 +364,27 @@ impl UnsignedTx {
                 .sign(wallet)
                 .map_err(|(inner, e)| (inner.into(), e))?
                 .into()),
+        }
+    }
+
+    pub fn tags_mut(&mut self) -> &mut Vec<Tag> {
+        match self {
+            Self::V1(v1) => v1.tags_mut(),
+            Self::V2(v2) => v2.tags_mut(),
+        }
+    }
+
+    pub fn quantity_mut(&mut self) -> &mut Option<Quantity> {
+        match self {
+            Self::V1(v1) => v1.quantity_mut(),
+            Self::V2(v2) => v2.quantity_mut(),
+        }
+    }
+
+    pub fn reward_mut(&mut self) -> &mut Option<Reward> {
+        match self {
+            Self::V1(v1) => v1.reward_mut(),
+            Self::V2(v2) => v2.reward_mut(),
         }
     }
 }
@@ -389,11 +431,35 @@ impl<S, V> TxImpl<S, V> {
     pub fn id(&self) -> &TxId {
         &self.0.id
     }
+
+    pub fn tags(&self) -> &Vec<Tag> {
+        &self.0.tags
+    }
+
+    pub fn quantity(&self) -> Option<&Quantity> {
+        self.0.quantity.as_ref()
+    }
+
+    pub fn reward(&self) -> Option<&Reward> {
+        self.0.reward.as_ref()
+    }
 }
 
 impl<V> TxImpl<Unsigned, V> {
     pub fn set_id(&mut self, id: TxId) {
         self.0.id = id;
+    }
+
+    pub fn tags_mut(&mut self) -> &mut Vec<Tag> {
+        self.0.tags.as_mut()
+    }
+
+    pub fn quantity_mut(&mut self) -> &mut Option<Quantity> {
+        &mut self.0.quantity
+    }
+
+    pub fn reward_mut(&mut self) -> &mut Option<Reward> {
+        &mut self.0.reward
     }
 }
 
@@ -564,9 +630,26 @@ mod tests {
 
     #[test]
     fn tx_v2_mut_ok() -> anyhow::Result<()> {
-        let tx = SignedTx::try_from_json_slice(TX_V2)?
+        let mut tx = SignedTx::try_from_json_slice(TX_V2)?
             .try_make_mut()
             .unwrap();
+
+        tx.quantity_mut()
+            .replace(Quantity::from(Winston::from_str("100001")?));
+
+        assert_eq!(
+            tx.quantity().unwrap(),
+            &Quantity::from(Winston::from_str("100001")?),
+        );
+
+        tx.reward_mut()
+            .replace(Reward::from(Winston::from_str("20001")?));
+
+        assert_eq!(
+            tx.reward().unwrap(),
+            &Reward::from(Winston::from_str("20001")?),
+        );
+
         Ok(())
     }
 
