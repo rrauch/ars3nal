@@ -59,6 +59,22 @@ impl ConversionRate<'static, Winston, AR> for () {
     }
 }
 
+impl From<Money<Winston>> for Money<AR> {
+    fn from(value: Money<Winston>) -> Self {
+        value
+            .try_convert_impl(&WINSTON_AR_XE, true)
+            .expect("conversion from Winston to AR should never fail")
+    }
+}
+
+impl From<Money<AR>> for Money<Winston> {
+    fn from(value: Money<AR>) -> Self {
+        value
+            .try_convert_impl(&AR_WINSTON_XE, true)
+            .expect("conversion from AR to Winston should never fail")
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum MoneyError {
     #[error("Value has more decimal places ('{found}') than currency supports ('{supported}')")]
@@ -105,20 +121,32 @@ impl<C: Currency> Money<C> {
         self.0.to_plain_string()
     }
 
-    fn convert_impl<T: Currency>(self, rate: &BigDecimal) -> Money<T> {
+    fn try_convert_impl<T: Currency>(
+        self,
+        rate: &BigDecimal,
+        precise: bool,
+    ) -> Result<Money<T>, MoneyError> {
         if rate == BIG_ONE.deref() {
-            return Money(self.0, PhantomData);
+            return Ok(Money(self.0, PhantomData));
         }
-        Money::<T>::new_unchecked(
-            (self.0 * rate).with_scale_round(T::DECIMAL_POINTS as i64, RoundingMode::HalfEven),
-        )
+        if precise {
+            // only succeeds if there is no loss of precision
+            Money::<T>::try_from(self.0 * rate)
+        } else {
+            // imprecise mode allows rounding and never fails
+            Ok(Money::<T>::new_unchecked((self.0 * rate).with_scale_round(
+                T::DECIMAL_POINTS as i64,
+                RoundingMode::HalfEven,
+            )))
+        }
     }
 
     pub fn convert_with<'a, To: Currency, XE>(self, xe: &'a XE) -> Money<To>
     where
         XE: ConversionRate<'a, C, To>,
     {
-        self.convert_impl(xe.get())
+        self.try_convert_impl(xe.get(), false)
+            .expect("imprecise conversion should never fail")
     }
 
     pub fn convert<To: Currency>(self) -> Money<To>
@@ -175,6 +203,8 @@ impl<C: Currency> ConversionRate<'static, C, C> for () {
 }
 
 pub trait Convertible<From: Currency, To: Currency> {
+    // Converts a monetary amound from currency `From` into currency `To`.
+    // This conversion never fails but may lead to a loss of precision.
     fn convert(from: Money<From>) -> Money<To>;
 }
 
@@ -187,25 +217,25 @@ where
     }
 }
 
-impl<C: Currency, RHS: Currency> Add<Money<RHS>> for Money<C>
+impl<C: Currency, RHS> Add<RHS> for Money<C>
 where
-    (): Convertible<RHS, C>,
+    RHS: Into<Money<C>>,
 {
     type Output = Self;
 
-    fn add(self, rhs: Money<RHS>) -> Self::Output {
-        Self::new_unchecked(self.0 + rhs.convert().0)
+    fn add(self, rhs: RHS) -> Self::Output {
+        Self::new_unchecked(self.0 + rhs.into().0)
     }
 }
 
-impl<C: Currency, RHS: Currency> Sub<Money<RHS>> for Money<C>
+impl<C: Currency, RHS> Sub<RHS> for Money<C>
 where
-    (): Convertible<RHS, C>,
+    RHS: Into<Money<C>>,
 {
     type Output = Self;
 
-    fn sub(self, rhs: Money<RHS>) -> Self::Output {
-        Self::new_unchecked(self.0 - rhs.convert().0)
+    fn sub(self, rhs: RHS) -> Self::Output {
+        Self::new_unchecked(self.0 - rhs.into().0)
     }
 }
 
