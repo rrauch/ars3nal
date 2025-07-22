@@ -4,11 +4,14 @@ use crate::serde::{empty_string_none, string_number};
 use crate::stringify::Stringify;
 use crate::typed::FromInner;
 use crate::valid::Valid;
+use crate::wallet::Wallet;
 use crate::{Address, id};
+use derive_where::derive_where;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -144,27 +147,27 @@ pub enum TxDataError {
 // https://docs.arweave.org/developers/arweave-node-server/http-api#field-definitions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxData {
-    pub format: Format,
-    pub id: TxId,
-    pub last_tx: LastTx,
-    pub owner: String, // todo: rsa public key
-    pub tags: Vec<Tag>,
+    pub(crate) format: Format,
+    pub(crate) id: TxId,
+    pub(crate) last_tx: LastTx,
+    pub(crate) owner: String, // todo: rsa public key
+    pub(crate) tags: Vec<Tag>,
     #[serde(with = "empty_string_none")]
-    pub target: Option<Address<()>>,
+    pub(crate) target: Option<Address<()>>,
     #[serde(default)]
     #[serde(with = "empty_string_none")]
-    pub quantity: Option<Quantity>,
-    pub data_tree: Vec<String>, // todo
+    pub(crate) quantity: Option<Quantity>,
+    pub(crate) data_tree: Vec<String>, // todo
     #[serde(default)]
     #[serde(with = "empty_string_none")]
-    pub data_root: Option<String>, // todo: Merkle Root
+    pub(crate) data_root: Option<String>, // todo: Merkle Root
     #[serde(with = "string_number")]
-    pub data_size: u64,
+    pub(crate) data_size: u64,
     #[serde(with = "empty_string_none")]
-    pub data: Option<Payload>,
+    pub(crate) data: Option<Payload>,
     #[serde(with = "empty_string_none")]
-    pub reward: Option<Reward>,
-    pub signature: String, // todo: rsa signature
+    pub(crate) reward: Option<Reward>,
+    pub(crate) signature: String, // todo: rsa signature
 }
 
 impl TxData {
@@ -287,10 +290,156 @@ impl Reward {
     }
 }
 
+pub struct Signed;
+pub struct Unsigned;
+
+pub type V1Tx<S> = TxImpl<S, V1>;
+pub type V2Tx<S> = TxImpl<S, V2>;
+
+#[derive(Error, Debug)]
+pub enum TxError {
+    #[error(transparent)]
+    DataError(#[from] TxDataError),
+}
+
+#[derive_where(Debug, Clone)]
+pub enum Tx<S> {
+    V1(V1Tx<S>),
+    V2(V2Tx<S>),
+}
+
+impl<S> Tx<S> {
+    pub fn id(&self) -> &TxId {
+        match self {
+            Self::V1(v1) => v1.id(),
+            Self::V2(v2) => v2.id(),
+        }
+    }
+}
+
+impl SignedTx {
+    pub fn try_from_json_slice(bytes: &[u8]) -> Result<Self, TxError> {
+        let tx_data = TxData::try_from_json_slice(bytes)?;
+        // todo: verify signature here?
+        Ok(match tx_data.format {
+            Format::V1 => Self::V1(TxImpl::new(tx_data)),
+            Format::V2 => Self::V2(TxImpl::new(tx_data)),
+        })
+    }
+
+    pub fn try_make_mut(self) -> Result<UnsignedTx, (Self, EditError)> {
+        match self {
+            Self::V1(v1) => Err((v1.into(), EditError::V1Unsupported)),
+            Self::V2(v2) => Ok(v2.make_unsigned().into()),
+        }
+    }
+}
+
+impl UnsignedTx {
+    pub(crate) fn sign(self, wallet: &Wallet) -> Result<SignedTx, (Self, SigningError)> {
+        match self {
+            Self::V1(v1) => Err((v1.into(), SigningError::V1Unsupported)),
+            Self::V2(v2) => Ok(v2
+                .sign(wallet)
+                .map_err(|(inner, e)| (inner.into(), e))?
+                .into()),
+        }
+    }
+}
+
+impl<S> From<TxImpl<S, V1>> for Tx<S> {
+    fn from(value: TxImpl<S, V1>) -> Self {
+        Self::V1(value)
+    }
+}
+
+impl<S> From<TxImpl<S, V2>> for Tx<S> {
+    fn from(value: TxImpl<S, V2>) -> Self {
+        Self::V2(value)
+    }
+}
+
+pub type SignedTx = Tx<Signed>;
+pub type UnsignedTx = Tx<Unsigned>;
+
+pub struct V1;
+pub struct V2;
+
+#[derive(Error, Debug)]
+pub enum SigningError {
+    #[error("Signing V1 type transactions is not supported")]
+    V1Unsupported,
+}
+
+#[derive(Error, Debug)]
+pub enum EditError {
+    #[error("Editing V1 type transactions is not supported")]
+    V1Unsupported,
+}
+
+#[derive_where(Clone, Debug)]
+#[repr(transparent)]
+pub struct TxImpl<S, V>(TxData, PhantomData<(S, V)>);
+
+impl<S, V> TxImpl<S, V> {
+    fn new(inner: TxData) -> Self {
+        Self(inner, PhantomData)
+    }
+
+    pub fn id(&self) -> &TxId {
+        &self.0.id
+    }
+}
+
+impl<V> TxImpl<Unsigned, V> {
+    pub fn set_id(&mut self, id: TxId) {
+        self.0.id = id;
+    }
+}
+
+impl<S> TxImpl<S, V1> {
+    pub fn last_tx(&self) -> &TxId {
+        if let LastTx::V1(tx_id) = &self.0.last_tx {
+            tx_id
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+impl<S> TxImpl<S, V2> {
+    pub fn last_tx(&self) -> &TxAnchor {
+        if let LastTx::V2(tx_anchor) = &self.0.last_tx {
+            tx_anchor
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+impl TxImpl<Unsigned, V2> {
+    fn sign(self, _wallet: &Wallet) -> Result<TxImpl<Signed, V2>, (Self, SigningError)> {
+        // tx signing happens here
+        todo!()
+    }
+
+    pub fn set_last_tx(&mut self, anchor: TxAnchor) {
+        self.0.last_tx = LastTx::V2(anchor);
+    }
+}
+
+impl TxImpl<Signed, V2> {
+    fn make_unsigned(self) -> TxImpl<Unsigned, V2> {
+        let mut data = self.0;
+        data.signature = "".to_string();
+        TxImpl(data, PhantomData)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::money::{CurrencyExt, Winston};
-    use crate::tx::{Format, Quantity, Reward, TxData, ZERO_QUANTITY};
+    use crate::tx::{Format, Quantity, Reward, SignedTx, TxData, ZERO_QUANTITY};
     use std::ops::Deref;
 
     static TX_V1: &'static [u8] = include_bytes!("../testdata/tx_v1.json");
@@ -389,6 +538,44 @@ mod tests {
         assert_eq!(
             tx_data.reward.as_ref(),
             Some(&Reward::from(Winston::from_str("6727794")?))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tx_v1_ok() -> anyhow::Result<()> {
+        let tx = SignedTx::try_from_json_slice(TX_V1)?;
+        assert_eq!(
+            tx.id().to_string(),
+            "BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tx_v2_ok() -> anyhow::Result<()> {
+        let tx = SignedTx::try_from_json_slice(TX_V2)?;
+        assert_eq!(
+            tx.id().to_string(),
+            "bXGqzNQNmHTeL54cUQ6wPo-MO0thLP44FeAoM93kEwk"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tx_v2_mut_ok() -> anyhow::Result<()> {
+        let tx = SignedTx::try_from_json_slice(TX_V2)?
+            .try_make_mut()
+            .unwrap();
+        Ok(())
+    }
+
+    #[test]
+    fn tx_v2_mut_err() -> anyhow::Result<()> {
+        assert!(
+            SignedTx::try_from_json_slice(TX_V1)?
+                .try_make_mut()
+                .is_err()
         );
         Ok(())
     }

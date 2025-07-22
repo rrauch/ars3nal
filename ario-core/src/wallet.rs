@@ -1,5 +1,6 @@
 use crate::id::Typed256B64Id;
 use crate::keys::{JwkError, RsaPrivateKeyComponents, TypedSecretKey};
+use crate::tx::{SignedTx, SigningError, UnsignedTx};
 use crate::{Address, RsaError};
 use thiserror::Error;
 use zeroize::Zeroize;
@@ -25,6 +26,10 @@ impl Wallet {
         let res = RsaPrivateKeyComponents::try_from_jwk(bytes);
         bytes.zeroize();
         Ok(Self::try_from_components(res?)?)
+    }
+
+    pub fn sign_tx(&self, tx: UnsignedTx) -> Result<SignedTx, (UnsignedTx, SigningError)> {
+        tx.sign(&self)
     }
 }
 
