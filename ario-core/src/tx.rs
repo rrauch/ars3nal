@@ -5,8 +5,8 @@ use crate::serde::{empty_string_none, string_number};
 use crate::stringify::Stringify;
 use crate::typed::FromInner;
 use crate::valid::Valid;
-use crate::wallet::Wallet;
-use crate::{Address, hash, id, signature};
+use crate::wallet::{Wallet, WalletAddress};
+use crate::{hash, id, signature};
 use derive_where::derive_where;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -125,11 +125,10 @@ pub enum Format {
     V2 = 2,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-// todo: Vec<u8>? or String?
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tag {
-    pub name: String,
-    pub value: String,
+    pub name: TagName,
+    pub value: TagValue,
 }
 
 #[derive(Error, Debug)]
@@ -168,7 +167,7 @@ pub(crate) struct TxData {
     owner: String, // todo: rsa public key
     tags: Vec<Tag>,
     #[serde(with = "empty_string_none")]
-    target: Option<Address<()>>,
+    target: Option<WalletAddress>,
     #[serde(default)]
     #[serde(with = "empty_string_none")]
     quantity: Option<Quantity>,
@@ -285,6 +284,18 @@ impl Valid for TxData {
 
         Ok(())
     }
+}
+
+pub struct TagNameKind;
+pub type TagName = TypedBlob<TagNameKind, 2048>;
+impl BlobName for TagNameKind {
+    const NAME: &'static str = "tx_tag_name";
+}
+
+pub struct TagValueKind;
+pub type TagValue = TypedBlob<TagValueKind, 2048>;
+impl BlobName for TagValueKind {
+    const NAME: &'static str = "tx_tag_value";
 }
 
 pub type EmbeddedData = TypedBlob<TxKind, MAX_TX_DATA_LEN>;
@@ -597,6 +608,57 @@ mod tests {
         assert!(!tx_data.is_transfer());
         assert!(tx_data.has_data());
         assert!(tx_data.has_external_payload());
+
+        assert_eq!(tx_data.tags.len(), 6);
+        assert_eq!(
+            tx_data.tags.get(0).unwrap().name.as_ref(),
+            "App-Name".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(0).unwrap().value.as_ref(),
+            "trackmycontainer.io".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(1).unwrap().name.as_ref(),
+            "Application".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(1).unwrap().value.as_ref(),
+            "Traxa.io".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(2).unwrap().name.as_ref(),
+            "Content-Type".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(2).unwrap().value.as_ref(),
+            "image/jpeg".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(3).unwrap().name.as_ref(),
+            "Modified".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(3).unwrap().value.as_ref(),
+            "1753107957".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(4).unwrap().name.as_ref(),
+            "Shipping-Container-GPS".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(4).unwrap().value.as_ref(),
+            "(40.7549755075, -112.0129563668)".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(5).unwrap().name.as_ref(),
+            "Shipping-Container-IDs".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(5).unwrap().value.as_ref(),
+            "SEGU4454314".as_bytes()
+        );
+
         //todo: signature
         Ok(())
     }
