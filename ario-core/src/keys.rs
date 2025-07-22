@@ -1,4 +1,5 @@
 use crate::base64::UrlSafeNoPadding;
+use crate::hash::{HasherExt, Sha256Hasher};
 use crate::serde::Base64SerdeStrategy;
 use crate::typed::{FromInner, Typed};
 use crate::{Address, BigUint, RsaError};
@@ -6,7 +7,6 @@ use derive_where::derive_where;
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::marker::PhantomData;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -147,6 +147,5 @@ impl<T> TypedPublicKey<T> {
 
 fn rsa_public_key_to_address<T>(pk: &RsaPublicKey) -> Address<T> {
     // sha256 hash from bytes representing a big-endian encoded modulus
-    let hash: [u8; 32] = Sha256::digest(pk.n_bytes()).into();
-    Address::from_inner(hash)
+    Address::from_inner(Sha256Hasher::digest(pk.n_bytes()))
 }

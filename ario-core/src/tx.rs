@@ -1,11 +1,12 @@
 use crate::blob::{BlobName, TypedBlob};
+use crate::hash::{HasherExt, Sha256Hasher};
 use crate::money::{Money, TypedMoney, Winston};
 use crate::serde::{empty_string_none, string_number};
 use crate::stringify::Stringify;
 use crate::typed::FromInner;
 use crate::valid::Valid;
 use crate::wallet::Wallet;
-use crate::{Address, id};
+use crate::{Address, hash, id, signature};
 use derive_where::derive_where;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -23,12 +24,24 @@ static ZERO_QUANTITY: LazyLock<Quantity> = LazyLock::new(|| Quantity::zero());
 static ZERO_REWARD: LazyLock<Reward> = LazyLock::new(|| Reward::zero());
 
 pub struct TxKind;
-pub type TxId = id::Typed256B64Id<TxKind>;
+
+pub type TxId = hash::TypedDigest<TxSignature, Sha256Hasher, 32>;
+pub type TxSignature = signature::TypedSignature<TxKind, (), 512>;
+
+impl TxSignature {
+    fn empty() -> Self {
+        Self::from_inner(signature::Signature::empty())
+    }
+
+    pub fn digest(&self) -> TxId {
+        TxId::from_inner(Sha256Hasher::digest(self.as_slice()))
+    }
+}
 
 pub struct TxAnchorKind;
 pub type TxAnchor = id::Typed384B64Id<TxAnchorKind>;
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LastTx {
     V1(TxId),
     V2(TxAnchor),
@@ -141,33 +154,35 @@ pub enum TxDataError {
     MissingQuantity,
     #[error("target is missing but mandatory for this tx")]
     MissingTarget,
+    #[error("tx id does not match the signature")]
+    IdSignatureMismatch,
 }
 
 // This follows the definition found here:
 // https://docs.arweave.org/developers/arweave-node-server/http-api#field-definitions
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TxData {
-    pub(crate) format: Format,
-    pub(crate) id: TxId,
-    pub(crate) last_tx: LastTx,
-    pub(crate) owner: String, // todo: rsa public key
-    pub(crate) tags: Vec<Tag>,
+pub(crate) struct TxData {
+    format: Format,
+    id: TxId,
+    last_tx: LastTx,
+    owner: String, // todo: rsa public key
+    tags: Vec<Tag>,
     #[serde(with = "empty_string_none")]
-    pub(crate) target: Option<Address<()>>,
+    target: Option<Address<()>>,
     #[serde(default)]
     #[serde(with = "empty_string_none")]
-    pub(crate) quantity: Option<Quantity>,
-    pub(crate) data_tree: Vec<String>, // todo
+    quantity: Option<Quantity>,
+    data_tree: Vec<String>, // todo
     #[serde(default)]
     #[serde(with = "empty_string_none")]
-    pub(crate) data_root: Option<String>, // todo: Merkle Root
+    data_root: Option<String>, // todo: Merkle Root
     #[serde(with = "string_number")]
-    pub(crate) data_size: u64,
+    data_size: u64,
     #[serde(with = "empty_string_none")]
-    pub(crate) data: Option<Payload>,
+    data: Option<EmbeddedData>,
     #[serde(with = "empty_string_none")]
-    pub(crate) reward: Option<Reward>,
-    pub(crate) signature: String, // todo: rsa signature
+    reward: Option<Reward>,
+    signature: TxSignature,
 }
 
 impl TxData {
@@ -263,13 +278,18 @@ impl Valid for TxData {
             }
         }
 
+        let expected_tx_id = self.signature.digest();
+        if expected_tx_id != self.id {
+            return Err(TxDataError::IdSignatureMismatch);
+        }
+
         Ok(())
     }
 }
 
-pub type Payload = TypedBlob<TxKind, MAX_TX_DATA_LEN>;
+pub type EmbeddedData = TypedBlob<TxKind, MAX_TX_DATA_LEN>;
 impl BlobName for TxKind {
-    const NAME: &'static str = "tx_payload";
+    const NAME: &'static str = "tx_embedded_data";
 }
 
 pub struct TxQuantityKind;
@@ -300,6 +320,8 @@ pub type V2Tx<S> = TxImpl<S, V2>;
 pub enum TxError {
     #[error(transparent)]
     DataError(#[from] TxDataError),
+    #[error(transparent)]
+    SigningError(#[from] SigningError),
 }
 
 #[derive_where(Debug, Clone)]
@@ -446,10 +468,6 @@ impl<S, V> TxImpl<S, V> {
 }
 
 impl<V> TxImpl<Unsigned, V> {
-    pub fn set_id(&mut self, id: TxId) {
-        self.0.id = id;
-    }
-
     pub fn tags_mut(&mut self) -> &mut Vec<Tag> {
         self.0.tags.as_mut()
     }
@@ -497,7 +515,7 @@ impl TxImpl<Unsigned, V2> {
 impl TxImpl<Signed, V2> {
     fn make_unsigned(self) -> TxImpl<Unsigned, V2> {
         let mut data = self.0;
-        data.signature = "".to_string();
+        data.signature = TxSignature::empty();
         TxImpl(data, PhantomData)
     }
 }
@@ -563,6 +581,10 @@ mod tests {
             "OK_m2Tk41N94KZLl5WQSx_-iNWbvcp8EMfrYsel_QeQ"
         );*/
         //assert_eq!(&tx_data.tags, &vec![]); //todo: tags
+        assert_eq!(
+            tx_data.signature.to_string(),
+            "mJnhtXrtXMklRiPigOty7Q06ce8E9kdsRH4ww4IVVJ_YkYYfFGQXWoU-WZRsixvsEwjThUd6S8lvGetbzVszaGTplM7qxC4leUIn8gwj7cinvp3ABXzxsb9jPAwR5ytkzHuxJuSkwyUkVNXudamh5hG6d1OdXcBumcy9Sv66s29zCA7D6ptB1_d2DYxqIlXUpGH3EwVXNAoZXnmOicrlFKUPmZ-jOUXhNYmrHi3SwuJXVCAcDc7GXdN6Dbrt11iVvgp6Ag0h5fhCOZcUR2bhO0JK9QCP-xMic_97EY6JnGTp6GhOwZloIItkqEV9ZgPS787EvzOZOBH6Zk-bxk8WuWHP-0dU-LlA8DCAaTXZya01XBNA00mb5PKhaYk1ItH39ftcPXFVObrgxEU7SNdSdJnxy-eAKGIZYrTcN4mIuaRrC-CQyYSFPOee1MKlde4oKaE8NBtZsBvf3au9lnA-IYtQoHIhw5fo5kaLksp79ahpCC4Gc6ijrXeTvlgJnYaQ8q237YCeSwIUKHWMXHEAgjrPNaWyIVpn3mdbjbSRbpVKxxt7xNSkw4yz-8RPqI8bMMGpwS9CJKnRkcIeuAH6id2rgW57wPPMM6iHx2KxYF9AZx-4B4m7cO0TwUsaIL5DFYVdXYZXYC3fh3yG9uMSoH24oNgVlzuZG-NyyTT13oQ"
+        );
         assert!(tx_data.target.is_none());
         assert_eq!(tx_data.quantity.as_ref().unwrap(), ZERO_QUANTITY.deref(),);
         //todo: data root

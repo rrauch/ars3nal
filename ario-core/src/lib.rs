@@ -1,3 +1,4 @@
+use crate::hash::Sha256Hasher;
 pub use rsa::BoxedUint as BigUint;
 pub use rsa::Error as RsaError;
 use std::marker::PhantomData;
@@ -7,14 +8,16 @@ pub mod tx;
 
 mod base64;
 pub mod blob;
+pub mod hash;
+mod hex;
 pub mod keys;
 pub mod money;
 pub(crate) mod serde;
+pub mod signature;
 mod stringify;
 pub mod typed;
-pub mod wallet;
-mod hex;
 mod valid;
+pub mod wallet;
 
 pub struct DriveKind;
 pub type DriveId = id::TypedUuid<DriveKind>;
@@ -26,4 +29,4 @@ pub struct FileKind;
 pub type FileId = id::TypedUuid<FileKind>;
 
 pub struct AddressKind<T>(PhantomData<T>);
-pub type Address<T> = id::Typed256B64Id<AddressKind<T>>;
+pub type Address<T> = hash::TypedDigest<AddressKind<T>, Sha256Hasher, 32>;

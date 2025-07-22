@@ -1,4 +1,3 @@
-use crate::id::Typed256B64Id;
 use crate::keys::{JwkError, RsaPrivateKeyComponents, TypedSecretKey};
 use crate::tx::{SignedTx, SigningError, UnsignedTx};
 use crate::{Address, RsaError};
@@ -34,7 +33,6 @@ impl Wallet {
 }
 
 pub type WalletAddress = Address<WalletKind>;
-pub type WalletId = Typed256B64Id<WalletKind>;
 
 #[cfg(test)]
 mod tests {
