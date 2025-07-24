@@ -29,4 +29,4 @@ pub struct FileKind;
 pub type FileId = id::TypedUuid<FileKind>;
 
 pub struct AddressKind<T>(PhantomData<T>);
-pub type Address<T> = hash::TypedDigest<AddressKind<T>, Sha256Hasher, 32>;
+pub type Address<T> = hash::TypedDigest<AddressKind<T>, Sha256Hasher>;

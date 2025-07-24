@@ -1,12 +1,15 @@
 use crate::blob::{BlobName, TypedBlob};
-use crate::hash::{HasherExt, Sha256Hasher};
+use crate::hash::{
+    DeepHashable, Digest, Hasher, HasherExt, Sha256Hasher, Sha384Hasher, TypedDigest,
+};
+use crate::id;
 use crate::money::{Money, TypedMoney, Winston};
 use crate::serde::{empty_string_none, string_number};
+use crate::signature::{RsaPss, Signature, TypedSignature};
 use crate::stringify::Stringify;
 use crate::typed::FromInner;
 use crate::valid::Valid;
-use crate::wallet::{Wallet, WalletAddress};
-use crate::{hash, id, signature};
+use crate::wallet::{Wallet, WalletAddress, WalletKind, WalletPKey};
 use derive_where::derive_where;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -25,12 +28,13 @@ static ZERO_REWARD: LazyLock<Reward> = LazyLock::new(|| Reward::zero());
 
 pub struct TxKind;
 
-pub type TxId = hash::TypedDigest<TxSignature, Sha256Hasher, 32>;
-pub type TxSignature = signature::TypedSignature<TxKind, (), 512>;
+pub type TxId = TypedDigest<TxSignature, Sha256Hasher>;
+pub type TxSignature = TypedSignature<TxHash, WalletKind, RsaPss>;
+pub type TxHash = TypedDigest<TxKind, Sha384Hasher>;
 
 impl TxSignature {
     fn empty() -> Self {
-        Self::from_inner(signature::Signature::empty())
+        Self::from_inner(Signature::empty())
     }
 
     pub fn digest(&self) -> TxId {
@@ -45,6 +49,15 @@ pub type TxAnchor = id::Typed384B64Id<TxAnchorKind>;
 pub enum LastTx {
     V1(TxId),
     V2(TxAnchor),
+}
+
+impl DeepHashable for LastTx {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        match self {
+            Self::V1(tx_id) => tx_id.deep_hash(),
+            Self::V2(tx_anchor) => tx_anchor.deep_hash(),
+        }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -125,10 +138,25 @@ pub enum Format {
     V2 = 2,
 }
 
+impl DeepHashable for Format {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        Self::blob(match self {
+            Self::V1 => b"1",
+            Self::V2 => b"2",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tag {
     pub name: TagName,
     pub value: TagValue,
+}
+
+impl DeepHashable for Tag {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        Self::list(vec![self.name.deep_hash(), self.value.deep_hash()])
+    }
 }
 
 #[derive(Error, Debug)]
@@ -155,6 +183,8 @@ pub enum TxDataError {
     MissingTarget,
     #[error("tx id does not match the signature")]
     IdSignatureMismatch,
+    #[error("tx signature not valid")]
+    SignatureError,
 }
 
 // This follows the definition found here:
@@ -164,7 +194,7 @@ pub(crate) struct TxData {
     format: Format,
     id: TxId,
     last_tx: LastTx,
-    owner: String, // todo: rsa public key
+    owner: WalletPKey,
     tags: Vec<Tag>,
     #[serde(with = "empty_string_none")]
     target: Option<WalletAddress>,
@@ -186,9 +216,21 @@ pub(crate) struct TxData {
 
 impl TxData {
     pub(crate) fn try_from_json_slice(bytes: &[u8]) -> Result<Self, TxDataError> {
-        let tx_data: TxData = serde_json::from_slice(bytes)?;
+        let tx_data = Self::try_from_json_slice_unvalidated(bytes)?;
         tx_data.validate()?;
         Ok(tx_data)
+    }
+
+    fn try_from_json_slice_unvalidated(bytes: &[u8]) -> Result<Self, TxDataError> {
+        let tx_data: TxData = serde_json::from_slice(bytes)?;
+        Ok(tx_data)
+    }
+
+    pub(crate) fn verify_signature(&self, pkey: &WalletPKey) -> Result<(), TxDataError> {
+        let digest = TxHash::from_inner(self.deep_hash());
+        Ok(pkey
+            .verify_signature(digest.as_slice(), &self.signature)
+            .map_err(|_e| TxDataError::SignatureError)?)
     }
 
     pub fn is_transfer(&self) -> bool {
@@ -225,6 +267,51 @@ impl TxData {
                     false
                 }
             }
+        }
+    }
+}
+
+impl DeepHashable for TxData {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        match self.format {
+            Format::V1 => {
+                /*self.owner.feed_stringified(hasher);
+                if let Some(target) = &self.target {
+                    target.feed_stringified(hasher);
+                } else {
+                    hasher.update(b"");
+                }
+                if let Some(data) = &self.data {
+                    let b64 = Base64Stringify::<UrlSafeNoPadding>::to_str(data.deref());
+                    hasher.update(b64.into().as_bytes());
+                    //data.feed(b64.into().as_bytes());
+                } else {
+                    hasher.update(b"");
+                }
+                if let Some(quantity) = &self.quantity {
+                    quantity.feed_stringified(hasher);
+                } else {
+                    hasher.update(b"");
+                }
+                if let Some(reward) = &self.reward {
+                    reward.feed_stringified(hasher);
+                } else {
+                    hasher.update(b"");
+                }
+                self.last_tx.feed_stringified(hasher);*/
+                todo!()
+            }
+            Format::V2 => Self::list([
+                self.format.deep_hash(),
+                self.owner.deep_hash(),
+                self.target.deep_hash(),
+                self.quantity.deep_hash(),
+                self.reward.deep_hash(),
+                self.last_tx.deep_hash(),
+                self.tags.deep_hash(),
+                self.data_size.to_string().deep_hash(),
+                self.data_root.deep_hash(),
+            ]),
         }
     }
 }
@@ -281,6 +368,8 @@ impl Valid for TxData {
         if expected_tx_id != self.id {
             return Err(TxDataError::IdSignatureMismatch);
         }
+
+        //self.verify_signature(&self.owner)?;
 
         Ok(())
     }
@@ -374,7 +463,6 @@ impl<S> Tx<S> {
 impl SignedTx {
     pub fn try_from_json_slice(bytes: &[u8]) -> Result<Self, TxError> {
         let tx_data = TxData::try_from_json_slice(bytes)?;
-        // todo: verify signature here?
         Ok(match tx_data.format {
             Format::V1 => Self::V1(TxImpl::new(tx_data)),
             Format::V2 => Self::V2(TxImpl::new(tx_data)),
@@ -533,6 +621,7 @@ impl TxImpl<Signed, V2> {
 
 #[cfg(test)]
 mod tests {
+    use crate::hash::{DeepHashable, Sha384Hasher};
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::{Format, Quantity, Reward, SignedTx, TxData, ZERO_QUANTITY};
     use std::ops::Deref;
@@ -540,6 +629,7 @@ mod tests {
     static TX_V1: &'static [u8] = include_bytes!("../testdata/tx_v1.json");
     static TX_V2: &'static [u8] = include_bytes!("../testdata/tx_v2.json");
     static TX_V2_2: &'static [u8] = include_bytes!("../testdata/tx_v2_2.json");
+    static TX_V2_3: &'static [u8] = include_bytes!("../testdata/tx_v2_3.json");
 
     #[test]
     fn tx_data_ok_v1() -> anyhow::Result<()> {
@@ -553,10 +643,10 @@ mod tests {
             tx_data.last_tx.to_string(),
             "jUcuEDZQy2fC6T3fHnGfYsw0D0Zl4NfuaXfwBOLiQtA"
         );
-        /*assert_eq!(
-            &tx_data.owner,
-            "_qa4arkdjK2X9SjechexnWzTtbOKcPkBPhrDDej6lI8"
-        );*/
+        assert_eq!(
+            tx_data.owner.to_string(),
+            "posmEh5k2_h7fgj-0JwB2l2AU72u-UizJOA2m8gyYYcVjh_6N3A3DhwbLmnbIWjVWmsidgQZDDibiJhhyHsy28ARxrt5BJ3OCa1VRAk2ffhbaUaGUoIkVt6G8mnnTScN9JNPS7UYEqG_L8J48c2tQNsydbon2ImKIwCYmnMHKcpyEgXcgLDGhtGhIKtkuI-QOAu-TMqVjn5EaWsfJTW5J-ty8mswAMSxepgsUbUB3GXZfCyOAK0EGjrClZ1MLvyc8ANGQfLPjwTipMcUtX47Udy8i4C-c-vLC9oB_z5ZCDCat-5wGh2OA-lyghro2SpkxX0e-D-nbi91Pp9LORwDZIRQ5RCMDvtQx1-QD2adxn_P2zDN0hk5IWXoCnHyeoj-IdNIyCXNkDzT2A184CxjReE5XOUF7UFeOmvVwbUTMfnNBOSWeRz3U_e3MPNlc2JTIprRLC8IegyfS6NdCr90lYnuviEr0g75NE6-muJdHAd9gu2QZ1MpkX9OnsbtvCvvFje-K_p_4AR9l43CLemfdSZeHHMIzdPwKe75SFMbsuklsyc-ieq-OHrJCeL0WrkLT4Gf6rpGVkS8MjORuMOBRFrHRE7XKswzhwmV2SuzeU6ojtPNP87aNdiUGHtYCIyt7cRN5bRbrVjdCAXj2NnuWMzM6J6dme4e2R8gqNpsEok"
+        );
         assert_eq!(&tx_data.tags, &vec![]);
         assert!(tx_data.target.is_none());
         assert_eq!(tx_data.quantity.as_ref().unwrap(), ZERO_QUANTITY.deref(),);
@@ -587,11 +677,10 @@ mod tests {
             tx_data.last_tx.to_string(),
             "gVhey9KN6Fjc3nZbSOqLPRyDjjw6O5-sLSWPLZ_S7LoX5XOrFRja8A_wuj22OpHj"
         );
-        /*assert_eq!(
-            &tx_data.owner,
-            "OK_m2Tk41N94KZLl5WQSx_-iNWbvcp8EMfrYsel_QeQ"
-        );*/
-        //assert_eq!(&tx_data.tags, &vec![]); //todo: tags
+        assert_eq!(
+            tx_data.owner.to_string(),
+            "vzDBBpa9EsQR-6un6K9hgJuCJ7wtuZjuCmGEP6bHdrOln2gYkokWNgXSu35CThS68VtlwceUxOxNLM8VjsS-by7SSq0M0GzcCEAGUjEHXB1Ni32srWQKY-uJNRgfGMTS9Xs2RGIlmZpMR2PHl3EsLTuWAYjKzl3tv0YxIdHxm3hmlWsmhqIiNCoIfEQ_chxK3nL5vdfgNkV1zhdfH-yssTY3hXNa_lpCDQLoThM1xUNrzC7DKB6fvGS52REMgHg-QAlWIvXyGsZH5qRf_Ib_lOHn2v9Wjoh7QKPpMe7VYFOQXsfzFsAAjHQIm9SmuOrN_YhK9FpsjwVo1mKEFgpN52t5yGr5Ogp2CpmCfqn0i4hmaSwHB8XL86bGdZpbWbx_TRUf8xRgQjZD7zr5EAgWc07AFVsIdd_zLOgD9cS6RQ4bGaao2it-PTF7_J2rH1vXHJrJ7_SsUy9VF_Nj0LA0PuMPPgz6QcokKboxDeRPTVkj3fCIrx1LloAKGC8LcW9-cUUheG5ZSmzxG7r5pTotXAsyM6tfT9zMLvCexrdUKuOrUPJIvAhR3q9ntx9wefCz_1f2NEHlyZHUbx2l_r8UGFQjgjB5F9wjo5ho54Q8Iqk_JDSphSOJQRO7YezJpi6UDdhfaPHQpsCRxOMpKHQAVvetMc5ADDL7hzfCPYTAMtU"
+        );
         assert_eq!(
             tx_data.signature.to_string(),
             "mJnhtXrtXMklRiPigOty7Q06ce8E9kdsRH4ww4IVVJ_YkYYfFGQXWoU-WZRsixvsEwjThUd6S8lvGetbzVszaGTplM7qxC4leUIn8gwj7cinvp3ABXzxsb9jPAwR5ytkzHuxJuSkwyUkVNXudamh5hG6d1OdXcBumcy9Sv66s29zCA7D6ptB1_d2DYxqIlXUpGH3EwVXNAoZXnmOicrlFKUPmZ-jOUXhNYmrHi3SwuJXVCAcDc7GXdN6Dbrt11iVvgp6Ag0h5fhCOZcUR2bhO0JK9QCP-xMic_97EY6JnGTp6GhOwZloIItkqEV9ZgPS787EvzOZOBH6Zk-bxk8WuWHP-0dU-LlA8DCAaTXZya01XBNA00mb5PKhaYk1ItH39ftcPXFVObrgxEU7SNdSdJnxy-eAKGIZYrTcN4mIuaRrC-CQyYSFPOee1MKlde4oKaE8NBtZsBvf3au9lnA-IYtQoHIhw5fo5kaLksp79ahpCC4Gc6ijrXeTvlgJnYaQ8q237YCeSwIUKHWMXHEAgjrPNaWyIVpn3mdbjbSRbpVKxxt7xNSkw4yz-8RPqI8bMMGpwS9CJKnRkcIeuAH6id2rgW57wPPMM6iHx2KxYF9AZx-4B4m7cO0TwUsaIL5DFYVdXYZXYC3fh3yG9uMSoH24oNgVlzuZG-NyyTT13oQ"
@@ -676,6 +765,10 @@ mod tests {
             "mxi51DabflJu7YNcJSIm54cWjXDu69MAknQFuujhzDp7lEI7MT5zCufHlyhpq5lm"
         );
         assert_eq!(
+            tx_data.owner.to_string(),
+            "sucQ9eqnKFLIGCMi2n6b0hOVf1oL2JegiAyfPRRlTmZKvbQAZT8PELVimfdX9nVxUo7nTEXc9mPhtBJc_g4xTVKXrpe5nEYR2MMZcGIqo4rZb6ZJyAOSws-UclOKLgBP9jWUo04OOMS4_oe-gJ8ZvtKNCnpbgW11qWG7kLGb9kRTNGd-H3O5i6Cu3bCNFFNstdqAZ8yWHNXLiGU2uayWSSVp_mLNRQ9fb84GdXEJwzPVBNJgq9UgL4wcs8EvEQzIpSWF55jG1ld3Yqo5rSeReKnTDqxRqTPziYU49GvCiQA6jzzt42_-GriRU7StkBoQ1_NXQNPFcOPLCGXRVK6hrJLDYM4Pt6p_re-J68MbCJ5TYB7W0E9CpxYv1R2Y7ZsMFdlfRR52ZDuljd1-p6GLoWAXEner4cxEEVYZHF_Okq1tSFT0aVix1y646uAFObuaaSJn5xncdi-B8Xx3DUUJZ6GxSjoW-8_-68QdC0g4TzgEjY1AT-gS-V1KGm5Pi5Lk1k7xVcIcW8HF-m6DBDXoVK4WSJSRRReWeRRfmDCHQ_5wina5SVxmU1eqellOT1XIbCpI8L5BSm9RLTgeMKFbzVvuXYfNuUfQfn446VcP2zOXBSmR5zcHYkFsa18eHXlWJcOyFDu6cZwZA77LKGYoFkago-d9S5eBRGOYrV-kwhU",
+        );
+        assert_eq!(
             tx_data.quantity.as_ref(),
             Some(&Quantity::from(Winston::from_str("2199990000000000")?))
         );
@@ -738,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn tx_v2_mut_err() -> anyhow::Result<()> {
+    fn tx_v1_mut_err() -> anyhow::Result<()> {
         assert!(
             SignedTx::try_from_json_slice(TX_V1)?
                 .try_make_mut()
@@ -746,4 +839,20 @@ mod tests {
         );
         Ok(())
     }
+
+    /*#[test]
+    fn tx_hash_ok() -> anyhow::Result<()> {
+        let tx_data = TxData::try_from_json_slice_unvalidated(TX_V2_3)?;
+        let deep_digest = tx_data.deep_hash::<Sha384Hasher>();
+        let deep_digest = deep_digest.as_slice();
+
+        let expected: [u8; 48] = [
+            74, 15, 74, 255, 248, 205, 47, 229, 107, 195, 69, 76, 215, 249, 34, 186, 197, 31, 178,
+            163, 72, 54, 78, 179, 19, 178, 1, 132, 183, 231, 131, 213, 146, 203, 6, 99, 106, 231,
+            215, 199, 181, 171, 52, 255, 205, 55, 203, 117,
+        ];
+
+        assert_eq!(deep_digest, &expected);
+        Ok(())
+    }*/
 }

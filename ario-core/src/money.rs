@@ -1,3 +1,4 @@
+use crate::hash::{DeepHashable, Digest, Hasher};
 use crate::money::MoneyError::{ParseError, PrecisionError, RepresentationError};
 use crate::stringify::Stringify;
 use crate::typed::{FromInner, Typed};
@@ -56,6 +57,13 @@ static WINSTON_AR_XE: LazyLock<BigDecimal> =
 impl ConversionRate<'static, Winston, AR> for () {
     fn get(&self) -> &'static BigDecimal {
         &WINSTON_AR_XE
+    }
+}
+
+impl DeepHashable for Money<Winston> {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        let str = self.0.to_plain_string();
+        str.as_bytes().deep_hash()
     }
 }
 

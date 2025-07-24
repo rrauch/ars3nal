@@ -1,3 +1,4 @@
+use crate::hash::{DeepHashable, Digest, Hashable, Hasher};
 use crate::serde::DefaultSerdeStrategy;
 use crate::stringify::{DefaultStringify, Stringify};
 use derive_where::derive_where;
@@ -96,6 +97,24 @@ where
 {
     fn zeroize(&mut self) {
         self.0.zeroize()
+    }
+}
+
+impl<T, I, SER, STR, DBG> DeepHashable for Typed<T, I, SER, STR, DBG>
+where
+    I: DeepHashable,
+{
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        self.0.deep_hash()
+    }
+}
+
+impl<T, I, SER, STR, DBG> Hashable for Typed<T, I, SER, STR, DBG>
+where
+    I: Hashable,
+{
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        self.0.feed(hasher)
     }
 }
 

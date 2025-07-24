@@ -1,16 +1,17 @@
-use crate::keys::{JwkError, RsaPrivateKeyComponents, TypedSecretKey};
+use crate::Address;
+use crate::keys::{JwkError, KeyError, RsaPrivateKeyComponents, TypedPublicKey, TypedSecretKey};
 use crate::tx::{SignedTx, SigningError, UnsignedTx};
-use crate::{Address, RsaError};
 use thiserror::Error;
 use zeroize::Zeroize;
 
 pub struct WalletKind;
 pub type Wallet = TypedSecretKey<WalletKind>;
+pub type WalletPKey = TypedPublicKey<WalletKind>;
 
 #[derive(Error, Debug)]
 pub enum WalletKeyPairError {
     #[error(transparent)]
-    RsaError(#[from] RsaError),
+    KeyError(#[from] KeyError),
     #[error(transparent)]
     JwkError(#[from] JwkError),
 }
@@ -18,6 +19,10 @@ pub enum WalletKeyPairError {
 impl Wallet {
     pub fn address(&self) -> &WalletAddress {
         self.public_key_impl().address_impl()
+    }
+
+    pub fn public_key(&self) -> &WalletPKey {
+        self.public_key_impl()
     }
 
     pub fn try_from_jwk<'a>(input: impl Into<&'a mut [u8]>) -> Result<Self, WalletKeyPairError> {
@@ -33,6 +38,12 @@ impl Wallet {
 }
 
 pub type WalletAddress = Address<WalletKind>;
+
+impl WalletPKey {
+    pub fn address(&self) -> &WalletAddress {
+        self.address_impl()
+    }
+}
 
 #[cfg(test)]
 mod tests {

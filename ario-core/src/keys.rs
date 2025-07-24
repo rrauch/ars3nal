@@ -1,28 +1,44 @@
-use crate::base64::UrlSafeNoPadding;
-use crate::hash::{HasherExt, Sha256Hasher};
-use crate::serde::Base64SerdeStrategy;
+use crate::base64::{Base64Stringify, UrlSafeNoPadding};
+use crate::hash::{DeepHashable, Digest, Hasher, HasherExt, Sha256Hasher};
+use crate::serde::{AsBytes, Base64SerdeStrategy, FromBytes, StringifySerdeStrategy};
+use crate::signature::{Scheme, Signature};
 use crate::typed::{FromInner, Typed};
 use crate::{Address, BigUint, RsaError};
+use bytes::Bytes;
 use derive_where::derive_where;
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::marker::PhantomData;
+use std::ops::Deref;
+use std::sync::LazyLock;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub type TypedSecretKey<T> = Typed<T, SecretKeyInner<T>, (), ()>;
+static ARWEAVE_RSA_EXPONENT: LazyLock<BigUint> =
+    LazyLock::new(|| BigUint::from_be_slice_vartime(&[0x01, 0x00, 0x01]));
+
+pub type TypedSecretKey<T> = Typed<T, SecretKey<T>, (), ()>;
 
 #[derive_where(Debug, Clone)]
-pub struct SecretKeyInner<T> {
+pub struct SecretKey<T> {
     inner: RsaPrivateKey,
     pkey: TypedPublicKey<T>,
+}
+
+#[derive(Error, Debug)]
+pub enum KeyError {
+    #[error("the key does not use the expected Arweave RSA exponent 'AQAB'")]
+    IncorrectExponent,
+    #[error(transparent)]
+    RsaError(#[from] RsaError),
 }
 
 impl<T> TypedSecretKey<T> {
     pub(crate) fn try_from_components(
         components: RsaPrivateKeyComponents,
-    ) -> Result<Self, RsaError> {
+    ) -> Result<Self, KeyError> {
         let inner = RsaPrivateKey::from_components(
             components.n,
             components.e,
@@ -30,14 +46,19 @@ impl<T> TypedSecretKey<T> {
             components.primes,
         )?;
 
-        // todo: RsaPrivateKey::from_components does NOT zeroize the provided key material on error
+        // Note: RsaPrivateKey::from_components does NOT zeroize the provided key material on error
         // a PR might be warranted
+        // might be related to https://github.com/RustCrypto/RSA/issues/507
+
+        if inner.e() != ARWEAVE_RSA_EXPONENT.deref() {
+            return Err(KeyError::IncorrectExponent);
+        }
 
         let pkey = inner.to_public_key();
 
-        Ok(Self::from_inner(SecretKeyInner {
+        Ok(Self::from_inner(SecretKey {
             inner,
-            pkey: TypedPublicKey::new(pkey),
+            pkey: TypedPublicKey::from_inner(PublicKey::new(pkey).into()),
         }))
     }
 
@@ -121,27 +142,65 @@ struct RsaJwk<'a> {
     q: Option<RsaJwkValue>,
 }
 
-pub type TypedPublicKey<T> = Typed<T, PublicKeyInner<T>>;
+pub type TypedPublicKey<T> =
+    Typed<T, PublicKey<T>, StringifySerdeStrategy, Base64Stringify<UrlSafeNoPadding, { 1024 * 2 }>>;
 
 #[derive_where(Debug, Clone)]
-pub struct PublicKeyInner<T> {
+pub struct PublicKey<T> {
     inner: RsaPublicKey,
     address: Address<T>,
     ph: PhantomData<T>,
 }
 
-impl<T> TypedPublicKey<T> {
+impl<T> PublicKey<T> {
     fn new(inner: RsaPublicKey) -> Self {
         let address = rsa_public_key_to_address(&inner);
-        Self::from_inner(PublicKeyInner {
+        Self {
             inner,
             address,
             ph: PhantomData,
-        })
+        }
+    }
+
+    pub(crate) fn from_modulus(n: impl Into<BigUint>) -> Result<Self, KeyError> {
+        let n = n.into();
+        let inner = RsaPublicKey::new(n, ARWEAVE_RSA_EXPONENT.clone())?;
+        Ok(Self::new(inner))
     }
 
     pub(crate) fn address_impl(&self) -> &Address<T> {
         &self.address
+    }
+
+    pub(crate) fn verify_signature<S: Scheme<Verifier = RsaPublicKey>>(
+        &self,
+        data: impl AsRef<[u8]>,
+        sig: &Signature<S>,
+    ) -> Result<(), S::VerificationError> {
+        S::verify(&self.inner, data, sig)
+    }
+}
+
+impl<T> DeepHashable for PublicKey<T> {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        self.as_bytes().into().deref().deep_hash()
+    }
+}
+
+impl<T> AsBytes for PublicKey<T> {
+    fn as_bytes(&self) -> impl Into<Cow<'_, [u8]>> {
+        self.inner.n_bytes().to_vec()
+    }
+}
+
+impl<T> FromBytes for PublicKey<T> {
+    type Error = KeyError;
+
+    fn try_from_bytes(input: Bytes) -> Result<Self, Self::Error>
+    where
+        Self: Sized,
+    {
+        Self::from_modulus(BigUint::from_be_slice_vartime(input.as_ref()))
     }
 }
 
