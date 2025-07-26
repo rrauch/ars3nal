@@ -1,81 +1,59 @@
-use crate::base64::{Base64Stringify, UrlSafeNoPadding};
-use crate::serde::{AsBytes, FromBytes, StringifySerdeStrategy};
+use crate::base64::ToBase64;
+use crate::blob::Blob;
 use crate::typed::Typed;
 use bytes::Bytes;
 use derive_where::derive_where;
 use digest::consts::{U32, U48};
 use digest::core_api::{CoreWrapper, CtVariableCoreWrapper};
-use generic_array::typenum::Unsigned;
 use generic_array::{ArrayLength, GenericArray};
 use sha2::{Digest as ShaDigest, OidSha256, OidSha384, Sha256VarCore, Sha512VarCore};
-use std::array::TryFromSliceError;
-use std::borrow::Cow;
-use thiserror::Error;
+use std::fmt::{Display, Formatter};
 use uuid::Uuid;
 
-pub type TypedDigest<T, H: Hasher> =
-    Typed<T, Digest<H>, StringifySerdeStrategy, Base64Stringify<UrlSafeNoPadding>>;
+pub type TypedDigest<T, H: Hasher> = Typed<T, Digest<H>>;
 
 #[derive_where(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct Digest<H: Hasher>(GenericArray<u8, H::DIGEST_LEN>);
+pub struct Digest<H: Hasher>(GenericArray<u8, H::DigestLen>);
 
 impl<H: Hasher> Digest<H> {
-    pub(crate) fn from_bytes(bytes: GenericArray<u8, H::DIGEST_LEN>) -> Self {
+    pub(crate) fn from_bytes(bytes: GenericArray<u8, H::DigestLen>) -> Self {
         Self(bytes)
     }
 }
 
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("Invalid input length, expected '{expected}' but go '{actual}'")]
-    InvalidInputLength { expected: usize, actual: usize },
-    #[error(transparent)]
-    ConversionError(#[from] TryFromSliceError),
+impl<H: Hasher> Display for Digest<H> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.to_base64().as_str())
+    }
 }
 
 impl<H: Hasher> Digest<H> {
-    pub fn try_clone_from_bytes(input: impl AsRef<[u8]>) -> Result<Self, Error> {
-        let input = input.as_ref();
-        let expected = H::DIGEST_LEN::to_usize();
-        if input.len() != expected {
-            return Err(Error::InvalidInputLength {
-                expected,
-                actual: input.len(),
-            });
-        }
-        Ok(Self(GenericArray::from_slice(input).clone()))
-    }
-
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
 
-    pub fn into_inner(self) -> GenericArray<u8, H::DIGEST_LEN> {
+    pub fn into_inner(self) -> GenericArray<u8, H::DigestLen> {
         self.0
     }
 }
 
-impl<H: Hasher> AsBytes for Digest<H> {
-    fn as_bytes(&self) -> impl Into<Cow<'_, [u8]>> {
+impl<'a, H: Hasher> TryFrom<Blob<'a>> for Digest<H> {
+    type Error = <Blob<'a> as TryInto<GenericArray<u8, H::DigestLen>>>::Error;
+
+    fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
+        Ok(Digest(value.try_into()?))
+    }
+}
+
+impl<H: Hasher> AsRef<[u8]> for Digest<H> {
+    fn as_ref(&self) -> &[u8] {
         self.as_slice()
     }
 }
 
-impl<H: Hasher> FromBytes for Digest<H> {
-    type Error = Error;
-
-    fn try_from_bytes(input: Bytes) -> Result<Self, Self::Error>
-    where
-        Self: Sized,
-    {
-        Self::try_clone_from_bytes(input.as_ref())
-    }
-}
-
 pub trait Hasher: Send + Sync {
-    #[allow(non_camel_case_types)]
-    type DIGEST_LEN: ArrayLength;
+    type DigestLen: ArrayLength;
 
     fn new() -> Self;
     fn update(&mut self, data: impl AsRef<[u8]>);
@@ -109,7 +87,7 @@ pub type Sha256Hash = Digest<Sha256Hasher>;
 pub struct Sha256Hasher(CoreWrapper<CtVariableCoreWrapper<Sha256VarCore, U32, OidSha256>>);
 
 impl Hasher for Sha256Hasher {
-    type DIGEST_LEN = U32;
+    type DigestLen = U32;
 
     fn new() -> Self {
         Self(sha2::Sha256::new())
@@ -141,7 +119,7 @@ pub type Sha384Hash = Digest<Sha384Hasher>;
 pub struct Sha384Hasher(CoreWrapper<CtVariableCoreWrapper<Sha512VarCore, U48, OidSha384>>);
 
 impl Hasher for Sha384Hasher {
-    type DIGEST_LEN = U48;
+    type DigestLen = U48;
 
     fn new() -> Self {
         Self(sha2::Sha384::new())
@@ -169,7 +147,7 @@ impl Hasher for Sha384Hasher {
 
 pub(crate) trait DeepHashable {
     fn deep_hash<H: Hasher>(&self) -> Digest<H>;
-    fn blob<H: Hasher, B: AsRef<[u8]>>(buf: &B) -> Digest<H> {
+    fn blob<H: Hasher, B: AsRef<[u8]> + ?Sized>(buf: &B) -> Digest<H> {
         let buf = buf.as_ref();
         let tag_digest = H::digest(format!("blob{}", buf.len()).as_bytes());
         let data_digest = H::digest(buf);
@@ -182,6 +160,12 @@ pub(crate) trait DeepHashable {
             acc_digest = H::digest_from_iter(vec![acc_digest.as_slice(), c.as_slice()].into_iter());
         }
         acc_digest
+    }
+}
+
+impl<'a> DeepHashable for Blob<'a> {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        self.bytes().deep_hash()
     }
 }
 
@@ -265,6 +249,12 @@ where
         let mut hasher = H::new();
         self.feed(&mut hasher);
         hasher.finalize()
+    }
+}
+
+impl<'a> Hashable for Blob<'a> {
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        hasher.update(self.bytes())
     }
 }
 

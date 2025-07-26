@@ -1,41 +1,205 @@
-use crate::base64::{Base64Stringify, UrlSafeNoPadding};
-use crate::hash::{DeepHashable, Digest, Hasher, HasherExt, Sha256Hasher};
-use crate::serde::{AsBytes, Base64SerdeStrategy, FromBytes, StringifySerdeStrategy};
-use crate::signature::{Scheme, Signature};
-use crate::typed::{FromInner, Typed};
-use crate::{Address, BigUint, RsaError};
-use bytes::Bytes;
+use crate::base64::ToBase64;
+use crate::blob::{AsBlob, Blob};
+use crate::hash::{DeepHashable, Digest, Hashable, Hasher};
+use crate::signature::{SignExt, Signature, SupportsSignatures, VerifySigExt};
+use crate::typed::Typed;
+use crate::{BigUint, RsaError, signature};
+use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
+use generic_array::ArrayLength;
+use generic_array::typenum::{U256, U512, Unsigned};
 use rsa::traits::PublicKeyParts;
-use rsa::{RsaPrivateKey, RsaPublicKey};
-use serde::Deserialize;
-use std::borrow::Cow;
+use rsa::{RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey};
 use std::marker::PhantomData;
-use std::ops::Deref;
 use std::sync::LazyLock;
 use thiserror::Error;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 static ARWEAVE_RSA_EXPONENT: LazyLock<BigUint> =
     LazyLock::new(|| BigUint::from_be_slice_vartime(&[0x01, 0x00, 0x01]));
 
-pub type TypedSecretKey<T> = Typed<T, SecretKey<T>, (), ()>;
+pub type TypedSecretKey<T, SK: SecretKey> = Typed<T, SK>;
 
-#[derive_where(Debug, Clone)]
-pub struct SecretKey<T> {
-    inner: RsaPrivateKey,
-    pkey: TypedPublicKey<T>,
+pub(crate) trait SecretKey {
+    type Scheme;
+    type KeyLen: ArrayLength;
+    type PublicKey: PublicKey<Scheme = Self::Scheme, SecretKey = Self>;
+
+    fn public_key_impl(&self) -> &Self::PublicKey;
+}
+
+#[derive_where(Clone)]
+#[derive(TransparentWrapper)]
+#[transparent(ExternalRsaPrivateKey)]
+#[repr(transparent)]
+pub struct RsaPrivateKey<P: RsaParams>(ExternalRsaPrivateKey, PhantomData<P>);
+
+impl<P: RsaParams> RsaPrivateKey<P> {
+    pub(crate) fn try_from_inner(inner: ExternalRsaPrivateKey) -> Result<Self, KeyError> {
+        if inner.size() != P::KeyLen::to_usize() {
+            return Err(KeyError::UnexpectedKeyLength {
+                expected: P::KeyLen::to_usize(),
+                actual: inner.size(),
+            });
+        }
+        Ok(Self(inner, PhantomData))
+    }
+    pub(crate) fn as_inner(&self) -> &ExternalRsaPrivateKey {
+        &self.0
+    }
+}
+
+impl<P: RsaParams> SecretKey for RsaPrivateKey<P> {
+    type Scheme = Rsa<P>;
+    type KeyLen = P::KeyLen;
+    type PublicKey = RsaPublicKey<P>;
+
+    fn public_key_impl(&self) -> &Self::PublicKey {
+        RsaPublicKey::wrap_ref(self.0.as_ref())
+    }
+}
+
+pub type TypedPublicKey<T, PK: PublicKey> = Typed<T, PK>;
+
+pub struct Rsa<P: RsaParams>(PhantomData<P>);
+
+impl<P: RsaParams> SupportsSignatures for Rsa<P> {
+    type Signer = RsaPrivateKey<P>;
+    type Verifier = RsaPublicKey<P>;
+    type Scheme = signature::RsaPss<P>;
+}
+
+pub(crate) trait PublicKey: Hashable + DeepHashable + AsBlob {
+    type Scheme;
+    type KeyLen: ArrayLength;
+    type SecretKey: SecretKey<Scheme = Self::Scheme, PublicKey = Self>;
+}
+
+impl<PK: PublicKey> VerifySigExt<<PK::Scheme as SupportsSignatures>::Scheme> for PK
+where
+    PK::Scheme: SupportsSignatures<Verifier = PK>,
+{
+    type VerificationError =
+        <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::VerificationError;
+
+    fn verify_sig_impl(
+        &self,
+        data: impl AsRef<[u8]>,
+        sig: &Signature<<PK::Scheme as SupportsSignatures>::Scheme>,
+    ) -> Result<(), Self::VerificationError> {
+        <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::verify(self, data, sig)
+    }
+}
+
+impl<SK: SecretKey> SignExt<<SK::Scheme as SupportsSignatures>::Scheme> for SK
+where
+    SK::Scheme: SupportsSignatures<Signer = SK>,
+{
+    fn sign_impl(
+        &self,
+        data: impl AsRef<[u8]>,
+    ) -> Signature<<SK::Scheme as SupportsSignatures>::Scheme> {
+        <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::sign(self, data)
+    }
+}
+
+pub trait RsaParams {
+    type KeyLen: ArrayLength;
+    type SigLen: ArrayLength;
+}
+
+#[derive(Clone, Debug)]
+pub struct Rsa4096;
+impl RsaParams for Rsa4096 {
+    type KeyLen = U512;
+    type SigLen = U512;
+}
+
+#[derive(Clone, Debug)]
+pub struct Rsa2048;
+impl RsaParams for Rsa2048 {
+    type KeyLen = U256;
+    type SigLen = U256;
+}
+
+#[derive(Clone, Debug, TransparentWrapper)]
+#[transparent(ExternalRsaPublicKey)]
+#[repr(transparent)]
+pub struct RsaPublicKey<P: RsaParams>(ExternalRsaPublicKey, PhantomData<P>);
+
+impl<P: RsaParams> RsaPublicKey<P> {
+    pub(crate) fn from_inner(inner: ExternalRsaPublicKey) -> Self {
+        Self(inner, PhantomData)
+    }
+
+    pub(crate) fn from_modulus(n: impl Into<BigUint>) -> Result<Self, KeyError> {
+        let n = n.into();
+        let inner = ExternalRsaPublicKey::new(n, ARWEAVE_RSA_EXPONENT.clone())?;
+        Ok(Self::from_inner(inner))
+    }
+
+    pub(crate) fn as_inner(&self) -> &ExternalRsaPublicKey {
+        &self.0
+    }
+}
+
+impl<P: RsaParams> PublicKey for RsaPublicKey<P> {
+    type Scheme = Rsa<P>;
+    type KeyLen = P::KeyLen;
+    type SecretKey = RsaPrivateKey<P>;
+}
+
+impl<P: RsaParams> Hashable for RsaPublicKey<P> {
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        hasher.update(self.0.n_bytes().as_ref());
+    }
+}
+
+impl<P: RsaParams> DeepHashable for RsaPublicKey<P> {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        Self::blob(self.0.n_bytes().as_ref())
+    }
+}
+
+impl<P: RsaParams> AsBlob for RsaPublicKey<P> {
+    fn as_blob(&self) -> Blob<'_> {
+        Blob::from(self.0.n_bytes())
+    }
+}
+
+impl<P: RsaParams> ToBase64 for RsaPublicKey<P> {
+    fn to_base64(&self) -> String {
+        self.as_blob().to_base64()
+    }
+}
+
+impl<'a, P: RsaParams> TryFrom<Blob<'a>> for RsaPublicKey<P> {
+    type Error = KeyError;
+
+    fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
+        let len = value.len();
+        if len != P::KeyLen::to_usize() {
+            return Err(Self::Error::UnexpectedKeyLength {
+                expected: P::KeyLen::to_usize(),
+                actual: len,
+            });
+        }
+        Ok(RsaPublicKey::from_modulus(BigUint::from_be_slice_vartime(
+            value.as_ref(),
+        ))?)
+    }
 }
 
 #[derive(Error, Debug)]
 pub enum KeyError {
     #[error("the key does not use the expected Arweave RSA exponent 'AQAB'")]
     IncorrectExponent,
+    #[error("expected key length: '{expected}' but found '{actual}'")]
+    UnexpectedKeyLength { expected: usize, actual: usize },
     #[error(transparent)]
     RsaError(#[from] RsaError),
 }
 
-impl<T> TypedSecretKey<T> {
+/*impl<T> TypedSecretKey<T> {
     pub(crate) fn try_from_components(
         components: RsaPrivateKeyComponents,
     ) -> Result<Self, KeyError> {
@@ -127,7 +291,7 @@ pub enum JwkFieldValueError {
     Base64DecodingError(String),
 }
 
-type RsaJwkValue = Typed<(), BigUint, Base64SerdeStrategy<UrlSafeNoPadding, { 1024 * 10 }>>;
+type RsaJwkValue = Typed<(), BigUint>;
 
 #[derive(Zeroize, ZeroizeOnDrop, Deserialize)]
 struct RsaJwk<'a> {
@@ -141,10 +305,9 @@ struct RsaJwk<'a> {
     #[serde(default)]
     q: Option<RsaJwkValue>,
 }
+*/
 
-pub type TypedPublicKey<T> =
-    Typed<T, PublicKey<T>, StringifySerdeStrategy, Base64Stringify<UrlSafeNoPadding, { 1024 * 2 }>>;
-
+/*
 #[derive_where(Debug, Clone)]
 pub struct PublicKey<T> {
     inner: RsaPublicKey,
@@ -204,7 +367,14 @@ impl<T> FromBytes for PublicKey<T> {
     }
 }
 
-fn rsa_public_key_to_address<T>(pk: &RsaPublicKey) -> Address<T> {
+impl<T> Display for PublicKey<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_base64())
+    }
+}
+*/
+
+/*fn rsa_public_key_to_address<T>(pk: &ExternalRsaPublicKey) -> Address<T> {
     // sha256 hash from bytes representing a big-endian encoded modulus
     Address::from_inner(Sha256Hasher::digest(pk.n_bytes()))
-}
+}*/

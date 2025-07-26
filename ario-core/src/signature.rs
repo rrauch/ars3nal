@@ -1,25 +1,23 @@
-use crate::base64::{Base64Stringify, UrlSafeNoPadding};
-use crate::serde::{AsBytes, FromBytes, StringifySerdeStrategy};
+use crate::blob::Blob;
+use crate::keys::{RsaParams, RsaPrivateKey, RsaPublicKey};
 use crate::typed::Typed;
-use bytes::Bytes;
 use derive_where::derive_where;
-use generic_array::typenum::{U512, Unsigned};
+use generic_array::typenum::Unsigned;
 use generic_array::{ArrayLength, GenericArray};
 use rsa::pss::{BlindedSigningKey, VerifyingKey as PssVerifyingKey};
+use rsa::signature;
 use rsa::signature::{RandomizedSignerMut, SignatureEncoding, Verifier};
-use rsa::traits::PublicKeyParts;
-use rsa::{RsaPrivateKey, RsaPublicKey, signature};
 use std::array::TryFromSliceError;
-use std::borrow::Cow;
+use std::fmt::Display;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use thiserror::Error;
 
-pub type TypedSignature<T, SIGNER, S: Scheme> =
-    Typed<(T, SIGNER), Signature<S>, StringifySerdeStrategy, Base64Stringify<UrlSafeNoPadding>>;
+pub type TypedSignature<T, SIGNER, S: Scheme> = Typed<(T, SIGNER), Signature<S>>;
 
 #[derive_where(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct Signature<S: Scheme>(GenericArray<u8, S::SIG_LEN>);
+pub struct Signature<S: Scheme>(GenericArray<u8, S::SigLen>);
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -36,7 +34,7 @@ impl<S: Scheme> Signature<S> {
 
     pub fn try_clone_from_bytes(input: impl AsRef<[u8]>) -> Result<Self, Error> {
         let input = input.as_ref();
-        let expected = S::SIG_LEN::to_usize();
+        let expected = S::SigLen::to_usize();
         if input.len() != expected {
             return Err(Error::InvalidInputLength {
                 expected,
@@ -50,34 +48,31 @@ impl<S: Scheme> Signature<S> {
         &self.0
     }
 
-    pub fn into_inner(self) -> GenericArray<u8, S::SIG_LEN> {
+    pub fn into_inner(self) -> GenericArray<u8, S::SigLen> {
         self.0
     }
 }
 
-impl<S: Scheme> AsBytes for Signature<S> {
-    fn as_bytes(&self) -> impl Into<Cow<'_, [u8]>> {
+impl<S: Scheme> AsRef<[u8]> for Signature<S> {
+    fn as_ref(&self) -> &[u8] {
         self.as_slice()
     }
 }
 
-impl<S: Scheme> FromBytes for Signature<S> {
-    type Error = Error;
+impl<'a, S: Scheme> TryFrom<Blob<'a>> for Signature<S> {
+    type Error = <Blob<'a> as TryInto<GenericArray<u8, S::SigLen>>>::Error;
 
-    fn try_from_bytes(input: Bytes) -> Result<Self, Self::Error>
-    where
-        Self: Sized,
-    {
-        Self::try_clone_from_bytes(input.as_ref())
+    fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
+        Ok(Signature(value.try_into()?))
     }
 }
 
 pub trait Scheme {
     #[allow(non_camel_case_types)]
-    type SIG_LEN: ArrayLength;
+    type SigLen: ArrayLength;
     type Signer;
     type Verifier;
-    type VerificationError;
+    type VerificationError: Display;
 
     fn sign(signer: &Self::Signer, data: impl AsRef<[u8]>) -> Signature<Self>
     where
@@ -91,13 +86,33 @@ pub trait Scheme {
         Self: Sized;
 }
 
-pub struct RsaPss;
+pub(crate) trait SupportsSignatures {
+    type Signer;
+    type Verifier;
+    type Scheme: Scheme<Signer = Self::Signer, Verifier = Self::Verifier>;
+}
 
-impl Scheme for RsaPss {
-    type SIG_LEN = U512;
+pub(crate) trait VerifySigExt<S: Scheme> {
+    type VerificationError: Display;
 
-    type Signer = RsaPrivateKey;
-    type Verifier = RsaPublicKey;
+    fn verify_sig_impl(
+        &self,
+        data: impl AsRef<[u8]>,
+        sig: &Signature<S>,
+    ) -> Result<(), Self::VerificationError>;
+}
+
+pub(crate) trait SignExt<S: Scheme> {
+    fn sign_impl(&self, data: impl AsRef<[u8]>) -> Signature<S>;
+}
+
+pub struct RsaPss<P: RsaParams>(PhantomData<P>);
+
+impl<P: RsaParams> Scheme for RsaPss<P> {
+    type SigLen = P::SigLen;
+
+    type Signer = RsaPrivateKey<P>;
+    type Verifier = RsaPublicKey<P>;
     type VerificationError = signature::Error;
 
     fn sign(signer: &Self::Signer, data: impl AsRef<[u8]>) -> Signature<Self>
@@ -105,8 +120,8 @@ impl Scheme for RsaPss {
         Self: Sized,
     {
         let mut signing_key = BlindedSigningKey::<rsa::sha2::Sha256>::new_with_salt_len(
-            signer.clone(),
-            calculate_rsa_pss_max_salt_len::<sha2::Sha256>(signer.size()),
+            signer.as_inner().clone(),
+            calculate_rsa_pss_max_salt_len::<sha2::Sha256>(P::KeyLen::to_usize()),
         );
 
         let mut rng = rand::rng();
@@ -125,8 +140,8 @@ impl Scheme for RsaPss {
         Self: Sized,
     {
         let verifying_key: PssVerifyingKey<rsa::sha2::Sha256> = PssVerifyingKey::new_with_salt_len(
-            verifier.clone(),
-            calculate_rsa_pss_max_salt_len::<sha2::Sha256>(verifier.size()),
+            verifier.as_inner().clone(),
+            calculate_rsa_pss_max_salt_len::<sha2::Sha256>(P::KeyLen::to_usize()),
         );
 
         verifying_key.verify(
@@ -144,8 +159,9 @@ fn calculate_rsa_pss_max_salt_len<D: digest::Digest>(key_size_bytes: usize) -> u
 
 #[cfg(test)]
 mod tests {
-    use crate::signature::{RsaPss, Scheme};
-    use rsa::RsaPrivateKey;
+    use crate::keys::{Rsa2048, Rsa4096, RsaPrivateKey, SecretKey};
+    use crate::signature::{SignExt, VerifySigExt};
+    use rsa::RsaPrivateKey as ExternalRsaPrivateKey;
     use rsa::pkcs8::DecodePrivateKey;
 
     const SECRET_KEY_4096_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
@@ -201,13 +217,58 @@ mXYkTaPkULzYdcwYtVtyhKW6L7gmZlpWDC7HMR5jHApENQs9jlnkQrG60wNK2D/Q
 tlG6br5CMjD4OawH/YTbcmNt1N2h
 -----END PRIVATE KEY-----"#;
 
+    const SECRET_KEY_2048_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDCZvSnTLaIyK8m
+m+U5ZTbe9DTr19iy09aI1IxIPiHewFGM4VKRdI9v85JJgo9V+eQh+eZLKZ44f+PW
+0XZJs6H7iWGCa8/N2GZ8zuCDcar4Jz2uvYZnKCpDxJalYM6xdIV/c1wDDnD5Nlna
+f2XjJz/lEPRyzjbrY1kT9XK9xeOjzO/6/9EzcFtttOvPz5LcbGXuEFInJJZzJTXB
+Dc5AplPJ/NkinixTFkHQJb4euLzmdfntTSFHcmWBRqtvF3C1rJ9IfpvgkxK5AIZi
+pBpnKu/1jRah8jS9nAeKRDWX0qrVp9zkaV0iQiIeohPog6IE3sK08Nc27RAzbY5y
+qOVGSVnxAgMBAAECggEAFmVB/hwKU0u7UdlX2PreDWVYy2q8Xi2lY3IJDzGJOV4y
+huZWWsdw1tbanXlbBe6Z54ggjbwnrB6fotnSpL77BD1ZbGr7L52kgPBcUQhBSAFN
+S9otp6iq5c+6AydZ6Huh/YLOsNNzFGK8iz1uAXM+GyeO4cL79LYnRvNZ2p73kKER
+43LWwJQNyIH42TTMhL+WN1yGW6cK9dax/gDmwKPQXm/zFYAFYJ3QQKADAVYYFQVB
+gF/pIejc5ECnfCgjXHpWPICbwn6obVjiaLdTysaRdgSwoqsWLElWIEMXwX0Z6pau
+gC75JI1EYeY5moJaFWJ7ck06SlF7pHsNGCFtU6MgGQKBgQDv1YDXdmq/bzMBrRe9
+/T10+WM2WgKLnQlADZVM09wGgZuAI1RT7ZfYjr+ZwOzD84FAWdWeRiQBUYxCITJC
+nVFV/ZHxiUQocIodckn+jFIgRHVd2jmf0MAnrbSbh9xsDZ9mQmlYvS+olMnoLtjx
+1YgP5sMAWucR3C5Y01rPQM9WYwKBgQDPgX7momlI1Z+jouZLOTzPfbROc+jJOtNW
+CrfAPJ9oq9p7Dw1B05WTA63ES5XO7xzr1tOe4gs6TpllASRU7pfSC9QKMYV5gdtk
+4jAL6jqGKS/o0IvdCIs6nG9SS3lZ2ZOmWE2wDLIlegXlCZ8jv/fMNZLLjMGAi8eZ
+VmL9xoeEmwKBgDWETtvFcMyG47rcBRBAEhaoD5txOmAtCoNghJBANji9cxWEzKxt
+uBR6xgZpJmwTSiQx55kJzb79k26uOajjseKeUpKzLqJXenpXpmtGpIzOueHXcERZ
+MIeqG0MZbfYulAMdjqRekuPrT6Kf0YklPNdPhvPtVOKHX1Ay2XCl5Z5BAoGALAOO
+tELszBsr0lzCNmB8qpJCRYXGcbB9lTmOwkLZmS0imYmWyUik6FsWZ5WUwCDt5IRb
+vM67jPGRDeCRIUa+gzopDsR0SFKoA50Kjexv33crB1n84LRoO9Vks3L42XsSG22N
+hPMccmCQkYVZ8Q5N9E3ExlIj1S1Q+BBfzO5oXlMCgYBSRV/a3KK7sVuoH4ei2Vqs
+Mm8LAL/2yym5a21DRvmXNCKnSBy9F9NKX6rkYENcJjlDQSYJNg9FHwGfVE0TFFOA
+kWwrbhM+s24XEBmCgzHSuoIUgEXKDNh2sYag++CqYIqyeXQHx6ORNuBeloO8UYjV
+OTOdooS54PVffrqDRHz7dQ==
+-----END PRIVATE KEY-----"#;
+
     #[test]
-    fn rsa_pss_sign_verify() {
-        let secret_key = RsaPrivateKey::from_pkcs8_pem(SECRET_KEY_4096_PEM).unwrap();
-        let public_key = secret_key.to_public_key();
+    fn rsa_pss_4096_sign_verify() -> anyhow::Result<()> {
+        let secret_key: RsaPrivateKey<Rsa4096> = RsaPrivateKey::try_from_inner(
+            ExternalRsaPrivateKey::from_pkcs8_pem(SECRET_KEY_4096_PEM)?,
+        )?;
+        let public_key = secret_key.public_key_impl();
 
         let message = "HEllO wOrlD";
-        let signature = RsaPss::sign(&secret_key, message);
-        RsaPss::verify(&public_key, message, &signature).unwrap()
+        let signature = secret_key.sign_impl(message);
+        public_key.verify_sig_impl(message, &signature)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rsa_pss_2048_sign_verify() -> anyhow::Result<()> {
+        let secret_key: RsaPrivateKey<Rsa2048> = RsaPrivateKey::try_from_inner(
+            ExternalRsaPrivateKey::from_pkcs8_pem(SECRET_KEY_2048_PEM)?,
+        )?;
+        let public_key = secret_key.public_key_impl();
+
+        let message = "HEllO wOrlD2222";
+        let signature = secret_key.sign_impl(message);
+        public_key.verify_sig_impl(message, &signature)?;
+        Ok(())
     }
 }

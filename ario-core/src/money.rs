@@ -1,12 +1,10 @@
 use crate::hash::{DeepHashable, Digest, Hasher};
 use crate::money::MoneyError::{ParseError, PrecisionError, RepresentationError};
-use crate::stringify::Stringify;
 use crate::typed::{FromInner, Typed};
 use bigdecimal::{BigDecimal, One, ParseBigDecimalError, RoundingMode};
 use derive_where::derive_where;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
@@ -182,21 +180,6 @@ impl<C: Currency> FromStr for Money<C> {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::try_from(BigDecimal::from_str(s).map_err(ParseError)?)
-    }
-}
-
-impl<C: Currency> Stringify<Self> for Money<C> {
-    type Error = MoneyError;
-
-    fn to_str(input: &Self) -> impl Into<Cow<str>> {
-        input.to_plain_string()
-    }
-
-    fn try_from_str<S: AsRef<str>>(input: S) -> Result<Self, Self::Error>
-    where
-        Self: Sized,
-    {
-        Self::from_str(input.as_ref())
     }
 }
 
@@ -540,14 +523,14 @@ mod tests {
     #[test]
     fn test_stringify_trait() {
         let winston = Money::<Winston>::try_from(100).unwrap();
-        let winston_str: std::borrow::Cow<str> = Money::<Winston>::to_str(&winston).into();
+        let winston_str: std::borrow::Cow<str> = Money::<Winston>::to_plain_string(&winston).into();
         assert_eq!(winston_str, "100");
 
-        let parsed = Money::<Winston>::try_from_str("200.0").unwrap();
+        let parsed = Money::<Winston>::from_str("200.0").unwrap();
         assert_eq!(parsed.to_plain_string(), "200");
 
         let ar = Money::<AR>::try_from(BigDecimal::from_str("3.14").unwrap()).unwrap();
-        let ar_str: std::borrow::Cow<str> = Money::<AR>::to_str(&ar).into();
+        let ar_str: std::borrow::Cow<str> = Money::<AR>::to_plain_string(&ar).into();
         assert_eq!(ar_str, "3.140000000000");
     }
 

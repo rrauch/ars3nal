@@ -1,23 +1,24 @@
-use crate::blob::{BlobName, TypedBlob};
+mod raw;
+mod v1;
+
+use crate::JsonError;
+use crate::base64::ToBase64;
+use crate::blob::{Blob, OwnedBlob};
 use crate::hash::{
-    DeepHashable, Digest, Hasher, HasherExt, Sha256Hasher, Sha384Hasher, TypedDigest,
+    DeepHashable, Digest, Hashable, Hasher, HasherExt, Sha256Hasher, Sha384Hasher, TypedDigest,
 };
-use crate::id;
+use crate::keys::{Rsa4096, RsaPublicKey};
 use crate::money::{Money, TypedMoney, Winston};
-use crate::serde::{empty_string_none, string_number};
 use crate::signature::{RsaPss, Signature, TypedSignature};
-use crate::stringify::Stringify;
-use crate::typed::FromInner;
-use crate::valid::Valid;
-use crate::wallet::{Wallet, WalletAddress, WalletKind, WalletPKey};
+use crate::typed::{FromInner, Typed};
+use crate::wallet::{
+    Wallet, WalletAddress, WalletKind, WalletPKey, WalletPublicKey, WalletSecretKey,
+};
 use derive_where::derive_where;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::str::FromStr;
 use std::sync::LazyLock;
 use thiserror::Error;
 
@@ -29,7 +30,14 @@ static ZERO_REWARD: LazyLock<Reward> = LazyLock::new(|| Reward::zero());
 pub struct TxKind;
 
 pub type TxId = TypedDigest<TxSignature, Sha256Hasher>;
-pub type TxSignature = TypedSignature<TxHash, WalletKind, RsaPss>;
+
+impl Display for TxId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.to_base64().as_str())
+    }
+}
+
+pub type TxSignature = TypedSignature<TxHash, WalletKind, RsaPss<Rsa4096>>;
 pub type TxHash = TypedDigest<TxKind, Sha384Hasher>;
 
 impl TxSignature {
@@ -43,7 +51,13 @@ impl TxSignature {
 }
 
 pub struct TxAnchorKind;
-pub type TxAnchor = id::Typed384B64Id<TxAnchorKind>;
+pub type TxAnchor = Typed<TxAnchorKind, [u8; 48]>;
+
+impl Display for TxAnchor {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_base64().as_str())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LastTx {
@@ -51,11 +65,55 @@ pub enum LastTx {
     V2(TxAnchor),
 }
 
+impl<'a> TryFrom<Blob<'a>> for LastTx {
+    type Error =
+        LastTxError<<TxId as TryFrom<Blob<'a>>>::Error, <TxAnchor as TryFrom<Blob<'a>>>::Error>;
+
+    fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
+        match value.len() {
+            32 => Ok(Self::V1(
+                TxId::try_from(value).map_err(LastTxError::V1Error)?,
+            )),
+            48 => Ok(Self::V2(
+                TxAnchor::try_from(value).map_err(LastTxError::V2Error)?,
+            )),
+            invalid => Err(LastTxError::InvalidLength(invalid)),
+        }
+    }
+}
+
+impl Display for LastTx {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::V1(tx_id) => Display::fmt(tx_id, f),
+            Self::V2(tx_anchor) => Display::fmt(tx_anchor, f),
+        }
+    }
+}
+
 impl DeepHashable for LastTx {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
         match self {
             Self::V1(tx_id) => tx_id.deep_hash(),
             Self::V2(tx_anchor) => tx_anchor.deep_hash(),
+        }
+    }
+}
+
+impl Hashable for LastTx {
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        match self {
+            Self::V1(tx_id) => tx_id.feed(hasher),
+            Self::V2(tx_anchor) => tx_anchor.feed(hasher),
+        }
+    }
+}
+
+impl AsRef<[u8]> for LastTx {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::V1(tx_id) => tx_id.as_slice(),
+            Self::V2(tx_anchor) => tx_anchor.as_slice(),
         }
     }
 }
@@ -70,72 +128,26 @@ pub enum LastTxError<E1, E2> {
     V2Error(E2),
 }
 
-impl Stringify<Self> for LastTx {
-    type Error =
-        LastTxError<<TxId as Stringify<TxId>>::Error, <TxAnchor as Stringify<TxAnchor>>::Error>;
-
-    fn to_str(input: &Self) -> impl Into<Cow<str>> {
-        match input {
-            Self::V1(tx_id) => TxId::to_str(tx_id).into(),
-            Self::V2(tx_anchor) => TxAnchor::to_str(tx_anchor).into(),
-        }
-    }
-
-    fn try_from_str<S: AsRef<str>>(input: S) -> Result<Self, Self::Error>
-    where
-        Self: Sized,
-    {
-        let input = input.as_ref();
-        match input.len() {
-            64 => Ok(Self::V2(
-                TxAnchor::try_from_str(input).map_err(LastTxError::V2Error)?,
-            )),
-            43 => Ok(Self::V1(
-                TxId::try_from_str(input).map_err(LastTxError::V1Error)?,
-            )),
-            invalid => Err(LastTxError::InvalidLength(invalid)),
-        }
-    }
-}
-
-impl Display for LastTx {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(Self::to_str(self).into().as_ref())
-    }
-}
-
-impl FromStr for LastTx {
-    type Err =
-        LastTxError<<TxId as Stringify<TxId>>::Error, <TxAnchor as Stringify<TxAnchor>>::Error>;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::try_from_str(s)
-    }
-}
-
-impl Serialize for LastTx {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        crate::serde::stringify::serialize(self, serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for LastTx {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        crate::serde::stringify::deserialize(deserializer)
-    }
-}
-
 #[derive(Debug, Clone, Serialize_repr, Deserialize_repr, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum Format {
     V1 = 1,
     V2 = 2,
+}
+
+impl Format {
+    fn as_u8(&self) -> u8 {
+        match self {
+            Self::V1 => 1,
+            Self::V2 => 2,
+        }
+    }
+}
+
+impl Display for Format {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_u8())
+    }
 }
 
 impl DeepHashable for Format {
@@ -147,7 +159,7 @@ impl DeepHashable for Format {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Tag {
     pub name: TagName,
     pub value: TagValue,
@@ -168,7 +180,7 @@ pub enum Error {
 #[derive(Error, Debug)]
 pub enum TxDataError {
     #[error(transparent)]
-    JsonError(#[from] serde_json::Error),
+    JsonError(#[from] JsonError),
     #[error("Incorrect last_tx variant found")]
     IncorrectLastTxVariant,
     #[error("Incorrect data length found: expected '{expected}' but found '{actual}'")]
@@ -189,27 +201,27 @@ pub enum TxDataError {
 
 // This follows the definition found here:
 // https://docs.arweave.org/developers/arweave-node-server/http-api#field-definitions
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct TxData {
     format: Format,
     id: TxId,
     last_tx: LastTx,
-    owner: WalletPKey,
+    owner: WalletPKey<RsaPublicKey<Rsa4096>>,
     tags: Vec<Tag>,
-    #[serde(with = "empty_string_none")]
+    //#[serde(with = "empty_string_none")]
     target: Option<WalletAddress>,
-    #[serde(default)]
-    #[serde(with = "empty_string_none")]
+    //#[serde(default)]
+    //#[serde(with = "empty_string_none")]
     quantity: Option<Quantity>,
     data_tree: Vec<String>, // todo
-    #[serde(default)]
-    #[serde(with = "empty_string_none")]
+    //#[serde(default)]
+    //#[serde(with = "empty_string_none")]
     data_root: Option<String>, // todo: Merkle Root
-    #[serde(with = "string_number")]
+    //#[serde(with = "string_number")]
     data_size: u64,
-    #[serde(with = "empty_string_none")]
+    //#[serde(with = "empty_string_none")]
     data: Option<EmbeddedData>,
-    #[serde(with = "empty_string_none")]
+    //#[serde(with = "empty_string_none")]
     reward: Option<Reward>,
     signature: TxSignature,
 }
@@ -217,20 +229,25 @@ pub(crate) struct TxData {
 impl TxData {
     pub(crate) fn try_from_json_slice(bytes: &[u8]) -> Result<Self, TxDataError> {
         let tx_data = Self::try_from_json_slice_unvalidated(bytes)?;
-        tx_data.validate()?;
+        //tx_data.is_valid()?;
         Ok(tx_data)
     }
 
     fn try_from_json_slice_unvalidated(bytes: &[u8]) -> Result<Self, TxDataError> {
-        let tx_data: TxData = serde_json::from_slice(bytes)?;
-        Ok(tx_data)
+        //let tx_data: TxData = serde_json::from_slice(bytes)?;
+        //Ok(tx_data)
+        todo!()
     }
 
-    pub(crate) fn verify_signature(&self, pkey: &WalletPKey) -> Result<(), TxDataError> {
+    pub(crate) fn verify_signature<PK: WalletPublicKey>(
+        &self,
+        pkey: &WalletPKey<PK>,
+    ) -> Result<(), TxDataError> {
         let digest = TxHash::from_inner(self.deep_hash());
-        Ok(pkey
-            .verify_signature(digest.as_slice(), &self.signature)
-            .map_err(|_e| TxDataError::SignatureError)?)
+        /*Ok(pkey
+        .verify_signature(digest.as_slice(), &self.signature)
+        .map_err(|_e| TxDataError::SignatureError)?)*/
+        todo!()
     }
 
     pub fn is_transfer(&self) -> bool {
@@ -316,10 +333,10 @@ impl DeepHashable for TxData {
     }
 }
 
-impl Valid for TxData {
+/*impl Valid for TxData {
     type Error = TxDataError;
 
-    fn validate(&self) -> Result<(), Self::Error> {
+    fn is_valid(&self) -> Result<(), Self::Error> {
         match (&self.format, &self.last_tx) {
             (Format::V1, LastTx::V1(_)) => {}
             (Format::V2, LastTx::V2(_)) => {}
@@ -373,24 +390,15 @@ impl Valid for TxData {
 
         Ok(())
     }
-}
+}*/
 
 pub struct TagNameKind;
-pub type TagName = TypedBlob<TagNameKind, 2048>;
-impl BlobName for TagNameKind {
-    const NAME: &'static str = "tx_tag_name";
-}
+pub type TagName = OwnedBlob;
 
 pub struct TagValueKind;
-pub type TagValue = TypedBlob<TagValueKind, 2048>;
-impl BlobName for TagValueKind {
-    const NAME: &'static str = "tx_tag_value";
-}
+pub type TagValue = OwnedBlob;
 
-pub type EmbeddedData = TypedBlob<TxKind, MAX_TX_DATA_LEN>;
-impl BlobName for TxKind {
-    const NAME: &'static str = "tx_embedded_data";
-}
+pub type EmbeddedData = OwnedBlob;
 
 pub struct TxQuantityKind;
 pub type Quantity = TypedMoney<TxQuantityKind, Winston>;
@@ -478,7 +486,10 @@ impl SignedTx {
 }
 
 impl UnsignedTx {
-    pub(crate) fn sign(self, wallet: &Wallet) -> Result<SignedTx, (Self, SigningError)> {
+    pub(crate) fn sign<SK: WalletSecretKey>(
+        self,
+        wallet: &Wallet<SK>,
+    ) -> Result<SignedTx, (Self, SigningError)> {
         match self {
             Self::V1(v1) => Err((v1.into(), SigningError::V1Unsupported)),
             Self::V2(v2) => Ok(v2
@@ -601,7 +612,10 @@ impl<S> TxImpl<S, V2> {
 }
 
 impl TxImpl<Unsigned, V2> {
-    fn sign(self, _wallet: &Wallet) -> Result<TxImpl<Signed, V2>, (Self, SigningError)> {
+    fn sign<SK: WalletSecretKey>(
+        self,
+        _wallet: &Wallet<SK>,
+    ) -> Result<TxImpl<Signed, V2>, (Self, SigningError)> {
         // tx signing happens here
         todo!()
     }
@@ -621,30 +635,31 @@ impl TxImpl<Signed, V2> {
 
 #[cfg(test)]
 mod tests {
+    use crate::base64::ToBase64;
     use crate::hash::{DeepHashable, Sha384Hasher};
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::{Format, Quantity, Reward, SignedTx, TxData, ZERO_QUANTITY};
     use std::ops::Deref;
 
-    static TX_V1: &'static [u8] = include_bytes!("../testdata/tx_v1.json");
-    static TX_V2: &'static [u8] = include_bytes!("../testdata/tx_v2.json");
-    static TX_V2_2: &'static [u8] = include_bytes!("../testdata/tx_v2_2.json");
-    static TX_V2_3: &'static [u8] = include_bytes!("../testdata/tx_v2_3.json");
+    static TX_V1: &'static [u8] = include_bytes!("../../testdata/tx_v1.json");
+    static TX_V2: &'static [u8] = include_bytes!("../../testdata/tx_v2.json");
+    static TX_V2_2: &'static [u8] = include_bytes!("../../testdata/tx_v2_2.json");
+    static TX_V2_3: &'static [u8] = include_bytes!("../../testdata/tx_v2_3.json");
 
     #[test]
     fn tx_data_ok_v1() -> anyhow::Result<()> {
         let tx_data = TxData::try_from_json_slice(TX_V1)?;
         assert_eq!(&tx_data.format, &Format::V1);
         assert_eq!(
-            tx_data.id.to_string(),
+            tx_data.id.to_base64(),
             "BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ"
         );
         assert_eq!(
-            tx_data.last_tx.to_string(),
+            tx_data.last_tx.to_base64(),
             "jUcuEDZQy2fC6T3fHnGfYsw0D0Zl4NfuaXfwBOLiQtA"
         );
         assert_eq!(
-            tx_data.owner.to_string(),
+            tx_data.owner.to_base64(),
             "posmEh5k2_h7fgj-0JwB2l2AU72u-UizJOA2m8gyYYcVjh_6N3A3DhwbLmnbIWjVWmsidgQZDDibiJhhyHsy28ARxrt5BJ3OCa1VRAk2ffhbaUaGUoIkVt6G8mnnTScN9JNPS7UYEqG_L8J48c2tQNsydbon2ImKIwCYmnMHKcpyEgXcgLDGhtGhIKtkuI-QOAu-TMqVjn5EaWsfJTW5J-ty8mswAMSxepgsUbUB3GXZfCyOAK0EGjrClZ1MLvyc8ANGQfLPjwTipMcUtX47Udy8i4C-c-vLC9oB_z5ZCDCat-5wGh2OA-lyghro2SpkxX0e-D-nbi91Pp9LORwDZIRQ5RCMDvtQx1-QD2adxn_P2zDN0hk5IWXoCnHyeoj-IdNIyCXNkDzT2A184CxjReE5XOUF7UFeOmvVwbUTMfnNBOSWeRz3U_e3MPNlc2JTIprRLC8IegyfS6NdCr90lYnuviEr0g75NE6-muJdHAd9gu2QZ1MpkX9OnsbtvCvvFje-K_p_4AR9l43CLemfdSZeHHMIzdPwKe75SFMbsuklsyc-ieq-OHrJCeL0WrkLT4Gf6rpGVkS8MjORuMOBRFrHRE7XKswzhwmV2SuzeU6ojtPNP87aNdiUGHtYCIyt7cRN5bRbrVjdCAXj2NnuWMzM6J6dme4e2R8gqNpsEok"
         );
         assert_eq!(&tx_data.tags, &vec![]);
@@ -670,19 +685,19 @@ mod tests {
         let tx_data = TxData::try_from_json_slice(TX_V2)?;
         assert_eq!(&tx_data.format, &Format::V2);
         assert_eq!(
-            tx_data.id.to_string(),
+            tx_data.id.to_base64(),
             "bXGqzNQNmHTeL54cUQ6wPo-MO0thLP44FeAoM93kEwk"
         );
         assert_eq!(
-            tx_data.last_tx.to_string(),
+            tx_data.last_tx.to_base64(),
             "gVhey9KN6Fjc3nZbSOqLPRyDjjw6O5-sLSWPLZ_S7LoX5XOrFRja8A_wuj22OpHj"
         );
         assert_eq!(
-            tx_data.owner.to_string(),
+            tx_data.owner.to_base64(),
             "vzDBBpa9EsQR-6un6K9hgJuCJ7wtuZjuCmGEP6bHdrOln2gYkokWNgXSu35CThS68VtlwceUxOxNLM8VjsS-by7SSq0M0GzcCEAGUjEHXB1Ni32srWQKY-uJNRgfGMTS9Xs2RGIlmZpMR2PHl3EsLTuWAYjKzl3tv0YxIdHxm3hmlWsmhqIiNCoIfEQ_chxK3nL5vdfgNkV1zhdfH-yssTY3hXNa_lpCDQLoThM1xUNrzC7DKB6fvGS52REMgHg-QAlWIvXyGsZH5qRf_Ib_lOHn2v9Wjoh7QKPpMe7VYFOQXsfzFsAAjHQIm9SmuOrN_YhK9FpsjwVo1mKEFgpN52t5yGr5Ogp2CpmCfqn0i4hmaSwHB8XL86bGdZpbWbx_TRUf8xRgQjZD7zr5EAgWc07AFVsIdd_zLOgD9cS6RQ4bGaao2it-PTF7_J2rH1vXHJrJ7_SsUy9VF_Nj0LA0PuMPPgz6QcokKboxDeRPTVkj3fCIrx1LloAKGC8LcW9-cUUheG5ZSmzxG7r5pTotXAsyM6tfT9zMLvCexrdUKuOrUPJIvAhR3q9ntx9wefCz_1f2NEHlyZHUbx2l_r8UGFQjgjB5F9wjo5ho54Q8Iqk_JDSphSOJQRO7YezJpi6UDdhfaPHQpsCRxOMpKHQAVvetMc5ADDL7hzfCPYTAMtU"
         );
         assert_eq!(
-            tx_data.signature.to_string(),
+            tx_data.signature.to_base64(),
             "mJnhtXrtXMklRiPigOty7Q06ce8E9kdsRH4ww4IVVJ_YkYYfFGQXWoU-WZRsixvsEwjThUd6S8lvGetbzVszaGTplM7qxC4leUIn8gwj7cinvp3ABXzxsb9jPAwR5ytkzHuxJuSkwyUkVNXudamh5hG6d1OdXcBumcy9Sv66s29zCA7D6ptB1_d2DYxqIlXUpGH3EwVXNAoZXnmOicrlFKUPmZ-jOUXhNYmrHi3SwuJXVCAcDc7GXdN6Dbrt11iVvgp6Ag0h5fhCOZcUR2bhO0JK9QCP-xMic_97EY6JnGTp6GhOwZloIItkqEV9ZgPS787EvzOZOBH6Zk-bxk8WuWHP-0dU-LlA8DCAaTXZya01XBNA00mb5PKhaYk1ItH39ftcPXFVObrgxEU7SNdSdJnxy-eAKGIZYrTcN4mIuaRrC-CQyYSFPOee1MKlde4oKaE8NBtZsBvf3au9lnA-IYtQoHIhw5fo5kaLksp79ahpCC4Gc6ijrXeTvlgJnYaQ8q237YCeSwIUKHWMXHEAgjrPNaWyIVpn3mdbjbSRbpVKxxt7xNSkw4yz-8RPqI8bMMGpwS9CJKnRkcIeuAH6id2rgW57wPPMM6iHx2KxYF9AZx-4B4m7cO0TwUsaIL5DFYVdXYZXYC3fh3yG9uMSoH24oNgVlzuZG-NyyTT13oQ"
         );
         assert!(tx_data.target.is_none());
@@ -757,15 +772,15 @@ mod tests {
         let tx_data = TxData::try_from_json_slice(TX_V2_2)?;
         assert_eq!(&tx_data.format, &Format::V2);
         assert_eq!(
-            tx_data.id.to_string(),
+            tx_data.id.to_base64(),
             "oo6wzsvLtpGmOInBvyJ3ORjbhVelFEZKTOAy6wtjZtQ"
         );
         assert_eq!(
-            tx_data.last_tx.to_string(),
+            tx_data.last_tx.to_base64(),
             "mxi51DabflJu7YNcJSIm54cWjXDu69MAknQFuujhzDp7lEI7MT5zCufHlyhpq5lm"
         );
         assert_eq!(
-            tx_data.owner.to_string(),
+            tx_data.owner.to_base64(),
             "sucQ9eqnKFLIGCMi2n6b0hOVf1oL2JegiAyfPRRlTmZKvbQAZT8PELVimfdX9nVxUo7nTEXc9mPhtBJc_g4xTVKXrpe5nEYR2MMZcGIqo4rZb6ZJyAOSws-UclOKLgBP9jWUo04OOMS4_oe-gJ8ZvtKNCnpbgW11qWG7kLGb9kRTNGd-H3O5i6Cu3bCNFFNstdqAZ8yWHNXLiGU2uayWSSVp_mLNRQ9fb84GdXEJwzPVBNJgq9UgL4wcs8EvEQzIpSWF55jG1ld3Yqo5rSeReKnTDqxRqTPziYU49GvCiQA6jzzt42_-GriRU7StkBoQ1_NXQNPFcOPLCGXRVK6hrJLDYM4Pt6p_re-J68MbCJ5TYB7W0E9CpxYv1R2Y7ZsMFdlfRR52ZDuljd1-p6GLoWAXEner4cxEEVYZHF_Okq1tSFT0aVix1y646uAFObuaaSJn5xncdi-B8Xx3DUUJZ6GxSjoW-8_-68QdC0g4TzgEjY1AT-gS-V1KGm5Pi5Lk1k7xVcIcW8HF-m6DBDXoVK4WSJSRRReWeRRfmDCHQ_5wina5SVxmU1eqellOT1XIbCpI8L5BSm9RLTgeMKFbzVvuXYfNuUfQfn446VcP2zOXBSmR5zcHYkFsa18eHXlWJcOyFDu6cZwZA77LKGYoFkago-d9S5eBRGOYrV-kwhU",
         );
         assert_eq!(
@@ -773,7 +788,7 @@ mod tests {
             Some(&Quantity::from(Winston::from_str("2199990000000000")?))
         );
         assert_eq!(
-            tx_data.target.as_ref().unwrap().to_string(),
+            tx_data.target.as_ref().unwrap().to_base64(),
             "fGPsv2_-ueOvwFQF5zvYCRmawBGgc9FiDOXkbfurQtI"
         );
         assert!(tx_data.is_transfer());
@@ -789,7 +804,7 @@ mod tests {
     fn tx_v1_ok() -> anyhow::Result<()> {
         let tx = SignedTx::try_from_json_slice(TX_V1)?;
         assert_eq!(
-            tx.id().to_string(),
+            tx.id().to_base64(),
             "BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ"
         );
         Ok(())
@@ -799,7 +814,7 @@ mod tests {
     fn tx_v2_ok() -> anyhow::Result<()> {
         let tx = SignedTx::try_from_json_slice(TX_V2)?;
         assert_eq!(
-            tx.id().to_string(),
+            tx.id().to_base64(),
             "bXGqzNQNmHTeL54cUQ6wPo-MO0thLP44FeAoM93kEwk"
         );
         Ok(())

@@ -16,9 +16,11 @@ rsa = { version = "0.10.0-rc.3", features = ["sha2"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_repr = "0.1"
+serde_with = { version = "3.14", features = ["base64"] }
 sha2 = { version = "0.10", features = ["sha2-asm"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
+bytemuck = { version = "1.23", features = ["derive"] }
 zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]

@@ -1,102 +1,116 @@
-use crate::serde::{AsBytes, FromBytes};
-use crate::stringify::Stringify;
-use bytes::BytesMut;
+use core::fmt;
 use ct_codecs::{Base64UrlSafeNoPadding, Decoder, Encoder};
-use std::borrow::Cow;
+use serde::de::Visitor;
+use serde::{Deserializer, Serializer};
+use serde_with::{DeserializeAs, SerializeAs};
 use std::fmt::Display;
 use std::marker::PhantomData;
 use thiserror::Error;
 
-pub struct Base64Stringify<V, const MAX_LEN: usize = { usize::MAX }>(PhantomData<V>);
+#[derive(Error, Debug)]
+pub enum Base64Error {
+    #[error("decoding base64 failed: {0}")]
+    DecodingError(String),
+}
 
-impl<T, const MAX_LEN: usize> Stringify<T> for Base64Stringify<UrlSafeNoPadding, MAX_LEN>
-where
-    T: FromBase64<UrlSafeNoPadding, MAX_LEN> + ToBase64<UrlSafeNoPadding>,
-{
-    type Error = Base64DeserializationError<<T as FromBase64<UrlSafeNoPadding, MAX_LEN>>::Error>;
+pub trait ToBase64 {
+    fn to_base64(&self) -> String;
+}
 
-    fn to_str(input: &T) -> impl Into<Cow<str>> {
-        input.to_base64()
-    }
-
-    fn try_from_str<S: AsRef<str>>(input: S) -> Result<T, Self::Error>
-    where
-        Self: Sized,
-    {
-        let input = input.as_ref();
-        if input.len() > MAX_LEN {
-            return Err(Base64DeserializationError::MaxLengthExceeded {
-                max: MAX_LEN,
-                found: input.len(),
-            });
-        }
-        T::try_from_base64(input).map_err(Into::into)
+impl<T: AsRef<[u8]>> ToBase64 for T {
+    fn to_base64(&self) -> String {
+        Base64UrlSafeNoPadding::encode_to_string(self.as_ref())
+            .expect("base64 encoding should not fail")
     }
 }
 
-pub struct UrlSafeNoPadding;
-
-pub trait FromBase64<V, const MAX_LEN: usize> {
+pub trait TryFromBase64 {
     type Error: Display;
-    fn try_from_base64(input: &str) -> Result<Self, Self::Error>
+
+    fn try_from_base64(base64: impl AsRef<[u8]>) -> Result<Self, Self::Error>
     where
         Self: Sized;
 }
 
 #[derive(Error, Debug)]
-pub enum Base64DeserializationError<E> {
-    #[error("Input length of '{found}' exceeds maximum of '{max}'")]
-    MaxLengthExceeded { max: usize, found: usize },
+pub enum TryFromBase64Error<E: Display> {
     #[error(transparent)]
-    Base64Error(ct_codecs::Error),
+    Base64DecodingError(Base64Error),
     #[error(transparent)]
-    InnerError(#[from] E),
+    OtherError(#[from] E),
 }
 
-impl<T, const MAX_LEN: usize> FromBase64<UrlSafeNoPadding, MAX_LEN> for T
+impl<T> TryFromBase64 for T
 where
-    T: FromBytes,
+    T: TryFrom<Vec<u8>>,
+    <T as TryFrom<Vec<u8>>>::Error: Display,
 {
-    type Error = Base64DeserializationError<<T as FromBytes>::Error>;
+    type Error = TryFromBase64Error<<T as TryFrom<Vec<u8>>>::Error>;
 
-    fn try_from_base64(input: &str) -> Result<Self, Self::Error>
+    fn try_from_base64(base64: impl AsRef<[u8]>) -> Result<Self, Self::Error>
     where
         Self: Sized,
     {
-        if input.len() > MAX_LEN {
-            return Err(Base64DeserializationError::MaxLengthExceeded {
-                max: MAX_LEN,
-                found: input.len(),
-            });
+        let bytes = Base64UrlSafeNoPadding::decode_to_vec(base64, None).map_err(|e| {
+            TryFromBase64Error::Base64DecodingError(Base64Error::DecodingError(e.to_string()))
+        })?;
+
+        Ok(T::try_from(bytes)?)
+    }
+}
+
+pub struct OptionalBase64As;
+
+impl<T> SerializeAs<Option<T>> for OptionalBase64As
+where
+    T: AsRef<[u8]>,
+{
+    fn serialize_as<S>(source: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match source {
+            None => serializer.serialize_str(""),
+            Some(source) => serializer.serialize_str(source.to_base64().as_str()),
         }
-        let mut buf = BytesMut::zeroed(((input.len() * 3) / 4) + 1);
-        let decoded_len = try_base64_dec_urlsafe_nopadding(input, &mut buf)
-            .map_err(Base64DeserializationError::Base64Error)?
-            .len();
-        buf.truncate(decoded_len);
-        let bytes = buf.freeze();
-        Ok(T::try_from_bytes(bytes)?)
     }
 }
 
-pub(crate) trait ToBase64<V> {
-    fn to_base64(&self) -> String;
-}
+impl<'de, T> DeserializeAs<'de, Option<T>> for OptionalBase64As
+where
+    T: TryFromBase64,
+{
+    fn deserialize_as<D>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Helper<T>(PhantomData<T>);
 
-impl<T: AsBytes> ToBase64<UrlSafeNoPadding> for T {
-    fn to_base64(&self) -> String {
-        base64_enc_urlsafe_nopadding(self.as_bytes().into())
+        impl<T> Visitor<'_> for Helper<T>
+        where
+            T: TryFromBase64,
+        {
+            type Value = Option<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(
+                    "either a string representing a base64 encoded value or an empty string",
+                )
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if v.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(
+                    T::try_from_base64(v.as_bytes()).map_err(serde::de::Error::custom)?,
+                ))
+            }
+        }
+
+        deserializer.deserialize_str(Helper::<T>(PhantomData))
     }
-}
-
-fn base64_enc_urlsafe_nopadding(input: impl AsRef<[u8]>) -> String {
-    Base64UrlSafeNoPadding::encode_to_string(input)
-        .expect("base64 encode_to_string should never fail")
-}
-
-fn try_base64_dec_urlsafe_nopadding(
-    input: impl AsRef<str>,
-    out: &mut [u8],
-) -> Result<&[u8], ct_codecs::Error> {
-    Base64UrlSafeNoPadding::decode(out, input.as_ref(), None)
 }
