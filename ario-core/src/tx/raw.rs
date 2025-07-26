@@ -1,9 +1,10 @@
 use crate::base64::OptionalBase64As;
 use crate::blob::Blob;
+use crate::hash::{HashableExt, Sha256Hasher};
 use crate::tx::Format;
 use crate::validation::{SupportsValidation, Valid, Validator};
 use crate::{JsonError, JsonValue};
-use bigdecimal::BigDecimal;
+use bigdecimal::{BigDecimal, Zero};
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
 use serde_with::NoneAsEmptyString;
@@ -12,7 +13,10 @@ use serde_with::base64::UrlSafe;
 use serde_with::formats::Unpadded;
 use serde_with::serde_as;
 use std::io::Read;
+use std::ops::Deref;
+use std::sync::LazyLock;
 use thiserror::Error;
+use crate::json::JsonSource;
 
 #[derive(Clone, Debug, PartialEq)]
 #[repr(transparent)]
@@ -30,6 +34,12 @@ impl<'a> From<RawTxData<'a>> for UnvalidatedRawTx<'a> {
 impl<'a> From<ValidatedRawTx<'a>> for RawTxData<'a> {
     fn from(value: ValidatedRawTx<'a>) -> Self {
         value.0
+    }
+}
+
+impl<'a> ValidatedRawTx<'a> {
+    pub(super) fn into_inner(self) -> RawTxData<'a> {
+        self.0
     }
 }
 
@@ -134,6 +144,12 @@ impl<'a> RawTxData<'a> {
     }
 }
 
+impl RawTxData<'static> {
+    fn from_json<J: JsonSource>(json: J) -> Result<Self, JsonError> {
+        serde_json::from_value(json.try_into_json()?)
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum RawTxDataError {
     #[error(
@@ -148,10 +164,10 @@ pub enum RawTxDataError {
     TagsMaxLenExceeded { max: usize, actual: usize },
     #[error("maximum embedded data length exceeded: '{actual}' > '{max}' byte")]
     EmbeddedDataMaxLenExceeded { max: usize, actual: usize },
-    #[error("quantity cannot be negative")]
-    NegativeQuantity,
-    #[error("reward cannot be negative")]
-    NegativeReward,
+    #[error("non-integer number found in field '{field}', invalid value: '{value}'")]
+    NonIntegerNumber { field: &'static str, value: String },
+    #[error("negative number found in field '{field}', invalid value: '{value}'")]
+    NegativeNumber { field: &'static str, value: String },
     #[error("quantity is missing but mandatory for this tx")]
     MissingQuantity,
     #[error("target is missing but mandatory for this tx")]
@@ -178,7 +194,7 @@ impl Validator<RawTxData<'_>> for RawTxDataValidator {
         validate_byte_len(data.id.bytes(), VALID_ID_LENGTHS, "id")?;
         validate_byte_len(data.last_tx.bytes(), VALID_LAST_TX_LENGTHS, "last_tx")?;
 
-        if let Some(owner) = data.owner.as_ref() {
+        if let Some(owner) = &data.owner {
             validate_byte_len(owner.bytes(), VALID_OWNER_LENGTHS, "owner")?;
         }
 
@@ -189,11 +205,11 @@ impl Validator<RawTxData<'_>> for RawTxDataValidator {
             });
         }
 
-        if let Some(target) = data.target.as_ref() {
+        if let Some(target) = &data.target {
             validate_byte_len(target.bytes(), VALID_TARGET_LENGTHS, "target")?;
         }
 
-        if let Some(data) = data.data.as_ref() {
+        if let Some(data) = &data.data {
             if data.len() > MAX_EMBEDDED_DATA_LEN {
                 return Err(RawTxDataError::EmbeddedDataMaxLenExceeded {
                     max: MAX_EMBEDDED_DATA_LEN,
@@ -204,12 +220,60 @@ impl Validator<RawTxData<'_>> for RawTxDataValidator {
 
         validate_byte_len(data.signature.bytes(), VALID_SIG_LENGTHS, "signature")?;
 
-        if let Some(data_root) = data.data_root.as_ref() {
+        if let Some(data_root) = &data.data_root {
             validate_byte_len(data_root.bytes(), VALID_DATA_ROOT_LENGTHS, "data_root")?;
+        }
+
+        let mut positive_quantity = false;
+        if let Some(quantity) = &data.quantity {
+            validate_positive_integer(quantity, "quantity")?;
+
+            if quantity != ZERO_BD.deref() {
+                if data.target.is_none() {
+                    return Err(RawTxDataError::MissingTarget);
+                }
+                positive_quantity = true;
+            }
+        }
+
+        validate_positive_integer(&data.reward, "reward")?;
+
+        if data.target.is_some() {
+            if !positive_quantity {
+                return Err(RawTxDataError::MissingQuantity);
+            }
+        }
+
+        let expected_tx_id = data.signature.bytes().digest::<Sha256Hasher>();
+        if expected_tx_id.as_slice() != data.id.bytes() {
+            return Err(RawTxDataError::IdSignatureMismatch);
         }
 
         Ok(())
     }
+}
+
+static ZERO_BD: LazyLock<BigDecimal> = LazyLock::new(|| BigDecimal::zero());
+
+fn validate_positive_integer(
+    number: &BigDecimal,
+    field: &'static str,
+) -> Result<(), RawTxDataError> {
+    if number.fractional_digit_count() > 0 {
+        return Err(RawTxDataError::NonIntegerNumber {
+            field,
+            value: number.to_plain_string(),
+        });
+    }
+
+    if number < ZERO_BD.deref() {
+        return Err(RawTxDataError::NegativeNumber {
+            field,
+            value: number.to_plain_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn validate_byte_len(
@@ -226,52 +290,6 @@ fn validate_byte_len(
         });
     }
     Ok(())
-}
-
-trait JsonSource {
-    fn try_into_json(self) -> Result<JsonValue, JsonError>;
-}
-
-impl JsonSource for JsonValue {
-    fn try_into_json(self) -> Result<JsonValue, JsonError> {
-        Ok(self)
-    }
-}
-
-impl JsonSource for &Vec<u8> {
-    fn try_into_json(self) -> Result<JsonValue, JsonError> {
-        serde_json::from_slice(self.as_slice())
-    }
-}
-
-impl JsonSource for &[u8] {
-    fn try_into_json(self) -> Result<JsonValue, JsonError> {
-        serde_json::from_slice(self)
-    }
-}
-
-impl JsonSource for &str {
-    fn try_into_json(self) -> Result<JsonValue, JsonError> {
-        serde_json::from_str(self)
-    }
-}
-
-impl JsonSource for &String {
-    fn try_into_json(self) -> Result<JsonValue, JsonError> {
-        serde_json::from_str(self.as_str())
-    }
-}
-
-impl JsonSource for &Blob<'_> {
-    fn try_into_json(self) -> Result<JsonValue, JsonError> {
-        serde_json::from_slice(self.bytes())
-    }
-}
-
-impl RawTxData<'static> {
-    fn from_json<J: JsonSource>(json: J) -> Result<Self, JsonError> {
-        serde_json::from_value(json.try_into_json()?)
-    }
 }
 
 #[cfg(test)]

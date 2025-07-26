@@ -17,6 +17,7 @@ pub mod signature;
 pub mod typed;
 mod validation;
 pub mod wallet;
+mod json;
 //pub struct DriveKind;
 //pub type DriveId = id::TypedUuid<DriveKind>;
 

@@ -55,7 +55,10 @@ impl<SK: WalletSecretKey> Wallet<SK> {
         todo!()
     }
 
-    pub fn sign_tx(&self, tx: UnsignedTx) -> Result<SignedTx, (UnsignedTx, SigningError)> {
+    pub fn sign_tx<'a>(
+        &'a self,
+        tx: UnsignedTx<'a>,
+    ) -> Result<SignedTx<'a>, (UnsignedTx<'a>, SigningError)> {
         tx.sign(&self)
     }
 }

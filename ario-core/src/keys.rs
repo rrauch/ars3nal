@@ -68,7 +68,7 @@ impl<P: RsaParams> SupportsSignatures for Rsa<P> {
     type Scheme = signature::RsaPss<P>;
 }
 
-pub(crate) trait PublicKey: Hashable + DeepHashable + AsBlob {
+pub(crate) trait PublicKey: Hashable + DeepHashable + AsBlob + PartialEq {
     type Scheme;
     type KeyLen: ArrayLength;
     type SecretKey: SecretKey<Scheme = Self::Scheme, PublicKey = Self>;
@@ -102,26 +102,26 @@ where
     }
 }
 
-pub trait RsaParams {
+pub trait RsaParams: PartialEq {
     type KeyLen: ArrayLength;
     type SigLen: ArrayLength;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Rsa4096;
 impl RsaParams for Rsa4096 {
     type KeyLen = U512;
     type SigLen = U512;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Rsa2048;
 impl RsaParams for Rsa2048 {
     type KeyLen = U256;
     type SigLen = U256;
 }
 
-#[derive(Clone, Debug, TransparentWrapper)]
+#[derive(Clone, Debug, TransparentWrapper, PartialEq)]
 #[transparent(ExternalRsaPublicKey)]
 #[repr(transparent)]
 pub struct RsaPublicKey<P: RsaParams>(ExternalRsaPublicKey, PhantomData<P>);

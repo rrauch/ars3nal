@@ -1,7 +1,10 @@
+use crate::typed::Typed;
 use bytes::Bytes;
 use generic_array::{ArrayLength, GenericArray};
 use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
+
+pub type TypedBlob<'a, T> = Typed<T, Blob<'a>>;
 
 #[derive(Clone, PartialEq)]
 pub enum Blob<'a> {
@@ -67,6 +70,14 @@ impl<'a> Blob<'a> {
             Self::Bytes(b) => b.is_empty(),
             Self::Slice(b) => b.is_empty(),
         }
+    }
+
+    pub fn into_owned(self) -> OwnedBlob {
+        let bytes = match self {
+            Self::Bytes(b) => b,
+            Self::Slice(s) => Bytes::copy_from_slice(s),
+        };
+        Blob::from(bytes)
     }
 }
 

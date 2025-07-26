@@ -3,13 +3,14 @@ mod v1;
 
 use crate::JsonError;
 use crate::base64::ToBase64;
-use crate::blob::{Blob, OwnedBlob};
+use crate::blob::{Blob, OwnedBlob, TypedBlob};
 use crate::hash::{
     DeepHashable, Digest, Hashable, Hasher, HasherExt, Sha256Hasher, Sha384Hasher, TypedDigest,
 };
 use crate::keys::{Rsa4096, RsaPublicKey};
 use crate::money::{Money, TypedMoney, Winston};
 use crate::signature::{RsaPss, Signature, TypedSignature};
+use crate::tx::raw::RawTag;
 use crate::typed::{FromInner, Typed};
 use crate::wallet::{
     Wallet, WalletAddress, WalletKind, WalletPKey, WalletPublicKey, WalletSecretKey,
@@ -67,7 +68,7 @@ pub enum LastTx {
 
 impl<'a> TryFrom<Blob<'a>> for LastTx {
     type Error =
-        LastTxError<<TxId as TryFrom<Blob<'a>>>::Error, <TxAnchor as TryFrom<Blob<'a>>>::Error>;
+    LastTxError<<TxId as TryFrom<Blob<'a>>>::Error, <TxAnchor as TryFrom<Blob<'a>>>::Error>;
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
         match value.len() {
@@ -160,12 +161,21 @@ impl DeepHashable for Format {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Tag {
-    pub name: TagName,
-    pub value: TagValue,
+pub struct Tag<'a> {
+    pub name: TagName<'a>,
+    pub value: TagValue<'a>,
 }
 
-impl DeepHashable for Tag {
+impl<'a> From<RawTag<'a>> for Tag<'a> {
+    fn from(raw: RawTag<'a>) -> Self {
+        Self {
+            name: TagName::from_inner(raw.name),
+            value: TagValue::from_inner(raw.value),
+        }
+    }
+}
+
+impl DeepHashable for Tag<'_> {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
         Self::list(vec![self.name.deep_hash(), self.value.deep_hash()])
     }
@@ -202,12 +212,12 @@ pub enum TxDataError {
 // This follows the definition found here:
 // https://docs.arweave.org/developers/arweave-node-server/http-api#field-definitions
 #[derive(Debug, Clone)]
-pub(crate) struct TxData {
+pub(crate) struct TxData<'a> {
     format: Format,
     id: TxId,
     last_tx: LastTx,
     owner: WalletPKey<RsaPublicKey<Rsa4096>>,
-    tags: Vec<Tag>,
+    tags: Vec<Tag<'a>>,
     //#[serde(with = "empty_string_none")]
     target: Option<WalletAddress>,
     //#[serde(default)]
@@ -220,13 +230,13 @@ pub(crate) struct TxData {
     //#[serde(with = "string_number")]
     data_size: u64,
     //#[serde(with = "empty_string_none")]
-    data: Option<EmbeddedData>,
+    data: Option<EmbeddedData<'a>>,
     //#[serde(with = "empty_string_none")]
     reward: Option<Reward>,
     signature: TxSignature,
 }
 
-impl TxData {
+impl<'a> TxData<'a> {
     pub(crate) fn try_from_json_slice(bytes: &[u8]) -> Result<Self, TxDataError> {
         let tx_data = Self::try_from_json_slice_unvalidated(bytes)?;
         //tx_data.is_valid()?;
@@ -274,10 +284,10 @@ impl TxData {
                 // https://docs.arweave.org/developers/arweave-node-server/http-api#field-definitions
                 if self.data_size > 0
                     && self
-                        .data_root
-                        .as_ref()
-                        .map(|e| !e.is_empty())
-                        .unwrap_or(false)
+                    .data_root
+                    .as_ref()
+                    .map(|e| !e.is_empty())
+                    .unwrap_or(false)
                 {
                     true
                 } else {
@@ -288,7 +298,7 @@ impl TxData {
     }
 }
 
-impl DeepHashable for TxData {
+impl DeepHashable for TxData<'_> {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
         match self.format {
             Format::V1 => {
@@ -393,12 +403,13 @@ impl DeepHashable for TxData {
 }*/
 
 pub struct TagNameKind;
-pub type TagName = OwnedBlob;
+pub type TagName<'a> = TypedBlob<'a, TagNameKind>;
 
 pub struct TagValueKind;
-pub type TagValue = OwnedBlob;
+pub type TagValue<'a> = TypedBlob<'a, TagValueKind>;
 
-pub type EmbeddedData = OwnedBlob;
+pub struct EmbeddedDataKind;
+pub type EmbeddedData<'a> = TypedBlob<'a, EmbeddedDataKind>;
 
 pub struct TxQuantityKind;
 pub type Quantity = TypedMoney<TxQuantityKind, Winston>;
@@ -421,8 +432,8 @@ impl Reward {
 pub struct Signed;
 pub struct Unsigned;
 
-pub type V1Tx<S> = TxImpl<S, V1>;
-pub type V2Tx<S> = TxImpl<S, V2>;
+pub type V1Tx<'a, S> = TxImpl<'a, S, V1>;
+pub type V2Tx<'a, S> = TxImpl<'a, S, V2>;
 
 #[derive(Error, Debug)]
 pub enum TxError {
@@ -433,12 +444,12 @@ pub enum TxError {
 }
 
 #[derive_where(Debug, Clone)]
-pub enum Tx<S> {
-    V1(V1Tx<S>),
-    V2(V2Tx<S>),
+pub enum Tx<'a, S> {
+    V1(V1Tx<'a, S>),
+    V2(V2Tx<'a, S>),
 }
 
-impl<S> Tx<S> {
+impl<'a, S> Tx<'a, S> {
     pub fn id(&self) -> &TxId {
         match self {
             Self::V1(v1) => v1.id(),
@@ -468,7 +479,7 @@ impl<S> Tx<S> {
     }
 }
 
-impl SignedTx {
+impl<'a> SignedTx<'a> {
     pub fn try_from_json_slice(bytes: &[u8]) -> Result<Self, TxError> {
         let tx_data = TxData::try_from_json_slice(bytes)?;
         Ok(match tx_data.format {
@@ -477,7 +488,7 @@ impl SignedTx {
         })
     }
 
-    pub fn try_make_mut(self) -> Result<UnsignedTx, (Self, EditError)> {
+    pub fn try_make_mut(self) -> Result<UnsignedTx<'a>, (Self, EditError)> {
         match self {
             Self::V1(v1) => Err((v1.into(), EditError::V1Unsupported)),
             Self::V2(v2) => Ok(v2.make_unsigned().into()),
@@ -485,7 +496,7 @@ impl SignedTx {
     }
 }
 
-impl UnsignedTx {
+impl<'a> UnsignedTx<'a> {
     pub(crate) fn sign<SK: WalletSecretKey>(
         self,
         wallet: &Wallet<SK>,
@@ -499,7 +510,7 @@ impl UnsignedTx {
         }
     }
 
-    pub fn tags_mut(&mut self) -> &mut Vec<Tag> {
+    pub fn tags_mut(&'a mut self) -> &'a mut Vec<Tag<'a>> {
         match self {
             Self::V1(v1) => v1.tags_mut(),
             Self::V2(v2) => v2.tags_mut(),
@@ -521,20 +532,20 @@ impl UnsignedTx {
     }
 }
 
-impl<S> From<TxImpl<S, V1>> for Tx<S> {
-    fn from(value: TxImpl<S, V1>) -> Self {
+impl<'a, S> From<TxImpl<'a, S, V1>> for Tx<'a, S> {
+    fn from(value: TxImpl<'a, S, V1>) -> Self {
         Self::V1(value)
     }
 }
 
-impl<S> From<TxImpl<S, V2>> for Tx<S> {
-    fn from(value: TxImpl<S, V2>) -> Self {
+impl<'a, S> From<TxImpl<'a, S, V2>> for Tx<'a, S> {
+    fn from(value: TxImpl<'a, S, V2>) -> Self {
         Self::V2(value)
     }
 }
 
-pub type SignedTx = Tx<Signed>;
-pub type UnsignedTx = Tx<Unsigned>;
+pub type SignedTx<'a> = Tx<'a, Signed>;
+pub type UnsignedTx<'a> = Tx<'a, Unsigned>;
 
 pub struct V1;
 pub struct V2;
@@ -553,10 +564,10 @@ pub enum EditError {
 
 #[derive_where(Clone, Debug)]
 #[repr(transparent)]
-pub struct TxImpl<S, V>(TxData, PhantomData<(S, V)>);
+pub struct TxImpl<'a, S, V>(TxData<'a>, PhantomData<(S, V)>);
 
-impl<S, V> TxImpl<S, V> {
-    fn new(inner: TxData) -> Self {
+impl<'a, S, V> TxImpl<'a, S, V> {
+    fn new(inner: TxData<'a>) -> Self {
         Self(inner, PhantomData)
     }
 
@@ -577,8 +588,8 @@ impl<S, V> TxImpl<S, V> {
     }
 }
 
-impl<V> TxImpl<Unsigned, V> {
-    pub fn tags_mut(&mut self) -> &mut Vec<Tag> {
+impl<'a, V> TxImpl<'a, Unsigned, V> {
+    pub fn tags_mut(&'a mut self) -> &'a mut Vec<Tag<'a>> {
         self.0.tags.as_mut()
     }
 
@@ -591,7 +602,7 @@ impl<V> TxImpl<Unsigned, V> {
     }
 }
 
-impl<S> TxImpl<S, V1> {
+impl<'a, S> TxImpl<'a, S, V1> {
     pub fn last_tx(&self) -> &TxId {
         if let LastTx::V1(tx_id) = &self.0.last_tx {
             tx_id
@@ -601,7 +612,7 @@ impl<S> TxImpl<S, V1> {
     }
 }
 
-impl<S> TxImpl<S, V2> {
+impl<'a, S> TxImpl<'a, S, V2> {
     pub fn last_tx(&self) -> &TxAnchor {
         if let LastTx::V2(tx_anchor) = &self.0.last_tx {
             tx_anchor
@@ -611,7 +622,7 @@ impl<S> TxImpl<S, V2> {
     }
 }
 
-impl TxImpl<Unsigned, V2> {
+impl<'a> TxImpl<'a, Unsigned, V2> {
     fn sign<SK: WalletSecretKey>(
         self,
         _wallet: &Wallet<SK>,
@@ -625,8 +636,8 @@ impl TxImpl<Unsigned, V2> {
     }
 }
 
-impl TxImpl<Signed, V2> {
-    fn make_unsigned(self) -> TxImpl<Unsigned, V2> {
+impl<'a> TxImpl<'a, Signed, V2> {
+    fn make_unsigned(self) -> TxImpl<'a, Unsigned, V2> {
         let mut data = self.0;
         data.signature = TxSignature::empty();
         TxImpl(data, PhantomData)
@@ -715,51 +726,51 @@ mod tests {
 
         assert_eq!(tx_data.tags.len(), 6);
         assert_eq!(
-            tx_data.tags.get(0).unwrap().name.as_ref(),
+            tx_data.tags.get(0).unwrap().name.bytes(),
             "App-Name".as_bytes()
         );
         assert_eq!(
-            tx_data.tags.get(0).unwrap().value.as_ref(),
+            tx_data.tags.get(0).unwrap().value.bytes(),
             "trackmycontainer.io".as_bytes()
         );
         assert_eq!(
-            tx_data.tags.get(1).unwrap().name.as_ref(),
+            tx_data.tags.get(1).unwrap().name.bytes(),
             "Application".as_bytes()
         );
         assert_eq!(
-            tx_data.tags.get(1).unwrap().value.as_ref(),
+            tx_data.tags.get(1).unwrap().value.bytes(),
             "Traxa.io".as_bytes()
         );
         assert_eq!(
-            tx_data.tags.get(2).unwrap().name.as_ref(),
+            tx_data.tags.get(2).unwrap().name.bytes(),
             "Content-Type".as_bytes()
         );
         assert_eq!(
-            tx_data.tags.get(2).unwrap().value.as_ref(),
+            tx_data.tags.get(2).unwrap().value.bytes(),
             "image/jpeg".as_bytes()
         );
         assert_eq!(
-            tx_data.tags.get(3).unwrap().name.as_ref(),
+            tx_data.tags.get(3).unwrap().name.bytes(),
             "Modified".as_bytes()
         );
         assert_eq!(
-            tx_data.tags.get(3).unwrap().value.as_ref(),
+            tx_data.tags.get(3).unwrap().value.bytes(),
             "1753107957".as_bytes()
         );
         assert_eq!(
-            tx_data.tags.get(4).unwrap().name.as_ref(),
+            tx_data.tags.get(4).unwrap().name.bytes(),
             "Shipping-Container-GPS".as_bytes()
         );
         assert_eq!(
-            tx_data.tags.get(4).unwrap().value.as_ref(),
+            tx_data.tags.get(4).unwrap().value.bytes(),
             "(40.7549755075, -112.0129563668)".as_bytes()
         );
         assert_eq!(
-            tx_data.tags.get(5).unwrap().name.as_ref(),
+            tx_data.tags.get(5).unwrap().name.bytes(),
             "Shipping-Container-IDs".as_bytes()
         );
         assert_eq!(
-            tx_data.tags.get(5).unwrap().value.as_ref(),
+            tx_data.tags.get(5).unwrap().value.bytes(),
             "SEGU4454314".as_bytes()
         );
 
