@@ -2,7 +2,7 @@ use crate::BigUint;
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
+use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha256Hash};
 use crate::crypto::keys::{KeyError, KeyLen, PublicKey, SecretKey};
 use crate::crypto::signature::{Scheme, Signature, SupportsSignatures};
 use bytemuck::TransparentWrapper;
@@ -10,11 +10,11 @@ use derive_where::derive_where;
 use digest::consts::{U256, U512};
 use hybrid_array::typenum::Unsigned;
 use rsa::pss::{SigningKey as PssSigningKey, VerifyingKey as PssVerifyingKey};
-use rsa::signature::{DigestVerifier, RandomizedDigestSigner, SignatureEncoding};
+use rsa::signature::SignatureEncoding;
+use rsa::signature::hazmat::{PrehashVerifier, RandomizedPrehashSigner};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey};
 use std::marker::PhantomData;
-use std::ops::Deref;
 use std::sync::LazyLock;
 
 static RSA_EXPONENT: LazyLock<BigUint> =
@@ -149,11 +149,15 @@ impl<P: RsaParams> Scheme for RsaPss<P> {
     type SigLen = P::KeyLen;
 
     type Signer = RsaPrivateKey<P>;
+    type SigningError = rsa::signature::Error;
     type Verifier = RsaPublicKey<P>;
     type VerificationError = rsa::signature::Error;
-    type Message = Sha256;
+    type Message<'a> = &'a Sha256Hash;
 
-    fn sign(signer: &Self::Signer, msg: Self::Message) -> Signature<Self>
+    fn sign(
+        signer: &Self::Signer,
+        msg: Self::Message<'_>,
+    ) -> Result<Signature<Self>, Self::SigningError>
     where
         Self: Sized,
     {
@@ -164,14 +168,14 @@ impl<P: RsaParams> Scheme for RsaPss<P> {
 
         let mut rng = rand::rng();
 
-        let sig = signing_key.sign_digest_with_rng(&mut rng, msg);
-        Signature::try_clone_from_bytes(sig.to_bytes().deref())
-            .expect("signature to be of correct length")
+        let sig = signing_key.sign_prehash_with_rng(&mut rng, msg.as_slice())?;
+        Ok(Signature::try_clone_from_bytes(sig.to_bytes())
+            .expect("signature to be of correct length"))
     }
 
     fn verify(
         verifier: &Self::Verifier,
-        msg: Self::Message,
+        msg: Self::Message<'_>,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where
@@ -182,7 +186,10 @@ impl<P: RsaParams> Scheme for RsaPss<P> {
             calculate_rsa_pss_max_salt_len::<Sha256>(P::KeyLen::to_usize()),
         );
 
-        verifying_key.verify_digest(msg, &rsa::pss::Signature::try_from(signature.as_slice())?)
+        verifying_key.verify_prehash(
+            msg.as_slice(),
+            &rsa::pss::Signature::try_from(signature.as_slice())?,
+        )
     }
 }
 
@@ -290,10 +297,9 @@ OTOdooS54PVffrqDRHz7dQ==
         )?;
         let public_key = secret_key.public_key_impl();
 
-        let message = "HEllO wOrlD".hasher();
-        let message2 = "HEllO wOrlD".hasher();
-        let signature = secret_key.sign_impl(message);
-        public_key.verify_sig_impl(message2, &signature)?;
+        let message = "HEllO wOrlD".digest();
+        let signature = secret_key.sign_impl(&message)?;
+        public_key.verify_sig_impl(&message, &signature)?;
         Ok(())
     }
 
@@ -304,10 +310,9 @@ OTOdooS54PVffrqDRHz7dQ==
         )?;
         let public_key = secret_key.public_key_impl();
 
-        let message = "HEllO wOrlD2222".hasher();
-        let message2 = "HEllO wOrlD2222".hasher();
-        let signature = secret_key.sign_impl(message);
-        public_key.verify_sig_impl(message2, &signature)?;
+        let message = "HEllO wOrlD2222".digest();
+        let signature = secret_key.sign_impl(&message)?;
+        public_key.verify_sig_impl(&message, &signature)?;
         Ok(())
     }
 }

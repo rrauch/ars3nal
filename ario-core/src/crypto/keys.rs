@@ -38,7 +38,7 @@ where
 
     fn verify_sig_impl(
         &self,
-        data: <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::Message,
+        data: <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::Message<'_>,
         sig: &Signature<<PK::Scheme as SupportsSignatures>::Scheme>,
     ) -> Result<(), Self::VerificationError> {
         <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::verify(self, data, sig)
@@ -49,10 +49,13 @@ impl<SK: SecretKey> SignExt<<SK::Scheme as SupportsSignatures>::Scheme> for SK
 where
     SK::Scheme: SupportsSignatures<Signer = SK>,
 {
+    type SigningError =
+        <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::SigningError;
+
     fn sign_impl(
         &self,
-        data: <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::Message,
-    ) -> Signature<<SK::Scheme as SupportsSignatures>::Scheme> {
+        data: <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::Message<'_>,
+    ) -> Result<Signature<<SK::Scheme as SupportsSignatures>::Scheme>, Self::SigningError> {
         <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::sign(self, data)
     }
 }

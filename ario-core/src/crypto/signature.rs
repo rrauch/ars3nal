@@ -67,16 +67,20 @@ impl<T> SigLen for T where T: ArraySize {}
 pub trait Scheme {
     type SigLen: SigLen;
     type Signer;
+    type SigningError: Display;
     type Verifier;
     type VerificationError: Display;
-    type Message;
+    type Message<'a>;
 
-    fn sign(signer: &Self::Signer, msg: Self::Message) -> Signature<Self>
+    fn sign(
+        signer: &Self::Signer,
+        msg: Self::Message<'_>,
+    ) -> Result<Signature<Self>, Self::SigningError>
     where
         Self: Sized;
     fn verify(
         verifier: &Self::Verifier,
-        msg: Self::Message,
+        msg: Self::Message<'_>,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where
@@ -94,11 +98,12 @@ pub(crate) trait VerifySigExt<S: Scheme> {
 
     fn verify_sig_impl(
         &self,
-        msg: S::Message,
+        msg: S::Message<'_>,
         sig: &Signature<S>,
     ) -> Result<(), Self::VerificationError>;
 }
 
 pub(crate) trait SignExt<S: Scheme> {
-    fn sign_impl(&self, msg: S::Message) -> Signature<S>;
+    type SigningError: Display;
+    fn sign_impl(&self, msg: S::Message<'_>) -> Result<Signature<S>, Self::SigningError>;
 }
