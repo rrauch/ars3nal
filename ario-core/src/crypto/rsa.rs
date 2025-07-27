@@ -1,109 +1,151 @@
-use crate::blob::Blob;
-use crate::keys::{RsaParams, RsaPrivateKey, RsaPublicKey};
-use crate::typed::Typed;
+use crate::BigUint;
+use crate::base64::ToBase64;
+use crate::blob::{AsBlob, Blob};
+use crate::crypto::keys::{KeyError, PublicKey, SecretKey};
+use crate::crypto::signature::{Scheme, Signature, SupportsSignatures};
+use crate::hash::{DeepHashable, Digest, Hashable, Hasher};
+use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
+use digest::consts::{U256, U512};
+use generic_array::ArrayLength;
 use generic_array::typenum::Unsigned;
-use generic_array::{ArrayLength, GenericArray};
-use rsa::pss::{BlindedSigningKey, VerifyingKey as PssVerifyingKey};
-use rsa::signature;
-use rsa::signature::{RandomizedSignerMut, SignatureEncoding, Verifier};
-use std::array::TryFromSliceError;
-use std::fmt::Display;
+use rsa::pss::{SigningKey as PssSigningKey, VerifyingKey as PssVerifyingKey};
+use rsa::signature::{
+    DigestVerifier, RandomizedDigestSigner, RandomizedSigner, SignatureEncoding, Verifier,
+};
+use rsa::traits::PublicKeyParts;
+use rsa::{RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey};
 use std::marker::PhantomData;
 use std::ops::Deref;
-use thiserror::Error;
+use std::sync::LazyLock;
 
-pub type TypedSignature<T, SIGNER, S: Scheme> = Typed<(T, SIGNER), Signature<S>>;
+static RSA_EXPONENT: LazyLock<BigUint> =
+    LazyLock::new(|| BigUint::from_be_slice_vartime(&[0x01, 0x00, 0x01])); // 65537
 
-#[derive_where(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive_where(Clone)]
+#[derive(TransparentWrapper)]
+#[transparent(ExternalRsaPrivateKey)]
 #[repr(transparent)]
-pub struct Signature<S: Scheme>(GenericArray<u8, S::SigLen>);
+pub struct RsaPrivateKey<P: RsaParams>(ExternalRsaPrivateKey, PhantomData<P>);
 
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("Invalid input length, expected '{expected}' but go '{actual}'")]
-    InvalidInputLength { expected: usize, actual: usize },
-    #[error(transparent)]
-    ConversionError(#[from] TryFromSliceError),
-}
-
-impl<S: Scheme> Signature<S> {
-    pub(crate) fn empty() -> Self {
-        Self(GenericArray::default())
-    }
-
-    pub fn try_clone_from_bytes(input: impl AsRef<[u8]>) -> Result<Self, Error> {
-        let input = input.as_ref();
-        let expected = S::SigLen::to_usize();
-        if input.len() != expected {
-            return Err(Error::InvalidInputLength {
-                expected,
-                actual: input.len(),
+impl<P: RsaParams> RsaPrivateKey<P> {
+    pub(crate) fn try_from_inner(inner: ExternalRsaPrivateKey) -> Result<Self, KeyError> {
+        if inner.size() != P::KeyLen::to_usize() {
+            return Err(KeyError::UnexpectedKeyLength {
+                expected: P::KeyLen::to_usize(),
+                actual: inner.size(),
             });
         }
-        Ok(Self(GenericArray::from_slice(input).clone()))
+        Ok(Self(inner, PhantomData))
     }
-
-    pub fn as_slice(&self) -> &[u8] {
+    pub(crate) fn as_inner(&self) -> &ExternalRsaPrivateKey {
         &self.0
     }
+}
 
-    pub fn into_inner(self) -> GenericArray<u8, S::SigLen> {
-        self.0
+impl<P: RsaParams> SecretKey for RsaPrivateKey<P> {
+    type Scheme = Rsa<P>;
+    type KeyLen = P::KeyLen;
+    type PublicKey = RsaPublicKey<P>;
+
+    fn public_key_impl(&self) -> &Self::PublicKey {
+        RsaPublicKey::wrap_ref(self.0.as_ref())
     }
 }
 
-impl<S: Scheme> AsRef<[u8]> for Signature<S> {
-    fn as_ref(&self) -> &[u8] {
-        self.as_slice()
+pub struct Rsa<P: RsaParams>(PhantomData<P>);
+
+impl<P: RsaParams> SupportsSignatures for Rsa<P> {
+    type Signer = RsaPrivateKey<P>;
+    type Verifier = RsaPublicKey<P>;
+    type Scheme = RsaPss<P>;
+}
+
+pub trait RsaParams: PartialEq {
+    type KeyLen: ArrayLength;
+    type SigLen: ArrayLength;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rsa4096;
+impl RsaParams for Rsa4096 {
+    type KeyLen = U512;
+    type SigLen = U512;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rsa2048;
+impl RsaParams for Rsa2048 {
+    type KeyLen = U256;
+    type SigLen = U256;
+}
+
+#[derive(Clone, Debug, TransparentWrapper, PartialEq)]
+#[transparent(ExternalRsaPublicKey)]
+#[repr(transparent)]
+pub struct RsaPublicKey<P: RsaParams>(ExternalRsaPublicKey, PhantomData<P>);
+
+impl<P: RsaParams> RsaPublicKey<P> {
+    pub(crate) fn from_inner(inner: ExternalRsaPublicKey) -> Self {
+        Self(inner, PhantomData)
+    }
+
+    pub(crate) fn from_modulus(n: impl Into<BigUint>) -> Result<Self, KeyError> {
+        let n = n.into();
+        let inner = ExternalRsaPublicKey::new(n, RSA_EXPONENT.clone())?;
+        Ok(Self::from_inner(inner))
+    }
+
+    pub(crate) fn as_inner(&self) -> &ExternalRsaPublicKey {
+        &self.0
     }
 }
 
-impl<'a, S: Scheme> TryFrom<Blob<'a>> for Signature<S> {
-    type Error = <Blob<'a> as TryInto<GenericArray<u8, S::SigLen>>>::Error;
+impl<P: RsaParams> PublicKey for RsaPublicKey<P> {
+    type Scheme = Rsa<P>;
+    type KeyLen = P::KeyLen;
+    type SecretKey = RsaPrivateKey<P>;
+}
+
+impl<P: RsaParams> Hashable for RsaPublicKey<P> {
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        hasher.update(self.0.n_bytes().as_ref());
+    }
+}
+
+impl<P: RsaParams> DeepHashable for RsaPublicKey<P> {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        Self::blob(self.0.n_bytes().as_ref())
+    }
+}
+
+impl<P: RsaParams> AsBlob for RsaPublicKey<P> {
+    fn as_blob(&self) -> Blob<'_> {
+        Blob::from(self.0.n_bytes())
+    }
+}
+
+impl<P: RsaParams> ToBase64 for RsaPublicKey<P> {
+    fn to_base64(&self) -> String {
+        self.as_blob().to_base64()
+    }
+}
+
+impl<'a, P: RsaParams> TryFrom<Blob<'a>> for RsaPublicKey<P> {
+    type Error = KeyError;
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
-        Ok(Signature(value.try_into()?))
+        let len = value.len();
+        if len != P::KeyLen::to_usize() {
+            return Err(Self::Error::UnexpectedKeyLength {
+                expected: P::KeyLen::to_usize(),
+                actual: len,
+            });
+        }
+        Ok(RsaPublicKey::from_modulus(BigUint::from_be_slice_vartime(
+            value.as_ref(),
+        ))?)
     }
-}
-
-pub trait Scheme {
-    #[allow(non_camel_case_types)]
-    type SigLen: ArrayLength;
-    type Signer;
-    type Verifier;
-    type VerificationError: Display;
-
-    fn sign(signer: &Self::Signer, data: impl AsRef<[u8]>) -> Signature<Self>
-    where
-        Self: Sized;
-    fn verify(
-        verifier: &Self::Verifier,
-        data: impl AsRef<[u8]>,
-        signature: &Signature<Self>,
-    ) -> Result<(), Self::VerificationError>
-    where
-        Self: Sized;
-}
-
-pub(crate) trait SupportsSignatures {
-    type Signer;
-    type Verifier;
-    type Scheme: Scheme<Signer = Self::Signer, Verifier = Self::Verifier>;
-}
-
-pub(crate) trait VerifySigExt<S: Scheme> {
-    type VerificationError: Display;
-
-    fn verify_sig_impl(
-        &self,
-        data: impl AsRef<[u8]>,
-        sig: &Signature<S>,
-    ) -> Result<(), Self::VerificationError>;
-}
-
-pub(crate) trait SignExt<S: Scheme> {
-    fn sign_impl(&self, data: impl AsRef<[u8]>) -> Signature<S>;
 }
 
 pub struct RsaPss<P: RsaParams>(PhantomData<P>);
@@ -113,13 +155,13 @@ impl<P: RsaParams> Scheme for RsaPss<P> {
 
     type Signer = RsaPrivateKey<P>;
     type Verifier = RsaPublicKey<P>;
-    type VerificationError = signature::Error;
+    type VerificationError = rsa::signature::Error;
 
     fn sign(signer: &Self::Signer, data: impl AsRef<[u8]>) -> Signature<Self>
     where
         Self: Sized,
     {
-        let mut signing_key = BlindedSigningKey::<rsa::sha2::Sha256>::new_with_salt_len(
+        let mut signing_key = PssSigningKey::<rsa::sha2::Sha256>::new_with_salt_len(
             signer.as_inner().clone(),
             calculate_rsa_pss_max_salt_len::<sha2::Sha256>(P::KeyLen::to_usize()),
         );
@@ -159,8 +201,9 @@ fn calculate_rsa_pss_max_salt_len<D: digest::Digest>(key_size_bytes: usize) -> u
 
 #[cfg(test)]
 mod tests {
-    use crate::keys::{Rsa2048, Rsa4096, RsaPrivateKey, SecretKey};
-    use crate::signature::{SignExt, VerifySigExt};
+    use crate::crypto::keys::SecretKey;
+    use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPrivateKey};
+    use crate::crypto::signature::{SignExt, VerifySigExt};
     use rsa::RsaPrivateKey as ExternalRsaPrivateKey;
     use rsa::pkcs8::DecodePrivateKey;
 

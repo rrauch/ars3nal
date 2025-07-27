@@ -3,13 +3,13 @@ mod v1;
 
 use crate::JsonError;
 use crate::base64::ToBase64;
-use crate::blob::{Blob, OwnedBlob, TypedBlob};
+use crate::blob::{Blob, TypedBlob};
+use crate::crypto::rsa::{Rsa4096, RsaPss, RsaPublicKey};
+use crate::crypto::signature::{Signature, TypedSignature};
 use crate::hash::{
     DeepHashable, Digest, Hashable, Hasher, HasherExt, Sha256Hasher, Sha384Hasher, TypedDigest,
 };
-use crate::keys::{Rsa4096, RsaPublicKey};
 use crate::money::{Money, TypedMoney, Winston};
-use crate::signature::{RsaPss, Signature, TypedSignature};
 use crate::tx::raw::RawTag;
 use crate::typed::{FromInner, Typed};
 use crate::wallet::{
@@ -68,7 +68,7 @@ pub enum LastTx {
 
 impl<'a> TryFrom<Blob<'a>> for LastTx {
     type Error =
-    LastTxError<<TxId as TryFrom<Blob<'a>>>::Error, <TxAnchor as TryFrom<Blob<'a>>>::Error>;
+        LastTxError<<TxId as TryFrom<Blob<'a>>>::Error, <TxAnchor as TryFrom<Blob<'a>>>::Error>;
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
         match value.len() {
@@ -284,10 +284,10 @@ impl<'a> TxData<'a> {
                 // https://docs.arweave.org/developers/arweave-node-server/http-api#field-definitions
                 if self.data_size > 0
                     && self
-                    .data_root
-                    .as_ref()
-                    .map(|e| !e.is_empty())
-                    .unwrap_or(false)
+                        .data_root
+                        .as_ref()
+                        .map(|e| !e.is_empty())
+                        .unwrap_or(false)
                 {
                     true
                 } else {

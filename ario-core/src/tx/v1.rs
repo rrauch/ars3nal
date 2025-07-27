@@ -1,5 +1,7 @@
+use crate::JsonError;
+use crate::crypto::keys;
+use crate::crypto::rsa::{Rsa4096, RsaPublicKey};
 use crate::json::JsonSource;
-use crate::keys::{Rsa4096, RsaPublicKey};
 use crate::money::{CurrencyExt, Winston};
 use crate::tx::raw::{RawTxDataError, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::v1::V1TxDataError::MissingOwner;
@@ -7,7 +9,6 @@ use crate::tx::{EmbeddedData, Format, LastTx, Quantity, Reward, Tag, TxId, TxSig
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
 use crate::wallet::{WalletAddress, WalletPKey};
-use crate::{JsonError, keys};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]

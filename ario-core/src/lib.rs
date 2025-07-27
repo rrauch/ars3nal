@@ -11,13 +11,12 @@ pub mod tx;
 pub(crate) mod base64;
 pub mod blob;
 pub mod hash;
-pub mod keys;
 pub mod money;
-pub mod signature;
 pub mod typed;
 mod validation;
 pub mod wallet;
 mod json;
+pub mod crypto;
 //pub struct DriveKind;
 //pub type DriveId = id::TypedUuid<DriveKind>;
 

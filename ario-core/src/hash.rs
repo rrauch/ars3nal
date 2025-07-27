@@ -15,6 +15,8 @@ pub type TypedDigest<T, H: Hasher> = Typed<T, Digest<H>>;
 #[derive_where(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Digest<H: Hasher>(GenericArray<u8, H::DigestLen>);
+pub type Sha256Digest = Digest<Sha256Hasher>;
+
 
 impl<H: Hasher> Digest<H> {
     pub(crate) fn from_bytes(bytes: GenericArray<u8, H::DigestLen>) -> Self {

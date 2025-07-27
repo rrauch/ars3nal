@@ -1,10 +1,8 @@
 use crate::Address;
+use crate::crypto::keys::{KeyError, PublicKey, SecretKey, TypedPublicKey, TypedSecretKey};
+use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaParams, RsaPrivateKey, RsaPss, RsaPublicKey};
+use crate::crypto::signature::{Scheme, VerifySigExt};
 use crate::hash::HashableExt;
-use crate::keys::{
-    KeyError, PublicKey, Rsa2048, Rsa4096, RsaParams, RsaPrivateKey, RsaPublicKey, SecretKey,
-    TypedPublicKey, TypedSecretKey,
-};
-use crate::signature::{RsaPss, Scheme, VerifySigExt};
 use crate::tx::{SignedTx, SigningError, TxSignature, UnsignedTx};
 use crate::typed::FromInner;
 use bytemuck::TransparentWrapper;
