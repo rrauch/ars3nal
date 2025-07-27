@@ -10,9 +10,12 @@ use thiserror::Error;
 
 pub type TypedSecretKey<T, SK: SecretKey> = Typed<T, SK>;
 
+pub trait KeyLen: ArraySize {}
+impl<T> KeyLen for T where T: ArraySize {}
+
 pub(crate) trait SecretKey {
     type Scheme;
-    type KeyLen: ArraySize;
+    type KeyLen: KeyLen;
     type PublicKey: PublicKey<Scheme = Self::Scheme, SecretKey = Self>;
 
     fn public_key_impl(&self) -> &Self::PublicKey;

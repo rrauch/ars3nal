@@ -1,9 +1,7 @@
 pub mod deep_hash;
-pub mod wrapped;
 
 use crate::base64::ToBase64;
 use crate::blob::Blob;
-use crate::crypto::hash::wrapped::WrappedDigest;
 use crate::typed::Typed;
 use bytes::Bytes;
 use derive_where::derive_where;
@@ -11,15 +9,10 @@ use hybrid_array::{Array, ArraySize};
 use std::fmt::{Display, Formatter};
 use uuid::Uuid;
 
-//pub type Sha256Hasher =
-//    WrappedDigest<CoreWrapper<CtVariableCoreWrapper<Sha256VarCore, U32, OidSha256>>>;
-//pub type Sha256 = WrappedDigest<sha2::Sha256>;
 pub type Sha256 = sha2::Sha256;
 pub type Sha256Hash = Digest<Sha256>;
 
-//pub type Sha384Hasher =
-//    WrappedDigest<CoreWrapper<CtVariableCoreWrapper<Sha512VarCore, U48, OidSha384>>>;
-pub type Sha384 = WrappedDigest<sha2::Sha384>;
+pub type Sha384 = sha2::Sha384;
 pub type Sha384Hash = Digest<Sha384>;
 
 pub type TypedDigest<T, H: Hasher> = Typed<T, Digest<H>>;
@@ -64,8 +57,11 @@ impl<H: Hasher> AsRef<[u8]> for Digest<H> {
     }
 }
 
+pub trait DigestLen: ArraySize {}
+impl<T> DigestLen for T where T: ArraySize {}
+
 pub trait Hasher: Send + Sync {
-    type DigestLen: ArraySize;
+    type DigestLen: DigestLen;
 
     fn new() -> Self;
     fn update(&mut self, data: impl AsRef<[u8]>);

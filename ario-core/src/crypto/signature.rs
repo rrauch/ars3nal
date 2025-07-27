@@ -61,9 +61,11 @@ impl<'a, S: Scheme> TryFrom<Blob<'a>> for Signature<S> {
     }
 }
 
+pub trait SigLen: ArraySize {}
+impl<T> SigLen for T where T: ArraySize {}
+
 pub trait Scheme {
-    #[allow(non_camel_case_types)]
-    type SigLen: ArraySize;
+    type SigLen: SigLen;
     type Signer;
     type Verifier;
     type VerificationError: Display;

@@ -3,12 +3,11 @@ use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
-use crate::crypto::keys::{KeyError, PublicKey, SecretKey};
+use crate::crypto::keys::{KeyError, KeyLen, PublicKey, SecretKey};
 use crate::crypto::signature::{Scheme, Signature, SupportsSignatures};
 use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
 use digest::consts::{U256, U512};
-use hybrid_array::ArraySize;
 use hybrid_array::typenum::Unsigned;
 use rsa::pss::{SigningKey as PssSigningKey, VerifyingKey as PssVerifyingKey};
 use rsa::signature::{DigestVerifier, RandomizedDigestSigner, SignatureEncoding};
@@ -61,22 +60,19 @@ impl<P: RsaParams> SupportsSignatures for Rsa<P> {
 }
 
 pub trait RsaParams: PartialEq {
-    type KeyLen: ArraySize;
-    type SigLen: ArraySize;
+    type KeyLen: KeyLen;
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rsa4096;
 impl RsaParams for Rsa4096 {
     type KeyLen = U512;
-    type SigLen = U512;
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rsa2048;
 impl RsaParams for Rsa2048 {
     type KeyLen = U256;
-    type SigLen = U256;
 }
 
 #[derive(Clone, Debug, TransparentWrapper, PartialEq)]
@@ -150,7 +146,7 @@ impl<'a, P: RsaParams> TryFrom<Blob<'a>> for RsaPublicKey<P> {
 pub struct RsaPss<P: RsaParams>(PhantomData<P>);
 
 impl<P: RsaParams> Scheme for RsaPss<P> {
-    type SigLen = P::SigLen;
+    type SigLen = P::KeyLen;
 
     type Signer = RsaPrivateKey<P>;
     type Verifier = RsaPublicKey<P>;
