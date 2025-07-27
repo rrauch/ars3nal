@@ -48,6 +48,8 @@ pub enum KeyError {
     UnsupportedKeyLength(usize),
     #[error(transparent)]
     RsaError(#[from] RsaError),
+    #[error(transparent)]
+    JwkError(#[from] JwkError),
 }
 
 impl<P: RsaParams> RsaPrivateKey<P> {
@@ -84,6 +86,14 @@ pub struct RsaPrivateKeyComponents {
     e: BigUint,
     d: BigUint,
     primes: Vec<BigUint>,
+}
+
+impl TryFrom<&Jwk> for SupportedPrivateKey {
+    type Error = KeyError;
+
+    fn try_from(value: &Jwk) -> Result<Self, Self::Error> {
+        Ok(RsaPrivateKeyComponents::from_jwk(value)?.try_into()?)
+    }
 }
 
 impl TryFrom<RsaPrivateKeyComponents> for SupportedPrivateKey {
@@ -324,16 +334,11 @@ fn calculate_rsa_pss_max_salt_len<D: digest::Digest>(key_size_bytes: usize) -> u
 mod tests {
     use crate::crypto::hash::HashableExt;
     use crate::crypto::keys::SecretKey;
-    use crate::crypto::rsa::{
-        Rsa2048, Rsa4096, RsaPrivateKey, RsaPrivateKeyComponents, SupportedPrivateKey,
-    };
+    use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPrivateKey, SupportedPrivateKey};
     use crate::crypto::signature::{SignExt, VerifySigExt};
     use crate::jwk::Jwk;
     use rsa::RsaPrivateKey as ExternalRsaPrivateKey;
     use rsa::pkcs8::DecodePrivateKey;
-
-    static JWK_RSA_SK: &'static [u8] =
-        include_bytes!("../../testdata/ar_wallet_tests_PS256_65537_fixture.json");
 
     const SECRET_KEY_4096_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIJQQIBADANBgkqhkiG9w0BAQEFAASCCSswggknAgEAAoICAQCtu5tkJkIMBp0g
@@ -440,13 +445,6 @@ OTOdooS54PVffrqDRHz7dQ==
         let message = "HEllO wOrlD2222".digest();
         let signature = secret_key.sign_impl(&message)?;
         public_key.verify_sig_impl(&message, &signature)?;
-        Ok(())
-    }
-
-    #[test]
-    fn jwk_rsa_sk() -> anyhow::Result<()> {
-        let jwk = Jwk::from_json(JWK_RSA_SK)?;
-        SupportedPrivateKey::try_from(RsaPrivateKeyComponents::from_jwk(&jwk)?)?;
         Ok(())
     }
 }

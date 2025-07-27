@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-#[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize, Zeroize)]
+#[derive(Debug, Copy, Clone, PartialEq, Hash, Serialize, Deserialize, Zeroize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum KeyType {
     #[serde(rename = "RSA")]
