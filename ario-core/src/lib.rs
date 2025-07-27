@@ -1,5 +1,6 @@
 extern crate core;
-use crate::hash::Sha256Hasher;
+use crate::crypto::hash::Sha256Hasher;
+use crate::crypto::hash::TypedDigest;
 pub use rsa::BoxedUint as BigUint;
 pub use rsa::Error as RsaError;
 pub use serde_json::Error as JsonError;
@@ -10,13 +11,12 @@ pub mod tx;
 
 pub(crate) mod base64;
 pub mod blob;
-pub mod hash;
+pub mod crypto;
+mod json;
 pub mod money;
 pub mod typed;
 mod validation;
 pub mod wallet;
-mod json;
-pub mod crypto;
 //pub struct DriveKind;
 //pub type DriveId = id::TypedUuid<DriveKind>;
 
@@ -27,4 +27,4 @@ pub mod crypto;
 //pub type FileId = id::TypedUuid<FileKind>;
 
 pub struct AddressKind<T>(PhantomData<T>);
-pub type Address<T> = hash::TypedDigest<AddressKind<T>, Sha256Hasher>;
+pub type Address<T> = TypedDigest<AddressKind<T>, Sha256Hasher>;

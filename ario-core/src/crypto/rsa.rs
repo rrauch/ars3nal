@@ -1,18 +1,17 @@
 use crate::BigUint;
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob};
+use crate::crypto::hash::deep_hash::DeepHashable;
+use crate::crypto::hash::{Digest, Hashable, Hasher};
 use crate::crypto::keys::{KeyError, PublicKey, SecretKey};
 use crate::crypto::signature::{Scheme, Signature, SupportsSignatures};
-use crate::hash::{DeepHashable, Digest, Hashable, Hasher};
 use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
 use digest::consts::{U256, U512};
 use generic_array::ArrayLength;
 use generic_array::typenum::Unsigned;
 use rsa::pss::{SigningKey as PssSigningKey, VerifyingKey as PssVerifyingKey};
-use rsa::signature::{
-    DigestVerifier, RandomizedDigestSigner, RandomizedSigner, SignatureEncoding, Verifier,
-};
+use rsa::signature::{RandomizedSigner, SignatureEncoding, Verifier};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey};
 use std::marker::PhantomData;
@@ -161,7 +160,7 @@ impl<P: RsaParams> Scheme for RsaPss<P> {
     where
         Self: Sized,
     {
-        let mut signing_key = PssSigningKey::<rsa::sha2::Sha256>::new_with_salt_len(
+        let signing_key = PssSigningKey::<rsa::sha2::Sha256>::new_with_salt_len(
             signer.as_inner().clone(),
             calculate_rsa_pss_max_salt_len::<sha2::Sha256>(P::KeyLen::to_usize()),
         );

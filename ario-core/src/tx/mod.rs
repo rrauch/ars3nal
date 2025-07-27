@@ -4,11 +4,11 @@ mod v1;
 use crate::JsonError;
 use crate::base64::ToBase64;
 use crate::blob::{Blob, TypedBlob};
+use crate::crypto::hash::deep_hash::DeepHashable;
+use crate::crypto::hash::{Sha256Hasher, Sha384Hasher};
+use crate::crypto::hash::{Digest, Hashable, Hasher, HasherExt, TypedDigest};
 use crate::crypto::rsa::{Rsa4096, RsaPss, RsaPublicKey};
 use crate::crypto::signature::{Signature, TypedSignature};
-use crate::hash::{
-    DeepHashable, Digest, Hashable, Hasher, HasherExt, Sha256Hasher, Sha384Hasher, TypedDigest,
-};
 use crate::money::{Money, TypedMoney, Winston};
 use crate::tx::raw::RawTag;
 use crate::typed::{FromInner, Typed};
@@ -19,7 +19,6 @@ use derive_where::derive_where;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
-use std::ops::Deref;
 use std::sync::LazyLock;
 use thiserror::Error;
 
@@ -647,7 +646,6 @@ impl<'a> TxImpl<'a, Signed, V2> {
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::hash::{DeepHashable, Sha384Hasher};
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::{Format, Quantity, Reward, SignedTx, TxData, ZERO_QUANTITY};
     use std::ops::Deref;

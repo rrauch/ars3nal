@@ -1,4 +1,5 @@
-use crate::hash::{DeepHashable, Digest, Hasher};
+use crate::crypto::hash::deep_hash::DeepHashable;
+use crate::crypto::hash::{Digest, Hasher};
 use crate::money::MoneyError::{ParseError, PrecisionError, RepresentationError};
 use crate::typed::{FromInner, Typed};
 use bigdecimal::{BigDecimal, One, ParseBigDecimalError, RoundingMode};

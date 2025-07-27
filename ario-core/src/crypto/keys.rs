@@ -1,11 +1,12 @@
+use crate::RsaError;
 use crate::blob::AsBlob;
+use crate::crypto::hash::Hashable;
+use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::signature;
 use crate::crypto::signature::{SignExt, Signature, SupportsSignatures, VerifySigExt};
-use crate::hash::{DeepHashable, Hashable};
 use crate::typed::Typed;
 use generic_array::ArrayLength;
 use thiserror::Error;
-use crate::RsaError;
 
 pub type TypedSecretKey<T, SK: SecretKey> = Typed<T, SK>;
 

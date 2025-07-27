@@ -1,6 +1,8 @@
 use crate::base64::OptionalBase64As;
 use crate::blob::Blob;
-use crate::hash::{HashableExt, Sha256Hasher};
+use crate::crypto::hash::HashableExt;
+use crate::crypto::hash::Sha256Hasher;
+use crate::json::JsonSource;
 use crate::tx::Format;
 use crate::validation::{SupportsValidation, Valid, Validator};
 use crate::{JsonError, JsonValue};
@@ -15,7 +17,6 @@ use serde_with::serde_as;
 use std::ops::Deref;
 use std::sync::LazyLock;
 use thiserror::Error;
-use crate::json::JsonSource;
 
 #[derive(Clone, Debug, PartialEq)]
 #[repr(transparent)]

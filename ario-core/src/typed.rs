@@ -1,5 +1,6 @@
 use crate::blob::Blob;
-use crate::hash::{DeepHashable, Digest, Hashable, Hasher};
+use crate::crypto::hash::deep_hash::DeepHashable;
+use crate::crypto::hash::{Digest, Hashable, Hasher};
 use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
 use std::marker::PhantomData;
