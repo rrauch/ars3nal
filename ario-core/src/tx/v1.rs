@@ -153,7 +153,8 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
         // v1 tx always uses RSA
         let owner = match raw.owner {
             Some(owner) => {
-                let pkey = RsaPublicKey::<Rsa4096>::try_from(owner)?;
+                let pkey =
+                    RsaPublicKey::<Rsa4096>::try_from(owner).map_err(keys::KeyError::from)?;
                 WalletPKey::from_inner(pkey)
             }
             None => {

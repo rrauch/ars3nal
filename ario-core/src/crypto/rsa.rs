@@ -1,10 +1,11 @@
-use crate::BigUint;
-use crate::base64::ToBase64;
+use crate::base64::{Base64Error, FromBase64, ToBase64};
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha256Hash};
-use crate::crypto::keys::{KeyError, KeyLen, PublicKey, SecretKey};
+use crate::crypto::keys::{KeyLen, PublicKey, SecretKey};
 use crate::crypto::signature::{Scheme, Signature, SupportsSignatures};
+use crate::jwk::{Jwk, KeyType};
+use crate::{BigUint, RsaError};
 use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
 use digest::consts::{U256, U512};
@@ -15,16 +16,39 @@ use rsa::signature::hazmat::{PrehashVerifier, RandomizedPrehashSigner};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey};
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::sync::LazyLock;
+use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 static RSA_EXPONENT: LazyLock<BigUint> =
     LazyLock::new(|| BigUint::from_be_slice_vartime(&[0x01, 0x00, 0x01])); // 65537
+
+pub enum SupportedPrivateKey {
+    Rsa4096(RsaPrivateKey4096),
+    Rsa2048(RsaPrivateKey2048),
+}
 
 #[derive_where(Clone)]
 #[derive(TransparentWrapper)]
 #[transparent(ExternalRsaPrivateKey)]
 #[repr(transparent)]
 pub struct RsaPrivateKey<P: RsaParams>(ExternalRsaPrivateKey, PhantomData<P>);
+
+pub type RsaPrivateKey4096 = RsaPrivateKey<Rsa4096>;
+pub type RsaPrivateKey2048 = RsaPrivateKey<Rsa2048>;
+
+#[derive(Error, Debug)]
+pub enum KeyError {
+    #[error("the key does not use the expected Arweave RSA exponent")]
+    IncorrectExponent,
+    #[error("expected key length: '{expected}' but found '{actual}'")]
+    UnexpectedKeyLength { expected: usize, actual: usize },
+    #[error("unsupported key length: '{0}'")]
+    UnsupportedKeyLength(usize),
+    #[error(transparent)]
+    RsaError(#[from] RsaError),
+}
 
 impl<P: RsaParams> RsaPrivateKey<P> {
     pub(crate) fn try_from_inner(inner: ExternalRsaPrivateKey) -> Result<Self, KeyError> {
@@ -33,6 +57,9 @@ impl<P: RsaParams> RsaPrivateKey<P> {
                 expected: P::KeyLen::to_usize(),
                 actual: inner.size(),
             });
+        }
+        if inner.e() != RSA_EXPONENT.deref() {
+            return Err(KeyError::IncorrectExponent);
         }
         Ok(Self(inner, PhantomData))
     }
@@ -48,6 +75,100 @@ impl<P: RsaParams> SecretKey for RsaPrivateKey<P> {
 
     fn public_key_impl(&self) -> &Self::PublicKey {
         RsaPublicKey::wrap_ref(self.0.as_ref())
+    }
+}
+
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct RsaPrivateKeyComponents {
+    n: BigUint,
+    e: BigUint,
+    d: BigUint,
+    primes: Vec<BigUint>,
+}
+
+impl TryFrom<RsaPrivateKeyComponents> for SupportedPrivateKey {
+    type Error = KeyError;
+
+    fn try_from(value: RsaPrivateKeyComponents) -> Result<Self, Self::Error> {
+        // Note: ExternalRsaPrivateKey::from_components does NOT zeroize the provided key material on error
+        // a PR might be warranted
+        // might be related to https://github.com/RustCrypto/RSA/issues/507
+        ExternalRsaPrivateKey::from_components(
+            value.n.clone(),
+            value.e.clone(),
+            value.d.clone(),
+            value.primes.clone(),
+        )?
+        .try_into()
+    }
+}
+
+impl TryFrom<ExternalRsaPrivateKey> for SupportedPrivateKey {
+    type Error = KeyError;
+
+    fn try_from(sk: ExternalRsaPrivateKey) -> Result<Self, Self::Error> {
+        Ok(match sk.size() {
+            512 => SupportedPrivateKey::Rsa4096(RsaPrivateKey::try_from_inner(sk)?),
+            256 => SupportedPrivateKey::Rsa2048(RsaPrivateKey::try_from_inner(sk)?),
+            unsupported => return Err(KeyError::UnsupportedKeyLength(unsupported)),
+        })
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum JwkError {
+    #[error(transparent)]
+    InvalidFieldValue(#[from] JwkFieldValueError),
+    #[error("expected kty 'RSA' but found '{0}'")]
+    NonRsaKeyType(String),
+}
+
+#[derive(Error, Debug)]
+pub enum JwkFieldValueError {
+    #[error("field value length '{found}' exceeds allowed maximum of '{max}'")]
+    MaxLengthExceeded { max: usize, found: usize },
+    #[error(transparent)]
+    Base64Error(#[from] Base64Error),
+}
+
+impl RsaPrivateKeyComponents {
+    pub fn new(n: BigUint, e: BigUint, d: BigUint, p_q: Option<(BigUint, BigUint)>) -> Self {
+        Self {
+            n,
+            e,
+            d,
+            primes: p_q.map(|(p, q)| vec![p, q]).unwrap_or_default(),
+        }
+    }
+
+    pub(crate) fn from_jwk(jwk: &Jwk) -> Result<Self, JwkError> {
+        if jwk.kty != KeyType::Rsa {
+            return Err(JwkError::NonRsaKeyType(jwk.kty.to_string()));
+        }
+
+        fn try_to_big_uint<S: AsRef<str>>(value: Option<S>) -> Result<Option<BigUint>, JwkError> {
+            Ok(value
+                .map(|s| s.as_ref().try_from_base64())
+                .transpose()
+                .map_err(JwkFieldValueError::from)?
+                .map(|b| BigUint::from_be_slice_vartime(b.bytes())))
+        }
+
+        let p_q = if jwk.fields.contains_key("p") && jwk.fields.contains_key("q") {
+            Some((
+                try_to_big_uint(jwk.fields.get("p"))?.unwrap(),
+                try_to_big_uint(jwk.fields.get("q"))?.unwrap(),
+            ))
+        } else {
+            None
+        };
+
+        Ok(Self::new(
+            try_to_big_uint(jwk.fields.get("n"))?.unwrap(),
+            try_to_big_uint(jwk.fields.get("e"))?.unwrap(),
+            try_to_big_uint(jwk.fields.get("d"))?.unwrap(),
+            p_q,
+        ))
     }
 }
 
@@ -203,10 +324,16 @@ fn calculate_rsa_pss_max_salt_len<D: digest::Digest>(key_size_bytes: usize) -> u
 mod tests {
     use crate::crypto::hash::HashableExt;
     use crate::crypto::keys::SecretKey;
-    use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPrivateKey};
+    use crate::crypto::rsa::{
+        Rsa2048, Rsa4096, RsaPrivateKey, RsaPrivateKeyComponents, SupportedPrivateKey,
+    };
     use crate::crypto::signature::{SignExt, VerifySigExt};
+    use crate::jwk::Jwk;
     use rsa::RsaPrivateKey as ExternalRsaPrivateKey;
     use rsa::pkcs8::DecodePrivateKey;
+
+    static JWK_RSA_SK: &'static [u8] =
+        include_bytes!("../../testdata/ar_wallet_tests_PS256_65537_fixture.json");
 
     const SECRET_KEY_4096_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIJQQIBADANBgkqhkiG9w0BAQEFAASCCSswggknAgEAAoICAQCtu5tkJkIMBp0g
@@ -313,6 +440,13 @@ OTOdooS54PVffrqDRHz7dQ==
         let message = "HEllO wOrlD2222".digest();
         let signature = secret_key.sign_impl(&message)?;
         public_key.verify_sig_impl(&message, &signature)?;
+        Ok(())
+    }
+
+    #[test]
+    fn jwk_rsa_sk() -> anyhow::Result<()> {
+        let jwk = Jwk::from_json(JWK_RSA_SK)?;
+        SupportedPrivateKey::try_from(RsaPrivateKeyComponents::from_jwk(&jwk)?)?;
         Ok(())
     }
 }

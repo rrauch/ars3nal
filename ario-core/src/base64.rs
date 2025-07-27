@@ -1,3 +1,4 @@
+use crate::blob::OwnedBlob;
 use core::fmt;
 use ct_codecs::{Base64UrlSafeNoPadding, Decoder, Encoder};
 use serde::de::Visitor;
@@ -21,6 +22,18 @@ impl<T: AsRef<[u8]>> ToBase64 for T {
     fn to_base64(&self) -> String {
         Base64UrlSafeNoPadding::encode_to_string(self.as_ref())
             .expect("base64 encoding should not fail")
+    }
+}
+
+pub trait FromBase64 {
+    fn try_from_base64(&self) -> Result<OwnedBlob, Base64Error>;
+}
+
+impl<T: AsRef<str>> FromBase64 for T {
+    fn try_from_base64(&self) -> Result<OwnedBlob, Base64Error> {
+        Ok(Base64UrlSafeNoPadding::decode_to_vec(self.as_ref(), None)
+            .map_err(|e| Base64Error::DecodingError(e.to_string()))?
+            .into())
     }
 }
 
