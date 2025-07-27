@@ -1,16 +1,14 @@
-use crate::crypto::hash::Hasher;
 use digest::{
     Digest, ExtendableOutput, ExtendableOutputReset, FixedOutput, FixedOutputReset, HashMarker,
     InvalidBufferSize, InvalidOutputSize, Output, OutputSizeUser, Reset, Update, VariableOutput,
     XofReader,
 };
-use generic_array::ArrayLength;
+use std::io::Write;
 use std::ops::{Deref, DerefMut};
 
-
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[repr(transparent)]
-pub struct WrappedDigest<I: Digest>(I);
+pub struct WrappedDigest<I>(I);
 
 impl<I: Digest> WrappedDigest<I> {
     pub(crate) fn from_inner(inner: I) -> Self {
@@ -21,6 +19,37 @@ impl<I: Digest> WrappedDigest<I> {
 impl<I: Digest> AsRef<I> for WrappedDigest<I> {
     fn as_ref(&self) -> &I {
         &self.0
+    }
+}
+
+impl<I> Default for WrappedDigest<I>
+where
+    I: Default,
+{
+    fn default() -> Self {
+        Self(I::default())
+    }
+}
+
+impl<I> Clone for WrappedDigest<I>
+where
+    I: Clone,
+{
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<I> Write for WrappedDigest<I>
+where
+    I: Write,
+{
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
     }
 }
 
@@ -44,11 +73,14 @@ impl<I: Digest> DerefMut for WrappedDigest<I> {
     }
 }
 
-impl<I: Digest> OutputSizeUser for WrappedDigest<I> {
+impl<I> OutputSizeUser for WrappedDigest<I>
+where
+    I: OutputSizeUser,
+{
     type OutputSize = I::OutputSize;
 }
 
-impl<I: Digest> FixedOutput for WrappedDigest<I>
+impl<I> FixedOutput for WrappedDigest<I>
 where
     I: FixedOutput,
 {
@@ -57,7 +89,7 @@ where
     }
 }
 
-impl<I: Digest> Update for WrappedDigest<I>
+impl<I> Update for WrappedDigest<I>
 where
     I: Update,
 {
@@ -66,7 +98,7 @@ where
     }
 }
 
-impl<I: Digest> Reset for WrappedDigest<I>
+impl<I> Reset for WrappedDigest<I>
 where
     I: Reset,
 {
@@ -75,7 +107,7 @@ where
     }
 }
 
-impl<I: Digest> FixedOutputReset for WrappedDigest<I>
+impl<I> FixedOutputReset for WrappedDigest<I>
 where
     I: FixedOutputReset,
 {
@@ -84,7 +116,7 @@ where
     }
 }
 
-impl<I: Digest> ExtendableOutput for WrappedDigest<I>
+impl<I> ExtendableOutput for WrappedDigest<I>
 where
     I: ExtendableOutput,
 {
@@ -95,7 +127,7 @@ where
     }
 }
 
-impl<I: Digest> ExtendableOutputReset for WrappedDigest<I>
+impl<I> ExtendableOutputReset for WrappedDigest<I>
 where
     I: ExtendableOutputReset,
 {
@@ -104,7 +136,7 @@ where
     }
 }
 
-impl<I: Digest> VariableOutput for WrappedDigest<I>
+impl<I> VariableOutput for WrappedDigest<I>
 where
     I: VariableOutput,
 {
@@ -123,7 +155,7 @@ where
     }
 }
 
-impl<I: Digest> XofReader for WrappedDigest<I>
+impl<I> XofReader for WrappedDigest<I>
 where
     I: XofReader,
 {
@@ -132,9 +164,69 @@ where
     }
 }
 
-impl<I: Digest> HashMarker for WrappedDigest<I> where I: HashMarker {}
+impl<I> HashMarker for WrappedDigest<I> where I: HashMarker {}
 
-impl<I: Digest + HashMarker + Send + Sync> Hasher for WrappedDigest<I>
+/*impl<I: Digest> Digest for WrappedDigest<I> {
+    fn new() -> Self {
+        Self::from_inner(I::new())
+    }
+
+    fn new_with_prefix(data: impl AsRef<[u8]>) -> Self {
+        Self::from_inner(I::new_with_prefix(data))
+    }
+
+    #[inline]
+    fn update(&mut self, data: impl AsRef<[u8]>) {
+        self.0.update(data)
+    }
+
+    #[inline]
+    fn chain_update(self, data: impl AsRef<[u8]>) -> Self {
+        Self::from_inner(self.0.chain_update(data))
+    }
+
+    #[inline]
+    fn finalize(self) -> Output<Self> {
+        self.0.finalize()
+    }
+
+    fn finalize_into(self, out: &mut Output<Self>) {
+        self.0.finalize_into(out)
+    }
+
+    fn finalize_reset(&mut self) -> Output<Self>
+    where
+        Self: FixedOutputReset,
+    {
+        <Self as FixedOutputReset>::finalize_fixed_reset(self)
+    }
+
+    fn finalize_into_reset(&mut self, out: &mut Output<Self>)
+    where
+        Self: FixedOutputReset,
+    {
+        <Self as FixedOutputReset>::finalize_into_reset(self, out)
+    }
+
+    fn reset(&mut self)
+    where
+        Self: Reset,
+    {
+        <Self as Reset>::reset(self)
+    }
+
+    #[inline]
+    fn output_size() -> usize {
+        <I as Digest>::output_size()
+    }
+
+    #[inline]
+    fn digest(data: impl AsRef<[u8]>) -> Output<Self> {
+        I::digest(data)
+    }
+}*/
+
+/*impl<I: Digest + HashMarker + Send + Sync> Hasher for WrappedDigest<I>
 where
     <I as OutputSizeUser>::OutputSize: ArrayLength,
 {
@@ -163,4 +255,4 @@ where
                 .expect("generic array conversion should never fail"),
         )
     }
-}
+}*/

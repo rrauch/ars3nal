@@ -7,29 +7,29 @@ use crate::crypto::hash::wrapped::WrappedDigest;
 use crate::typed::Typed;
 use bytes::Bytes;
 use derive_where::derive_where;
-use digest::consts::{U32, U48};
-use digest::core_api::{CoreWrapper, CtVariableCoreWrapper};
-use generic_array::{ArrayLength, GenericArray};
-use sha2::{OidSha256, OidSha384, Sha256VarCore, Sha512VarCore};
+use hybrid_array::{Array, ArraySize};
 use std::fmt::{Display, Formatter};
 use uuid::Uuid;
 
-pub type Sha256Hasher =
-    WrappedDigest<CoreWrapper<CtVariableCoreWrapper<Sha256VarCore, U32, OidSha256>>>;
-pub type Sha256Hash = Digest<Sha256Hasher>;
+//pub type Sha256Hasher =
+//    WrappedDigest<CoreWrapper<CtVariableCoreWrapper<Sha256VarCore, U32, OidSha256>>>;
+//pub type Sha256 = WrappedDigest<sha2::Sha256>;
+pub type Sha256 = sha2::Sha256;
+pub type Sha256Hash = Digest<Sha256>;
 
-pub type Sha384Hasher =
-    WrappedDigest<CoreWrapper<CtVariableCoreWrapper<Sha512VarCore, U48, OidSha384>>>;
-pub type Sha384Hash = Digest<Sha384Hasher>;
+//pub type Sha384Hasher =
+//    WrappedDigest<CoreWrapper<CtVariableCoreWrapper<Sha512VarCore, U48, OidSha384>>>;
+pub type Sha384 = WrappedDigest<sha2::Sha384>;
+pub type Sha384Hash = Digest<Sha384>;
 
 pub type TypedDigest<T, H: Hasher> = Typed<T, Digest<H>>;
 
 #[derive_where(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct Digest<H: Hasher>(GenericArray<u8, H::DigestLen>);
+pub struct Digest<H: Hasher>(Array<u8, H::DigestLen>);
 
 impl<H: Hasher> Digest<H> {
-    pub(crate) fn from_bytes(bytes: GenericArray<u8, H::DigestLen>) -> Self {
+    pub(crate) fn from_bytes(bytes: Array<u8, H::DigestLen>) -> Self {
         Self(bytes)
     }
 }
@@ -45,13 +45,13 @@ impl<H: Hasher> Digest<H> {
         &self.0
     }
 
-    pub fn into_inner(self) -> GenericArray<u8, H::DigestLen> {
+    pub fn into_inner(self) -> Array<u8, H::DigestLen> {
         self.0
     }
 }
 
 impl<'a, H: Hasher> TryFrom<Blob<'a>> for Digest<H> {
-    type Error = <Blob<'a> as TryInto<GenericArray<u8, H::DigestLen>>>::Error;
+    type Error = <Blob<'a> as TryInto<Array<u8, H::DigestLen>>>::Error;
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
         Ok(Digest(value.try_into()?))
@@ -65,13 +65,35 @@ impl<H: Hasher> AsRef<[u8]> for Digest<H> {
 }
 
 pub trait Hasher: Send + Sync {
-    type DigestLen: ArrayLength;
+    type DigestLen: ArraySize;
 
     fn new() -> Self;
     fn update(&mut self, data: impl AsRef<[u8]>);
     fn finalize(self) -> Digest<Self>
     where
         Self: Sized;
+}
+
+impl<H> Hasher for H
+where
+    H: digest::Digest + Send + Sync,
+{
+    type DigestLen = <H as digest::OutputSizeUser>::OutputSize;
+
+    fn new() -> Self {
+        <Self as digest::Digest>::new()
+    }
+
+    fn update(&mut self, data: impl AsRef<[u8]>) {
+        digest::Digest::update(self, data)
+    }
+
+    fn finalize(self) -> Digest<Self>
+    where
+        Self: Sized,
+    {
+        Digest::from_bytes(digest::Digest::finalize(self))
+    }
 }
 
 pub trait HasherExt<H: Hasher> {
@@ -99,6 +121,7 @@ pub(crate) trait Hashable {
 
 pub(crate) trait HashableExt {
     fn digest<H: Hasher>(&self) -> Digest<H>;
+    fn hasher<H: Hasher>(&self) -> H;
 }
 
 impl<T> HashableExt for T
@@ -106,9 +129,13 @@ where
     T: Hashable,
 {
     fn digest<H: Hasher>(&self) -> Digest<H> {
+        HashableExt::hasher::<H>(self).finalize()
+    }
+
+    fn hasher<H: Hasher>(&self) -> H {
         let mut hasher = H::new();
         self.feed(&mut hasher);
-        hasher.finalize()
+        hasher
     }
 }
 

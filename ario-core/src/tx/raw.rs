@@ -1,7 +1,7 @@
 use crate::base64::OptionalBase64As;
 use crate::blob::Blob;
 use crate::crypto::hash::HashableExt;
-use crate::crypto::hash::Sha256Hasher;
+use crate::crypto::hash::Sha256;
 use crate::json::JsonSource;
 use crate::tx::Format;
 use crate::validation::{SupportsValidation, Valid, Validator};
@@ -244,7 +244,7 @@ impl Validator<RawTxData<'_>> for RawTxDataValidator {
             }
         }
 
-        let expected_tx_id = data.signature.bytes().digest::<Sha256Hasher>();
+        let expected_tx_id = data.signature.bytes().digest::<Sha256>();
         if expected_tx_id.as_slice() != data.id.bytes() {
             return Err(RawTxDataError::IdSignatureMismatch);
         }

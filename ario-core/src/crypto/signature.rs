@@ -1,9 +1,8 @@
 use crate::blob::Blob;
 use crate::typed::Typed;
 use derive_where::derive_where;
-use generic_array::typenum::Unsigned;
-use generic_array::{ArrayLength, GenericArray};
-
+use hybrid_array::typenum::Unsigned;
+use hybrid_array::{Array, ArraySize};
 use std::array::TryFromSliceError;
 use std::fmt::Display;
 use thiserror::Error;
@@ -12,7 +11,7 @@ pub type TypedSignature<T, SIGNER, S: Scheme> = Typed<(T, SIGNER), Signature<S>>
 
 #[derive_where(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct Signature<S: Scheme>(GenericArray<u8, S::SigLen>);
+pub struct Signature<S: Scheme>(Array<u8, S::SigLen>);
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -24,7 +23,7 @@ pub enum Error {
 
 impl<S: Scheme> Signature<S> {
     pub(crate) fn empty() -> Self {
-        Self(GenericArray::default())
+        Self(Array::default())
     }
 
     pub fn try_clone_from_bytes(input: impl AsRef<[u8]>) -> Result<Self, Error> {
@@ -36,14 +35,14 @@ impl<S: Scheme> Signature<S> {
                 actual: input.len(),
             });
         }
-        Ok(Self(GenericArray::from_slice(input).clone()))
+        Ok(Self(Array::try_from(input)?))
     }
 
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
 
-    pub fn into_inner(self) -> GenericArray<u8, S::SigLen> {
+    pub fn into_inner(self) -> Array<u8, S::SigLen> {
         self.0
     }
 }
@@ -55,7 +54,7 @@ impl<S: Scheme> AsRef<[u8]> for Signature<S> {
 }
 
 impl<'a, S: Scheme> TryFrom<Blob<'a>> for Signature<S> {
-    type Error = <Blob<'a> as TryInto<GenericArray<u8, S::SigLen>>>::Error;
+    type Error = <Blob<'a> as TryInto<Array<u8, S::SigLen>>>::Error;
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
         Ok(Signature(value.try_into()?))
@@ -64,17 +63,18 @@ impl<'a, S: Scheme> TryFrom<Blob<'a>> for Signature<S> {
 
 pub trait Scheme {
     #[allow(non_camel_case_types)]
-    type SigLen: ArrayLength;
+    type SigLen: ArraySize;
     type Signer;
     type Verifier;
     type VerificationError: Display;
+    type Message;
 
-    fn sign(signer: &Self::Signer, data: impl AsRef<[u8]>) -> Signature<Self>
+    fn sign(signer: &Self::Signer, msg: Self::Message) -> Signature<Self>
     where
         Self: Sized;
     fn verify(
         verifier: &Self::Verifier,
-        data: impl AsRef<[u8]>,
+        msg: Self::Message,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where
@@ -92,11 +92,11 @@ pub(crate) trait VerifySigExt<S: Scheme> {
 
     fn verify_sig_impl(
         &self,
-        data: impl AsRef<[u8]>,
+        msg: S::Message,
         sig: &Signature<S>,
     ) -> Result<(), Self::VerificationError>;
 }
 
 pub(crate) trait SignExt<S: Scheme> {
-    fn sign_impl(&self, data: impl AsRef<[u8]>) -> Signature<S>;
+    fn sign_impl(&self, msg: S::Message) -> Signature<S>;
 }

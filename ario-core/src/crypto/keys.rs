@@ -5,14 +5,14 @@ use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::signature;
 use crate::crypto::signature::{SignExt, Signature, SupportsSignatures, VerifySigExt};
 use crate::typed::Typed;
-use generic_array::ArrayLength;
+use hybrid_array::ArraySize;
 use thiserror::Error;
 
 pub type TypedSecretKey<T, SK: SecretKey> = Typed<T, SK>;
 
 pub(crate) trait SecretKey {
     type Scheme;
-    type KeyLen: ArrayLength;
+    type KeyLen: ArraySize;
     type PublicKey: PublicKey<Scheme = Self::Scheme, SecretKey = Self>;
 
     fn public_key_impl(&self) -> &Self::PublicKey;
@@ -22,7 +22,7 @@ pub type TypedPublicKey<T, PK: PublicKey> = Typed<T, PK>;
 
 pub(crate) trait PublicKey: Hashable + DeepHashable + AsBlob + PartialEq {
     type Scheme;
-    type KeyLen: ArrayLength;
+    type KeyLen: ArraySize;
     type SecretKey: SecretKey<Scheme = Self::Scheme, PublicKey = Self>;
 }
 
@@ -35,7 +35,7 @@ where
 
     fn verify_sig_impl(
         &self,
-        data: impl AsRef<[u8]>,
+        data: <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::Message,
         sig: &Signature<<PK::Scheme as SupportsSignatures>::Scheme>,
     ) -> Result<(), Self::VerificationError> {
         <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::verify(self, data, sig)
@@ -48,7 +48,7 @@ where
 {
     fn sign_impl(
         &self,
-        data: impl AsRef<[u8]>,
+        data: <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::Message,
     ) -> Signature<<SK::Scheme as SupportsSignatures>::Scheme> {
         <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::sign(self, data)
     }

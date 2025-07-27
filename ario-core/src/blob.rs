@@ -1,8 +1,10 @@
 use crate::typed::Typed;
 use bytes::Bytes;
-use generic_array::{ArrayLength, GenericArray};
+use hybrid_array::{Array, ArraySize};
+use std::array::TryFromSliceError;
 use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
+use thiserror::Error;
 
 pub type TypedBlob<'a, T> = Typed<T, Blob<'a>>;
 
@@ -101,29 +103,40 @@ impl<'a> Debug for Blob<'a> {
     }
 }
 
-impl<'a, N: ArrayLength> TryFrom<Blob<'a>> for GenericArray<u8, N> {
-    type Error = generic_array::LengthError;
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("Invalid length, expected '{expected}' but go '{actual}'")]
+    InvalidLength { expected: usize, actual: usize },
+    #[error(transparent)]
+    ConversionError(#[from] TryFromSliceError),
+}
+
+impl<'a, N: ArraySize> TryFrom<Blob<'a>> for Array<u8, N> {
+    type Error = Error;
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
         if value.len() != N::to_usize() {
-            return Err(generic_array::LengthError);
+            return Err(Error::InvalidLength {
+                expected: N::to_usize(),
+                actual: value.len(),
+            });
         }
-        match value {
-            Blob::Bytes(bytes) => {
-                let vec: Vec<u8> = bytes.into();
-                GenericArray::try_from(vec)
-            }
-            Blob::Slice(slice) => GenericArray::try_from(slice.to_vec()),
-        }
+        // note: this will always make of copy of the data
+        // because `Array` is stack allocated while the blob
+        // data is most likely on the heap.
+        Ok(value.bytes().try_into()?)
     }
 }
 
 impl<'a, const N: usize> TryFrom<Blob<'a>> for [u8; N] {
-    type Error = generic_array::LengthError;
+    type Error = Error;
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
         if value.len() != N {
-            return Err(generic_array::LengthError);
+            return Err(Error::InvalidLength {
+                expected: N,
+                actual: value.len(),
+            });
         }
         let vec = match value {
             Blob::Bytes(bytes) => {

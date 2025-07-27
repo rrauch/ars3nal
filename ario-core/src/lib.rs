@@ -1,5 +1,5 @@
 extern crate core;
-use crate::crypto::hash::Sha256Hasher;
+use crate::crypto::hash::Sha256;
 use crate::crypto::hash::TypedDigest;
 pub use rsa::BoxedUint as BigUint;
 pub use rsa::Error as RsaError;
@@ -27,4 +27,4 @@ pub mod wallet;
 //pub type FileId = id::TypedUuid<FileKind>;
 
 pub struct AddressKind<T>(PhantomData<T>);
-pub type Address<T> = TypedDigest<AddressKind<T>, Sha256Hasher>;
+pub type Address<T> = TypedDigest<AddressKind<T>, Sha256>;

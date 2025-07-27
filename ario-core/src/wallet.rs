@@ -1,5 +1,5 @@
 use crate::Address;
-use crate::crypto::hash::HashableExt;
+use crate::crypto::hash::{HashableExt, Sha256};
 use crate::crypto::keys::{KeyError, PublicKey, SecretKey, TypedPublicKey, TypedSecretKey};
 use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaParams, RsaPrivateKey, RsaPss, RsaPublicKey};
 use crate::crypto::signature::{Scheme, VerifySigExt};
@@ -82,7 +82,7 @@ impl<PK: WalletPublicKey> WalletPKey<PK> {
 }
 
 impl<PK: WalletPublicKey<P = Rsa4096>> WalletPKey<PK> {
-    pub fn verify_tx(&self, data: impl AsRef<[u8]>, sig: &TxSignature) -> Result<(), String> {
+    pub fn verify_tx(&self, data: Sha256, sig: &TxSignature) -> Result<(), String> {
         self.verify_sig_impl(data, &sig.0)
             .map_err(|e| e.to_string())
     }

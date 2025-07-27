@@ -5,7 +5,7 @@ use crate::JsonError;
 use crate::base64::ToBase64;
 use crate::blob::{Blob, TypedBlob};
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Sha256Hasher, Sha384Hasher};
+use crate::crypto::hash::{Sha256, Sha384};
 use crate::crypto::hash::{Digest, Hashable, Hasher, HasherExt, TypedDigest};
 use crate::crypto::rsa::{Rsa4096, RsaPss, RsaPublicKey};
 use crate::crypto::signature::{Signature, TypedSignature};
@@ -29,7 +29,7 @@ static ZERO_REWARD: LazyLock<Reward> = LazyLock::new(|| Reward::zero());
 
 pub struct TxKind;
 
-pub type TxId = TypedDigest<TxSignature, Sha256Hasher>;
+pub type TxId = TypedDigest<TxSignature, Sha256>;
 
 impl Display for TxId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -38,7 +38,7 @@ impl Display for TxId {
 }
 
 pub type TxSignature = TypedSignature<TxHash, WalletKind, RsaPss<Rsa4096>>;
-pub type TxHash = TypedDigest<TxKind, Sha384Hasher>;
+pub type TxHash = TypedDigest<TxKind, Sha384>;
 
 impl TxSignature {
     fn empty() -> Self {
@@ -46,7 +46,7 @@ impl TxSignature {
     }
 
     pub fn digest(&self) -> TxId {
-        TxId::from_inner(Sha256Hasher::digest(self.as_slice()))
+        TxId::from_inner(Sha256::digest(self.as_slice()))
     }
 }
 

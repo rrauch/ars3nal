@@ -2,16 +2,16 @@ use crate::BigUint;
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hashable, Hasher};
+use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
 use crate::crypto::keys::{KeyError, PublicKey, SecretKey};
 use crate::crypto::signature::{Scheme, Signature, SupportsSignatures};
 use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
 use digest::consts::{U256, U512};
-use generic_array::ArrayLength;
-use generic_array::typenum::Unsigned;
+use hybrid_array::ArraySize;
+use hybrid_array::typenum::Unsigned;
 use rsa::pss::{SigningKey as PssSigningKey, VerifyingKey as PssVerifyingKey};
-use rsa::signature::{RandomizedSigner, SignatureEncoding, Verifier};
+use rsa::signature::{DigestVerifier, RandomizedDigestSigner, SignatureEncoding};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey};
 use std::marker::PhantomData;
@@ -61,8 +61,8 @@ impl<P: RsaParams> SupportsSignatures for Rsa<P> {
 }
 
 pub trait RsaParams: PartialEq {
-    type KeyLen: ArrayLength;
-    type SigLen: ArrayLength;
+    type KeyLen: ArraySize;
+    type SigLen: ArraySize;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -155,40 +155,38 @@ impl<P: RsaParams> Scheme for RsaPss<P> {
     type Signer = RsaPrivateKey<P>;
     type Verifier = RsaPublicKey<P>;
     type VerificationError = rsa::signature::Error;
+    type Message = Sha256;
 
-    fn sign(signer: &Self::Signer, data: impl AsRef<[u8]>) -> Signature<Self>
+    fn sign(signer: &Self::Signer, msg: Self::Message) -> Signature<Self>
     where
         Self: Sized,
     {
-        let signing_key = PssSigningKey::<rsa::sha2::Sha256>::new_with_salt_len(
+        let signing_key = PssSigningKey::<Sha256>::new_with_salt_len(
             signer.as_inner().clone(),
-            calculate_rsa_pss_max_salt_len::<sha2::Sha256>(P::KeyLen::to_usize()),
+            calculate_rsa_pss_max_salt_len::<Sha256>(P::KeyLen::to_usize()),
         );
 
         let mut rng = rand::rng();
 
-        let sig = signing_key.sign_with_rng(&mut rng, data.as_ref());
+        let sig = signing_key.sign_digest_with_rng(&mut rng, msg);
         Signature::try_clone_from_bytes(sig.to_bytes().deref())
             .expect("signature to be of correct length")
     }
 
     fn verify(
         verifier: &Self::Verifier,
-        data: impl AsRef<[u8]>,
+        msg: Self::Message,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where
         Self: Sized,
     {
-        let verifying_key: PssVerifyingKey<rsa::sha2::Sha256> = PssVerifyingKey::new_with_salt_len(
+        let verifying_key: PssVerifyingKey<Sha256> = PssVerifyingKey::new_with_salt_len(
             verifier.as_inner().clone(),
-            calculate_rsa_pss_max_salt_len::<sha2::Sha256>(P::KeyLen::to_usize()),
+            calculate_rsa_pss_max_salt_len::<Sha256>(P::KeyLen::to_usize()),
         );
 
-        verifying_key.verify(
-            data.as_ref(),
-            &rsa::pss::Signature::try_from(signature.as_slice())?,
-        )
+        verifying_key.verify_digest(msg, &rsa::pss::Signature::try_from(signature.as_slice())?)
     }
 }
 
@@ -200,6 +198,7 @@ fn calculate_rsa_pss_max_salt_len<D: digest::Digest>(key_size_bytes: usize) -> u
 
 #[cfg(test)]
 mod tests {
+    use crate::crypto::hash::HashableExt;
     use crate::crypto::keys::SecretKey;
     use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPrivateKey};
     use crate::crypto::signature::{SignExt, VerifySigExt};
@@ -295,9 +294,10 @@ OTOdooS54PVffrqDRHz7dQ==
         )?;
         let public_key = secret_key.public_key_impl();
 
-        let message = "HEllO wOrlD";
+        let message = "HEllO wOrlD".hasher();
+        let message2 = "HEllO wOrlD".hasher();
         let signature = secret_key.sign_impl(message);
-        public_key.verify_sig_impl(message, &signature)?;
+        public_key.verify_sig_impl(message2, &signature)?;
         Ok(())
     }
 
@@ -308,9 +308,10 @@ OTOdooS54PVffrqDRHz7dQ==
         )?;
         let public_key = secret_key.public_key_impl();
 
-        let message = "HEllO wOrlD2222";
+        let message = "HEllO wOrlD2222".hasher();
+        let message2 = "HEllO wOrlD2222".hasher();
         let signature = secret_key.sign_impl(message);
-        public_key.verify_sig_impl(message, &signature)?;
+        public_key.verify_sig_impl(message2, &signature)?;
         Ok(())
     }
 }
