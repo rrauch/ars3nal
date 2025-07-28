@@ -108,7 +108,7 @@ impl<PK: WalletPublicKey> WalletPk<PK> {
 impl<'a, S: SignatureScheme<Message<'a> = &'a Sha256Hash>, PK: WalletPublicKey<SigScheme = S>>
     WalletPk<PK>
 {
-    pub fn verify_tx(&self, msg: &'a Sha256Hash, sig: &TxSignature<S>) -> Result<(), String> {
+    pub(crate) fn verify_tx(&self, msg: &'a Sha256Hash, sig: &TxSignature<S>) -> Result<(), String> {
         self.verify_sig_impl(msg, sig).map_err(|e| e.to_string())
     }
 }

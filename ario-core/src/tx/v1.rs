@@ -1,11 +1,13 @@
 use crate::JsonError;
 use crate::blob::Blob;
+use crate::crypto::hash::deep_hash::DeepHashable;
+use crate::crypto::hash::{Digest, Hasher, Sha256};
 use crate::crypto::keys;
 use crate::crypto::rsa::{RsaPss, RsaPublicKey};
 use crate::json::JsonSource;
 use crate::money::{CurrencyExt, Winston};
 use crate::tx::raw::{RawTxDataError, UnvalidatedRawTx, ValidatedRawTx};
-use crate::tx::{EmbeddedData, Format, LastTx, Quantity, Reward, Tag, TxId, TxSignature};
+use crate::tx::{EmbeddedData, Format, LastTx, Quantity, Reward, Tag, TxHash, TxId, TxSignature};
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
 use crate::wallet::{WalletAddress, WalletPk};
@@ -120,6 +122,24 @@ impl RsaPssSignatureData {
             },
         )
     }
+
+    fn verify_sig(&self, tx_hash: &TxHash) -> Result<(), V1TxDataError> {
+        match self {
+            Self::Rsa4096 { owner, signature } => owner
+                .verify_tx(tx_hash, signature)
+                .map_err(|e| V1TxDataError::InvalidSignature(e)),
+            Self::Rsa2048 { owner, signature } => owner
+                .verify_tx(tx_hash, signature)
+                .map_err(|e| V1TxDataError::InvalidSignature(e)),
+        }
+    }
+
+    fn deep_hash_owner<H: Hasher>(&self) -> Digest<H> {
+        match self {
+            Self::Rsa4096 { owner, .. } => owner.deep_hash(),
+            Self::Rsa2048 { owner, .. } => owner.deep_hash(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,6 +153,27 @@ pub(super) struct V1TxData<'a> {
     pub data: Option<EmbeddedData<'a>>,
     pub reward: Reward,
     pub signature_data: RsaPssSignatureData,
+}
+
+impl<'a> V1TxData<'a> {
+    pub fn tx_hash(&self) -> TxHash {
+        // todo: find out if there are very old transactions that require a different approach
+        TxHash::from_inner(self.deep_hash::<Sha256>())
+    }
+}
+
+impl DeepHashable for V1TxData<'_> {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        Self::list([
+            self.signature_data.deep_hash_owner(),
+            self.target.deep_hash(),
+            self.data.deep_hash(),
+            self.quantity.deep_hash(),
+            self.reward.deep_hash(),
+            self.last_tx.deep_hash(),
+            self.tags.deep_hash(),
+        ])
+    }
 }
 
 #[derive(Error, Debug)]
@@ -219,16 +260,19 @@ impl Validator<V1TxData<'_>> for V1TxDataValidator {
     type Error = V1TxDataError;
 
     fn validate(data: &V1TxData) -> Result<(), Self::Error> {
-        println!("");
-        todo!()
+        data.signature_data.verify_sig(&(data.tx_hash()))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::tx::Format;
-    use crate::tx::v1::{UnvalidatedV1Tx, V1TxDataError, V1TxError};
+    use crate::base64::ToBase64;
+    use crate::crypto::rsa::RsaPss;
+    use crate::money::{CurrencyExt, Winston};
+    use crate::tx::v1::{RsaPssSignatureData, UnvalidatedV1Tx, V1TxDataError, V1TxError};
+    use crate::tx::{Format, Reward, TxData, ZERO_QUANTITY};
     use crate::validation::ValidateExt;
+    use std::ops::Deref;
 
     static TX_V1: &'static [u8] = include_bytes!("../../testdata/tx_v1.json");
     static TX_V2: &'static [u8] = include_bytes!("../../testdata/tx_v2.json");
@@ -237,6 +281,40 @@ mod tests {
     fn v1_ok() -> anyhow::Result<()> {
         let unvalidated = UnvalidatedV1Tx::from_json(TX_V1)?;
         let _validated = unvalidated.validate().map_err(|(_, e)| e)?;
+        Ok(())
+    }
+
+    #[test]
+    fn tx_data_ok_v1() -> anyhow::Result<()> {
+        let tx_data = UnvalidatedV1Tx::from_json(TX_V1)?.0;
+        assert_eq!(
+            tx_data.id.to_base64(),
+            "BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ"
+        );
+        assert_eq!(
+            tx_data.last_tx.to_base64(),
+            "jUcuEDZQy2fC6T3fHnGfYsw0D0Zl4NfuaXfwBOLiQtA"
+        );
+
+        if let RsaPssSignatureData::Rsa4096 { owner, .. } = &tx_data.signature_data {
+            assert_eq!(
+                owner.to_base64(),
+                "posmEh5k2_h7fgj-0JwB2l2AU72u-UizJOA2m8gyYYcVjh_6N3A3DhwbLmnbIWjVWmsidgQZDDibiJhhyHsy28ARxrt5BJ3OCa1VRAk2ffhbaUaGUoIkVt6G8mnnTScN9JNPS7UYEqG_L8J48c2tQNsydbon2ImKIwCYmnMHKcpyEgXcgLDGhtGhIKtkuI-QOAu-TMqVjn5EaWsfJTW5J-ty8mswAMSxepgsUbUB3GXZfCyOAK0EGjrClZ1MLvyc8ANGQfLPjwTipMcUtX47Udy8i4C-c-vLC9oB_z5ZCDCat-5wGh2OA-lyghro2SpkxX0e-D-nbi91Pp9LORwDZIRQ5RCMDvtQx1-QD2adxn_P2zDN0hk5IWXoCnHyeoj-IdNIyCXNkDzT2A184CxjReE5XOUF7UFeOmvVwbUTMfnNBOSWeRz3U_e3MPNlc2JTIprRLC8IegyfS6NdCr90lYnuviEr0g75NE6-muJdHAd9gu2QZ1MpkX9OnsbtvCvvFje-K_p_4AR9l43CLemfdSZeHHMIzdPwKe75SFMbsuklsyc-ieq-OHrJCeL0WrkLT4Gf6rpGVkS8MjORuMOBRFrHRE7XKswzhwmV2SuzeU6ojtPNP87aNdiUGHtYCIyt7cRN5bRbrVjdCAXj2NnuWMzM6J6dme4e2R8gqNpsEok"
+            );
+        } else {
+            unreachable!()
+        }
+
+        assert_eq!(&tx_data.tags, &vec![]);
+        assert!(tx_data.target.is_none());
+        assert_eq!(tx_data.quantity.as_ref().unwrap(), ZERO_QUANTITY.deref(),);
+        assert_eq!(tx_data.data_size, 1033478);
+        assert_eq!(tx_data.data.as_ref().unwrap().len(), 1033478);
+        //todo: verify data value
+        assert_eq!(
+            &tx_data.reward,
+            &Reward::from(Winston::from_str("124145681682")?),
+        );
         Ok(())
     }
 
