@@ -8,7 +8,7 @@ use crate::crypto::hash::Sha256;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, HasherExt, TypedDigest};
 use crate::crypto::keys::{PublicKey, SecretKey};
-use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPss};
+use crate::crypto::rsa::RsaPss;
 use crate::crypto::signature::TypedSignature;
 use crate::money::{Money, TypedMoney, Winston};
 use crate::tx::raw::RawTag;
@@ -44,12 +44,12 @@ pub(crate) trait SignatureScheme: crate::crypto::signature::Scheme {
     type Verifier: PublicKey;
 }
 
-impl SignatureScheme for RsaPss<Rsa4096> {
+impl SignatureScheme for RsaPss<4096> {
     type Signer = <Self as crate::crypto::signature::Scheme>::Signer;
     type Verifier = <Self as crate::crypto::signature::Scheme>::Verifier;
 }
 
-impl SignatureScheme for RsaPss<Rsa2048> {
+impl SignatureScheme for RsaPss<2048> {
     type Signer = <Self as crate::crypto::signature::Scheme>::Signer;
     type Verifier = <Self as crate::crypto::signature::Scheme>::Verifier;
 }
@@ -660,7 +660,7 @@ impl<'a, S: SignatureScheme> TxImpl<'a, S, V2> {
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::crypto::rsa::{Rsa4096, RsaPss};
+    use crate::crypto::rsa::RsaPss;
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::{Format, Quantity, Reward, SignedTx, TxData, ZERO_QUANTITY};
     use std::ops::Deref;
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn tx_data_ok_v1() -> anyhow::Result<()> {
-        let tx_data = TxData::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V1)?;
+        let tx_data = TxData::<RsaPss<4096>>::try_from_json_slice(TX_V1)?;
         assert_eq!(&tx_data.format, &Format::V1);
         assert_eq!(
             tx_data.id.to_base64(),
@@ -706,7 +706,7 @@ mod tests {
 
     #[test]
     fn tx_data_ok_v2() -> anyhow::Result<()> {
-        let tx_data = TxData::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V2)?;
+        let tx_data = TxData::<RsaPss<4096>>::try_from_json_slice(TX_V2)?;
         assert_eq!(&tx_data.format, &Format::V2);
         assert_eq!(
             tx_data.id.to_base64(),
@@ -793,7 +793,7 @@ mod tests {
 
     #[test]
     fn tx_data_ok_transfer() -> anyhow::Result<()> {
-        let tx_data = TxData::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V2_2)?;
+        let tx_data = TxData::<RsaPss<4096>>::try_from_json_slice(TX_V2_2)?;
         assert_eq!(&tx_data.format, &Format::V2);
         assert_eq!(
             tx_data.id.to_base64(),
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn tx_v1_ok() -> anyhow::Result<()> {
-        let tx = SignedTx::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V1)?;
+        let tx = SignedTx::<RsaPss<4096>>::try_from_json_slice(TX_V1)?;
         assert_eq!(
             tx.id().to_base64(),
             "BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ"
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn tx_v2_ok() -> anyhow::Result<()> {
-        let tx = SignedTx::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V2)?;
+        let tx = SignedTx::<RsaPss<4096>>::try_from_json_slice(TX_V2)?;
         assert_eq!(
             tx.id().to_base64(),
             "bXGqzNQNmHTeL54cUQ6wPo-MO0thLP44FeAoM93kEwk"
@@ -846,7 +846,7 @@ mod tests {
 
     #[test]
     fn tx_v2_mut_ok() -> anyhow::Result<()> {
-        let mut tx = SignedTx::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V2)?
+        let mut tx = SignedTx::<RsaPss<4096>>::try_from_json_slice(TX_V2)?
             .try_make_mut()
             .unwrap();
 
@@ -872,7 +872,7 @@ mod tests {
     #[test]
     fn tx_v1_mut_err() -> anyhow::Result<()> {
         assert!(
-            SignedTx::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V1)?
+            SignedTx::<RsaPss<4096>>::try_from_json_slice(TX_V1)?
                 .try_make_mut()
                 .is_err()
         );

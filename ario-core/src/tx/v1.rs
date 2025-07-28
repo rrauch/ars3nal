@@ -1,7 +1,7 @@
 use crate::JsonError;
 use crate::blob::Blob;
 use crate::crypto::keys;
-use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPss, RsaPublicKey2048, RsaPublicKey4096};
+use crate::crypto::rsa::{RsaPss, RsaPublicKey};
 use crate::json::JsonSource;
 use crate::money::{CurrencyExt, Winston};
 use crate::tx::raw::{RawTxDataError, UnvalidatedRawTx, ValidatedRawTx};
@@ -77,12 +77,12 @@ impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum RsaPssSignatureData {
     Rsa4096 {
-        owner: WalletPk<RsaPublicKey4096>,
-        signature: TxSignature<RsaPss<Rsa4096>>,
+        owner: WalletPk<RsaPublicKey<4096>>,
+        signature: TxSignature<RsaPss<4096>>,
     },
     Rsa2048 {
-        owner: WalletPk<RsaPublicKey2048>,
-        signature: TxSignature<RsaPss<Rsa2048>>,
+        owner: WalletPk<RsaPublicKey<2048>>,
+        signature: TxSignature<RsaPss<2048>>,
     },
 }
 
@@ -106,14 +106,14 @@ impl RsaPssSignatureData {
                 SupportedPublicKey::Rsa4096(pk) => Self::Rsa4096 {
                     owner: WalletPk::from_inner(pk),
                     signature: TxSignature::from_inner(Signature::from_inner(
-                        <<RsaPss<Rsa4096> as SignatureScheme>::Output>::try_from(raw_signature)
+                        <<RsaPss<4096> as SignatureScheme>::Output>::try_from(raw_signature)
                             .map_err(|e| InvalidSignature(e.to_string()))?,
                     )),
                 },
                 SupportedPublicKey::Rsa2048(pk) => Self::Rsa2048 {
                     owner: WalletPk::from_inner(pk),
                     signature: TxSignature::from_inner(Signature::from_inner(
-                        <<RsaPss<Rsa2048> as SignatureScheme>::Output>::try_from(raw_signature)
+                        <<RsaPss<2048> as SignatureScheme>::Output>::try_from(raw_signature)
                             .map_err(|e| InvalidSignature(e.to_string()))?,
                     )),
                 },

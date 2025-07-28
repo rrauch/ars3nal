@@ -34,15 +34,19 @@ impl From<SupportedRsaPrivateKey> for SupportedSecretKey {
     }
 }
 
+pub trait AsymmetricScheme {
+    type SecretKey: SecretKey;
+    type PublicKey: PublicKey;
+}
+
 pub trait KeyLen: ArraySize + Send + Sync {}
 impl<T> KeyLen for T where T: ArraySize + Send + Sync {}
 
 pub(crate) trait SecretKey {
-    type Scheme;
+    type Scheme: AsymmetricScheme;
     type KeyLen: KeyLen;
-    type PublicKey: PublicKey<Scheme = Self::Scheme, SecretKey = Self>;
 
-    fn public_key_impl(&self) -> &Self::PublicKey;
+    fn public_key_impl(&self) -> &<Self::Scheme as AsymmetricScheme>::PublicKey;
 }
 
 pub type TypedPublicKey<T, PK: PublicKey> = Typed<T, PK>;
@@ -50,9 +54,8 @@ pub type TypedPublicKey<T, PK: PublicKey> = Typed<T, PK>;
 pub(crate) trait PublicKey:
     Hashable + DeepHashable + AsBlob + PartialEq + Clone + Debug
 {
-    type Scheme;
-    type KeyLen: ArraySize;
-    type SecretKey: SecretKey<Scheme = Self::Scheme, PublicKey = Self>;
+    type Scheme: AsymmetricScheme;
+    type KeyLen: KeyLen;
 }
 
 impl<PK: PublicKey> VerifySigExt<<PK::Scheme as SupportsSignatures>::Scheme> for PK

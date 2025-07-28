@@ -1,6 +1,6 @@
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob};
-use crate::crypto::Output;
+use crate::crypto::{Output};
 use crate::typed::Typed;
 use derive_where::derive_where;
 use std::fmt::{Debug, Display, Formatter};
