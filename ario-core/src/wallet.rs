@@ -1,11 +1,14 @@
 use crate::Address;
 use crate::crypto::hash::{HashableExt, Sha256Hash};
 use crate::crypto::keys;
-use crate::crypto::keys::{KeyError, PublicKey, SecretKey, TypedPublicKey, TypedSecretKey};
-use crate::crypto::rsa::{RsaPrivateKey, RsaPss, RsaPublicKey};
+use crate::crypto::keys::{
+    AsymmetricScheme, KeyError, PublicKey, SecretKey, TypedPublicKey, TypedSecretKey,
+};
+use crate::crypto::rsa::RsaPss;
 use crate::crypto::signature::SignExt;
 use crate::crypto::signature::VerifySigExt;
-use crate::tx::{SignatureScheme, SignedTx, SigningError, TxSignature, UnsignedTx};
+use crate::crypto::signature::{Scheme as SignatureScheme, SupportsSignatures};
+use crate::tx::{SignedTx, SigningError, TxSignature, UnsignedTx};
 use crate::typed::FromInner;
 use bytemuck::TransparentWrapper;
 use thiserror::Error;
@@ -14,24 +17,34 @@ pub struct WalletKind;
 pub type Wallet<SK: WalletSecretKey> = TypedSecretKey<WalletKind, SK>;
 pub type WalletPk<PK: WalletPublicKey> = TypedPublicKey<WalletKind, PK>;
 
-pub trait WalletSecretKey: SecretKey + SignExt<Self::SigScheme> {
-    type SigScheme: SignatureScheme;
-}
-impl WalletSecretKey for RsaPrivateKey<4096> {
-    type SigScheme = RsaPss<4096>;
-}
-impl WalletSecretKey for RsaPrivateKey<2048> {
-    type SigScheme = RsaPss<2048>;
+pub trait SupportedSignatureScheme: SignatureScheme {}
+
+impl<const BIT: usize> SupportedSignatureScheme for RsaPss<BIT> where RsaPss<BIT>: SignatureScheme {}
+
+pub(crate) trait WalletSecretKey: SecretKey + SignExt<Self::SigScheme> {
+    type SigScheme: SupportedSignatureScheme;
 }
 
-pub trait WalletPublicKey: PublicKey + VerifySigExt<Self::SigScheme> {
+impl<SK> WalletSecretKey for SK
+where
+    SK: SecretKey,
+    SK::Scheme: SupportsSignatures<Signer = SK>,
+    <SK::Scheme as SupportsSignatures>::Scheme: SupportedSignatureScheme,
+{
+    type SigScheme = <SK::Scheme as SupportsSignatures>::Scheme;
+}
+
+pub(crate) trait WalletPublicKey: PublicKey + VerifySigExt<Self::SigScheme> {
     type SigScheme: SignatureScheme;
 }
-impl WalletPublicKey for RsaPublicKey<4096> {
-    type SigScheme = RsaPss<4096>;
-}
-impl WalletPublicKey for RsaPublicKey<2048> {
-    type SigScheme = RsaPss<2048>;
+
+impl<PK> WalletPublicKey for PK
+where
+    PK: PublicKey,
+    PK::Scheme: SupportsSignatures<Verifier = PK>,
+    <PK::Scheme as SupportsSignatures>::Scheme: SupportedSignatureScheme,
+{
+    type SigScheme = <PK::Scheme as SupportsSignatures>::Scheme;
 }
 
 #[derive(Error, Debug)]
@@ -61,7 +74,9 @@ impl<SK: WalletSecretKey> Wallet<SK> {
     }
 }
 
-impl<S: SignatureScheme, SK: WalletSecretKey<SigScheme = S>> Wallet<SK> {
+impl<S: SignatureScheme + crate::tx::SignatureScheme, SK: WalletSecretKey<SigScheme = S>>
+    Wallet<SK>
+{
     pub fn sign_tx<'a>(
         &'a self,
         tx: UnsignedTx<'a, S>,
@@ -111,8 +126,7 @@ impl<'a, S: SignatureScheme<Message<'a> = &'a Sha256Hash>, PK: WalletPublicKey<S
 
 #[cfg(test)]
 mod tests {
-    use crate::wallet::Wallet;
-    use bytes::{Bytes, BytesMut};
+    use bytes::Bytes;
 
     #[test]
     fn wallet_from_jwk() -> anyhow::Result<()> {
