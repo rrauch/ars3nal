@@ -1,12 +1,13 @@
 pub mod deep_hash;
 
 use crate::base64::ToBase64;
-use crate::blob::Blob;
+use crate::blob::{AsBlob, Blob};
 use crate::typed::Typed;
 use bytes::Bytes;
 use derive_where::derive_where;
 use hybrid_array::{Array, ArraySize};
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
+use std::hash::Hash;
 use uuid::Uuid;
 
 pub type Sha256 = sha2::Sha256;
@@ -17,13 +18,15 @@ pub type Sha384Hash = Digest<Sha384>;
 
 pub type TypedDigest<T, H: Hasher> = Typed<T, Digest<H>>;
 
-#[derive_where(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive_where(Clone)]
 #[repr(transparent)]
-pub struct Digest<H: Hasher>(Array<u8, H::DigestLen>);
+pub struct Digest<H: Hasher>(H::Output);
 
 impl<H: Hasher> Digest<H> {
-    pub(crate) fn from_bytes(bytes: Array<u8, H::DigestLen>) -> Self {
-        Self(bytes)
+    pub(crate) fn from_bytes<'a>(
+        blob: impl Into<Blob<'a>>,
+    ) -> Result<Self, <<H as Hasher>::Output as TryFrom<Blob<'a>>>::Error> {
+        Ok(Self(H::Output::try_from(blob.into())?))
     }
 }
 
@@ -33,18 +36,36 @@ impl<H: Hasher> Display for Digest<H> {
     }
 }
 
+impl<H: Hasher> Debug for Digest<H> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.to_base64().as_str())
+    }
+}
+
+impl<H: Hasher> PartialEq for Digest<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_ref() == other.0.as_ref()
+    }
+}
+
+impl<H: Hasher> Hash for Digest<H> {
+    fn hash<H2: std::hash::Hasher>(&self, state: &mut H2) {
+        self.0.as_ref().hash(state)
+    }
+}
+
 impl<H: Hasher> Digest<H> {
     pub fn as_slice(&self) -> &[u8] {
-        &self.0
+        self.0.as_ref()
     }
 
-    pub fn into_inner(self) -> Array<u8, H::DigestLen> {
+    pub fn into_inner(self) -> H::Output {
         self.0
     }
 }
 
 impl<'a, H: Hasher> TryFrom<Blob<'a>> for Digest<H> {
-    type Error = <Blob<'a> as TryInto<Array<u8, H::DigestLen>>>::Error;
+    type Error = <Blob<'a> as TryInto<H::Output>>::Error;
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
         Ok(Digest(value.try_into()?))
@@ -57,11 +78,25 @@ impl<H: Hasher> AsRef<[u8]> for Digest<H> {
     }
 }
 
-pub trait DigestLen: ArraySize {}
-impl<T> DigestLen for T where T: ArraySize {}
+pub trait OutputLen: ArraySize {}
+impl<T> OutputLen for T where T: ArraySize {}
+
+pub trait Output: Clone + AsRef<[u8]> + AsBlob + for<'a> TryFrom<Blob<'a>> + Send + Sync {
+    type Len: OutputLen;
+}
+
+impl<L: OutputLen> AsBlob for Array<u8, L> {
+    fn as_blob(&self) -> Blob<'_> {
+        Blob::Slice(self.0.as_ref())
+    }
+}
+
+impl<L: OutputLen> Output for Array<u8, L> {
+    type Len = L;
+}
 
 pub trait Hasher: Send + Sync {
-    type DigestLen: DigestLen;
+    type Output: Output;
 
     fn new() -> Self;
     fn update(&mut self, data: impl AsRef<[u8]>);
@@ -74,7 +109,7 @@ impl<H> Hasher for H
 where
     H: digest::Digest + Send + Sync,
 {
-    type DigestLen = <H as digest::OutputSizeUser>::OutputSize;
+    type Output = digest::Output<Self>;
 
     fn new() -> Self {
         <Self as digest::Digest>::new()
@@ -88,7 +123,7 @@ where
     where
         Self: Sized,
     {
-        Digest::from_bytes(digest::Digest::finalize(self))
+        Digest(digest::Digest::finalize(self))
     }
 }
 

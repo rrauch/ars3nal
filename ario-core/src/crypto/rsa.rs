@@ -334,9 +334,8 @@ fn calculate_rsa_pss_max_salt_len<D: digest::Digest>(key_size_bytes: usize) -> u
 mod tests {
     use crate::crypto::hash::HashableExt;
     use crate::crypto::keys::SecretKey;
-    use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPrivateKey, SupportedPrivateKey};
+    use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPrivateKey};
     use crate::crypto::signature::{SignExt, VerifySigExt};
-    use crate::jwk::Jwk;
     use rsa::RsaPrivateKey as ExternalRsaPrivateKey;
     use rsa::pkcs8::DecodePrivateKey;
 
