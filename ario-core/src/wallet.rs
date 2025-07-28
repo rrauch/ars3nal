@@ -1,30 +1,36 @@
 use crate::Address;
-use crate::crypto::hash::{HashableExt, Sha256, Sha256Hash};
+use crate::crypto::hash::{HashableExt, Sha256Hash};
 use crate::crypto::keys::{KeyError, PublicKey, SecretKey, TypedPublicKey, TypedSecretKey};
-use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaParams, RsaPrivateKey, RsaPss, RsaPublicKey};
-use crate::crypto::signature::{Scheme, VerifySigExt};
-use crate::tx::{SignedTx, SigningError, TxSignature, UnsignedTx};
+use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPrivateKey, RsaPss, RsaPublicKey};
+use crate::crypto::signature::SignExt;
+use crate::crypto::signature::VerifySigExt;
+use crate::tx::{SignatureScheme, SignedTx, SigningError, TxSignature, UnsignedTx};
 use crate::typed::FromInner;
 use bytemuck::TransparentWrapper;
 use thiserror::Error;
-use zeroize::Zeroize;
 
 pub struct WalletKind;
 pub type Wallet<SK: WalletSecretKey> = TypedSecretKey<WalletKind, SK>;
-pub type WalletPKey<PK: WalletPublicKey> = TypedPublicKey<WalletKind, PK>;
+pub type WalletPk<PK: WalletPublicKey> = TypedPublicKey<WalletKind, PK>;
 
-pub trait WalletSecretKey: SecretKey {}
-impl WalletSecretKey for RsaPrivateKey<Rsa4096> {}
-impl WalletSecretKey for RsaPrivateKey<Rsa2048> {}
+pub trait WalletSecretKey: SecretKey + SignExt<Self::SigScheme> {
+    type SigScheme: SignatureScheme;
+}
+impl WalletSecretKey for RsaPrivateKey<Rsa4096> {
+    type SigScheme = RsaPss<Rsa4096>;
+}
+impl WalletSecretKey for RsaPrivateKey<Rsa2048> {
+    type SigScheme = RsaPss<Rsa2048>;
+}
 
-pub trait WalletPublicKey: PublicKey + VerifySigExt<RsaPss<Self::P>> {
-    type P: RsaParams;
+pub trait WalletPublicKey: PublicKey + VerifySigExt<Self::SigScheme> {
+    type SigScheme: SignatureScheme;
 }
 impl WalletPublicKey for RsaPublicKey<Rsa4096> {
-    type P = Rsa4096;
+    type SigScheme = RsaPss<Rsa4096>;
 }
 impl WalletPublicKey for RsaPublicKey<Rsa2048> {
-    type P = Rsa2048;
+    type SigScheme = RsaPss<Rsa2048>;
 }
 
 #[derive(Error, Debug)]
@@ -41,8 +47,8 @@ impl<SK: WalletSecretKey> Wallet<SK> {
     //    todo!()
     // }
 
-    pub fn public_key(&self) -> &WalletPKey<SK::PublicKey> {
-        WalletPKey::wrap_ref(self.public_key_impl())
+    pub fn public_key(&self) -> &WalletPk<SK::PublicKey> {
+        WalletPk::wrap_ref(self.public_key_impl())
     }
 
     pub fn try_from_jwk<'a>(input: impl Into<&'a mut [u8]>) -> Result<Self, WalletKeyPairError> {
@@ -52,18 +58,20 @@ impl<SK: WalletSecretKey> Wallet<SK> {
         Ok(Self::try_from_components(res?)?)*/
         todo!()
     }
+}
 
+impl<S: SignatureScheme, SK: WalletSecretKey<SigScheme = S>> Wallet<SK> {
     pub fn sign_tx<'a>(
         &'a self,
-        tx: UnsignedTx<'a>,
-    ) -> Result<SignedTx<'a>, (UnsignedTx<'a>, SigningError)> {
-        tx.sign(&self)
+        tx: UnsignedTx<'a, S>,
+    ) -> Result<SignedTx<'a, S>, (UnsignedTx<'a, S>, SigningError)> {
+        todo!()
     }
 }
 
 pub type WalletAddress = Address<WalletKind>;
 
-impl<PK: WalletPublicKey> WalletPKey<PK> {
+impl<PK: WalletPublicKey> WalletPk<PK> {
     pub fn derive_address(&self) -> WalletAddress {
         WalletAddress::from_inner(self.0.digest())
     }
@@ -81,10 +89,11 @@ impl<PK: WalletPublicKey> WalletPKey<PK> {
     }*/
 }
 
-impl<PK: WalletPublicKey<P = Rsa4096>> WalletPKey<PK> {
-    pub fn verify_tx(&self, data: &Sha256Hash, sig: &TxSignature) -> Result<(), String> {
-        self.verify_sig_impl(data, &sig.0)
-            .map_err(|e| e.to_string())
+impl<'a, S: SignatureScheme<Message<'a> = &'a Sha256Hash>, PK: WalletPublicKey<SigScheme = S>>
+    WalletPk<PK>
+{
+    pub fn verify_tx(&self, msg: &'a Sha256Hash, sig: &TxSignature<S>) -> Result<(), String> {
+        self.verify_sig_impl(msg, sig).map_err(|e| e.to_string())
     }
 }
 

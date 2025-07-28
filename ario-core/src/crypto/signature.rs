@@ -51,7 +51,7 @@ pub trait Scheme {
     type Output: Output + PartialEq;
     type Signer;
     type SigningError: Display;
-    type Verifier;
+    type Verifier: for<'a> TryFrom<Blob<'a>, Error: Display> + Debug + Clone + PartialEq;
     type VerificationError: Display;
     type Message<'a>;
 

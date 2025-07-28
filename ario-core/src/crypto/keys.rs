@@ -8,6 +8,7 @@ use crate::crypto::signature::{SignExt, Signature, SupportsSignatures, VerifySig
 use crate::jwk::{Jwk, KeyType};
 use crate::typed::Typed;
 use hybrid_array::ArraySize;
+use std::fmt::Debug;
 use thiserror::Error;
 
 pub type TypedSecretKey<T, SK: SecretKey> = Typed<T, SK>;
@@ -46,7 +47,9 @@ pub(crate) trait SecretKey {
 
 pub type TypedPublicKey<T, PK: PublicKey> = Typed<T, PK>;
 
-pub(crate) trait PublicKey: Hashable + DeepHashable + AsBlob + PartialEq {
+pub(crate) trait PublicKey:
+    Hashable + DeepHashable + AsBlob + PartialEq + Clone + Debug
+{
     type Scheme;
     type KeyLen: ArraySize;
     type SecretKey: SecretKey<Scheme = Self::Scheme, PublicKey = Self>;
@@ -89,6 +92,8 @@ pub enum KeyError {
     UnsupportedKeyType(KeyType),
     #[error(transparent)]
     RsaError(#[from] RsaKeyError),
+    #[error(transparent)]
+    Other(anyhow::Error),
 }
 
 #[cfg(test)]

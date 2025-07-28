@@ -4,16 +4,17 @@ mod v1;
 use crate::JsonError;
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob, TypedBlob};
+use crate::crypto::hash::Sha256;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, HasherExt, TypedDigest};
-use crate::crypto::hash::{Sha256, Sha384};
-use crate::crypto::rsa::{Rsa4096, RsaPss, RsaPublicKey};
-use crate::crypto::signature::{Signature, TypedSignature};
+use crate::crypto::keys::{PublicKey, SecretKey};
+use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPss};
+use crate::crypto::signature::TypedSignature;
 use crate::money::{Money, TypedMoney, Winston};
 use crate::tx::raw::RawTag;
 use crate::typed::{FromInner, Typed};
 use crate::wallet::{
-    Wallet, WalletAddress, WalletKind, WalletPKey, WalletPublicKey, WalletSecretKey,
+    Wallet, WalletAddress, WalletKind, WalletPk, WalletPublicKey, WalletSecretKey,
 };
 use derive_where::derive_where;
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -28,8 +29,9 @@ static ZERO_QUANTITY: LazyLock<Quantity> = LazyLock::new(|| Quantity::zero());
 static ZERO_REWARD: LazyLock<Reward> = LazyLock::new(|| Reward::zero());
 
 pub struct TxKind;
+pub struct TxSignatureKind;
 
-pub type TxId = TypedDigest<TxSignature, Sha256>;
+pub type TxId = TypedDigest<TxSignatureKind, Sha256>;
 
 impl Display for TxId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -37,10 +39,25 @@ impl Display for TxId {
     }
 }
 
-pub type TxSignature = TypedSignature<TxHash, WalletKind, RsaPss<Rsa4096>>;
-pub type TxHash = TypedDigest<TxKind, Sha384>;
+pub(crate) trait SignatureScheme: crate::crypto::signature::Scheme {
+    type Signer: SecretKey;
+    type Verifier: PublicKey;
+}
 
-impl TxSignature {
+impl SignatureScheme for RsaPss<Rsa4096> {
+    type Signer = <Self as crate::crypto::signature::Scheme>::Signer;
+    type Verifier = <Self as crate::crypto::signature::Scheme>::Verifier;
+}
+
+impl SignatureScheme for RsaPss<Rsa2048> {
+    type Signer = <Self as crate::crypto::signature::Scheme>::Signer;
+    type Verifier = <Self as crate::crypto::signature::Scheme>::Verifier;
+}
+
+pub type TxSignature<S: SignatureScheme> = TypedSignature<TxHash, WalletKind, S>;
+pub type TxHash = TypedDigest<TxKind, Sha256>;
+
+impl<S: SignatureScheme> TxSignature<S> {
     pub fn digest(&self) -> TxId {
         TxId::from_inner(Sha256::digest(self.as_blob()))
     }
@@ -215,12 +232,12 @@ pub enum TxDataError {
 
 // This follows the definition found here:
 // https://docs.arweave.org/developers/arweave-node-server/http-api#field-definitions
-#[derive(Debug, Clone)]
-pub(crate) struct TxData<'a> {
+#[derive_where(Debug, Clone)]
+pub(crate) struct TxData<'a, S: SignatureScheme> {
     format: Format,
     id: TxId,
     last_tx: LastTx,
-    owner: WalletPKey<RsaPublicKey<Rsa4096>>,
+    owner: WalletPk<<S as SignatureScheme>::Verifier>,
     tags: Vec<Tag<'a>>,
     //#[serde(with = "empty_string_none")]
     target: Option<WalletAddress>,
@@ -237,10 +254,10 @@ pub(crate) struct TxData<'a> {
     data: Option<EmbeddedData<'a>>,
     //#[serde(with = "empty_string_none")]
     reward: Option<Reward>,
-    signature: TxSignature,
+    signature: TxSignature<S>,
 }
 
-impl<'a> TxData<'a> {
+impl<'a, S: SignatureScheme> TxData<'a, S> {
     pub(crate) fn try_from_json_slice(bytes: &[u8]) -> Result<Self, TxDataError> {
         let tx_data = Self::try_from_json_slice_unvalidated(bytes)?;
         //tx_data.is_valid()?;
@@ -255,7 +272,7 @@ impl<'a> TxData<'a> {
 
     pub(crate) fn verify_signature<PK: WalletPublicKey>(
         &self,
-        pkey: &WalletPKey<PK>,
+        pkey: &WalletPk<PK>,
     ) -> Result<(), TxDataError> {
         let digest = TxHash::from_inner(self.deep_hash());
         /*Ok(pkey
@@ -302,7 +319,7 @@ impl<'a> TxData<'a> {
     }
 }
 
-impl DeepHashable for TxData<'_> {
+impl<S: SignatureScheme> DeepHashable for TxData<'_, S> {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
         match self.format {
             Format::V1 => {
@@ -448,12 +465,12 @@ pub enum TxError {
 }
 
 #[derive_where(Debug, Clone)]
-pub enum Tx<'a, S> {
+pub enum Tx<'a, S: SignatureScheme> {
     V1(V1Tx<'a, S>),
     V2(V2Tx<'a, S>),
 }
 
-impl<'a, S> Tx<'a, S> {
+impl<'a, S: SignatureScheme> Tx<'a, S> {
     pub fn id(&self) -> &TxId {
         match self {
             Self::V1(v1) => v1.id(),
@@ -483,7 +500,7 @@ impl<'a, S> Tx<'a, S> {
     }
 }
 
-impl<'a> SignedTx<'a> {
+impl<'a, S: SignatureScheme> SignedTx<'a, S> {
     pub fn try_from_json_slice(bytes: &[u8]) -> Result<Self, TxError> {
         let tx_data = TxData::try_from_json_slice(bytes)?;
         Ok(match tx_data.format {
@@ -492,7 +509,7 @@ impl<'a> SignedTx<'a> {
         })
     }
 
-    pub fn try_make_mut(self) -> Result<UnsignedTx<'a>, (Self, EditError)> {
+    pub fn try_make_mut(self) -> Result<UnsignedTx<'a, S>, (Self, EditError)> {
         match self {
             Self::V1(v1) => Err((v1.into(), EditError::V1Unsupported)),
             Self::V2(v2) => todo!(),
@@ -500,11 +517,11 @@ impl<'a> SignedTx<'a> {
     }
 }
 
-impl<'a> UnsignedTx<'a> {
+impl<'a, S: SignatureScheme> UnsignedTx<'a, S> {
     pub(crate) fn sign<SK: WalletSecretKey>(
         self,
-        wallet: &Wallet<SK>,
-    ) -> Result<SignedTx, (Self, SigningError)> {
+        wallet: &'a Wallet<SK>,
+    ) -> Result<SignedTx<'a, S>, (Self, SigningError)> {
         match self {
             Self::V1(v1) => Err((v1.into(), SigningError::V1Unsupported)),
             Self::V2(v2) => Ok(v2
@@ -536,20 +553,20 @@ impl<'a> UnsignedTx<'a> {
     }
 }
 
-impl<'a, S> From<TxImpl<'a, S, V1>> for Tx<'a, S> {
+impl<'a, S: SignatureScheme> From<TxImpl<'a, S, V1>> for Tx<'a, S> {
     fn from(value: TxImpl<'a, S, V1>) -> Self {
         Self::V1(value)
     }
 }
 
-impl<'a, S> From<TxImpl<'a, S, V2>> for Tx<'a, S> {
+impl<'a, S: SignatureScheme> From<TxImpl<'a, S, V2>> for Tx<'a, S> {
     fn from(value: TxImpl<'a, S, V2>) -> Self {
         Self::V2(value)
     }
 }
 
-pub type SignedTx<'a> = Tx<'a, Signed>;
-pub type UnsignedTx<'a> = Tx<'a, Unsigned>;
+pub type SignedTx<'a, S: SignatureScheme> = Tx<'a, S>;
+pub type UnsignedTx<'a, S: SignatureScheme> = Tx<'a, S>;
 
 pub struct V1;
 pub struct V2;
@@ -568,10 +585,10 @@ pub enum EditError {
 
 #[derive_where(Clone, Debug)]
 #[repr(transparent)]
-pub struct TxImpl<'a, S, V>(TxData<'a>, PhantomData<(S, V)>);
+pub struct TxImpl<'a, S: SignatureScheme, V>(TxData<'a, S>, PhantomData<V>);
 
-impl<'a, S, V> TxImpl<'a, S, V> {
-    fn new(inner: TxData<'a>) -> Self {
+impl<'a, S: SignatureScheme, V> TxImpl<'a, S, V> {
+    fn new(inner: TxData<'a, S>) -> Self {
         Self(inner, PhantomData)
     }
 
@@ -592,7 +609,7 @@ impl<'a, S, V> TxImpl<'a, S, V> {
     }
 }
 
-impl<'a, V> TxImpl<'a, Unsigned, V> {
+impl<'a, S: SignatureScheme, V> TxImpl<'a, S, V> {
     pub fn tags_mut(&'a mut self) -> &'a mut Vec<Tag<'a>> {
         self.0.tags.as_mut()
     }
@@ -606,7 +623,7 @@ impl<'a, V> TxImpl<'a, Unsigned, V> {
     }
 }
 
-impl<'a, S> TxImpl<'a, S, V1> {
+impl<'a, S: SignatureScheme> TxImpl<'a, S, V1> {
     pub fn last_tx(&self) -> &TxId {
         if let LastTx::V1(tx_id) = &self.0.last_tx {
             tx_id
@@ -616,7 +633,7 @@ impl<'a, S> TxImpl<'a, S, V1> {
     }
 }
 
-impl<'a, S> TxImpl<'a, S, V2> {
+impl<'a, S: SignatureScheme> TxImpl<'a, S, V2> {
     pub fn last_tx(&self) -> &TxAnchor {
         if let LastTx::V2(tx_anchor) = &self.0.last_tx {
             tx_anchor
@@ -626,11 +643,11 @@ impl<'a, S> TxImpl<'a, S, V2> {
     }
 }
 
-impl<'a> TxImpl<'a, Unsigned, V2> {
+impl<'a, S: SignatureScheme> TxImpl<'a, S, V2> {
     fn sign<SK: WalletSecretKey>(
         self,
         _wallet: &Wallet<SK>,
-    ) -> Result<TxImpl<Signed, V2>, (Self, SigningError)> {
+    ) -> Result<TxImpl<S, V2>, (Self, SigningError)> {
         // tx signing happens here
         todo!()
     }
@@ -643,6 +660,7 @@ impl<'a> TxImpl<'a, Unsigned, V2> {
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
+    use crate::crypto::rsa::{Rsa4096, RsaPss};
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::{Format, Quantity, Reward, SignedTx, TxData, ZERO_QUANTITY};
     use std::ops::Deref;
@@ -654,7 +672,7 @@ mod tests {
 
     #[test]
     fn tx_data_ok_v1() -> anyhow::Result<()> {
-        let tx_data = TxData::try_from_json_slice(TX_V1)?;
+        let tx_data = TxData::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V1)?;
         assert_eq!(&tx_data.format, &Format::V1);
         assert_eq!(
             tx_data.id.to_base64(),
@@ -688,7 +706,7 @@ mod tests {
 
     #[test]
     fn tx_data_ok_v2() -> anyhow::Result<()> {
-        let tx_data = TxData::try_from_json_slice(TX_V2)?;
+        let tx_data = TxData::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V2)?;
         assert_eq!(&tx_data.format, &Format::V2);
         assert_eq!(
             tx_data.id.to_base64(),
@@ -775,7 +793,7 @@ mod tests {
 
     #[test]
     fn tx_data_ok_transfer() -> anyhow::Result<()> {
-        let tx_data = TxData::try_from_json_slice(TX_V2_2)?;
+        let tx_data = TxData::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V2_2)?;
         assert_eq!(&tx_data.format, &Format::V2);
         assert_eq!(
             tx_data.id.to_base64(),
@@ -808,7 +826,7 @@ mod tests {
 
     #[test]
     fn tx_v1_ok() -> anyhow::Result<()> {
-        let tx = SignedTx::try_from_json_slice(TX_V1)?;
+        let tx = SignedTx::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V1)?;
         assert_eq!(
             tx.id().to_base64(),
             "BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ"
@@ -818,7 +836,7 @@ mod tests {
 
     #[test]
     fn tx_v2_ok() -> anyhow::Result<()> {
-        let tx = SignedTx::try_from_json_slice(TX_V2)?;
+        let tx = SignedTx::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V2)?;
         assert_eq!(
             tx.id().to_base64(),
             "bXGqzNQNmHTeL54cUQ6wPo-MO0thLP44FeAoM93kEwk"
@@ -828,7 +846,7 @@ mod tests {
 
     #[test]
     fn tx_v2_mut_ok() -> anyhow::Result<()> {
-        let mut tx = SignedTx::try_from_json_slice(TX_V2)?
+        let mut tx = SignedTx::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V2)?
             .try_make_mut()
             .unwrap();
 
@@ -854,7 +872,7 @@ mod tests {
     #[test]
     fn tx_v1_mut_err() -> anyhow::Result<()> {
         assert!(
-            SignedTx::try_from_json_slice(TX_V1)?
+            SignedTx::<RsaPss<Rsa4096>>::try_from_json_slice(TX_V1)?
                 .try_make_mut()
                 .is_err()
         );

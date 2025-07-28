@@ -210,7 +210,8 @@ impl RsaParams for Rsa2048 {
     type KeyLen = U256;
 }
 
-#[derive(Clone, Debug, TransparentWrapper, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq)]
+#[derive(TransparentWrapper)]
 #[transparent(ExternalRsaPublicKey)]
 #[repr(transparent)]
 pub struct RsaPublicKey<P: RsaParams>(ExternalRsaPublicKey, PhantomData<P>);
