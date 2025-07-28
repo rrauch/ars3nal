@@ -1,7 +1,10 @@
 use crate::Address;
 use crate::crypto::hash::{HashableExt, Sha256Hash};
 use crate::crypto::keys::{KeyError, PublicKey, SecretKey, TypedPublicKey, TypedSecretKey};
-use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPrivateKey, RsaPss, RsaPublicKey};
+use crate::crypto::rsa::{
+    Rsa2048, Rsa4096, RsaPrivateKey, RsaPrivateKey2048, RsaPrivateKey4096, RsaPss, RsaPublicKey,
+    RsaPublicKey2048, RsaPublicKey4096,
+};
 use crate::crypto::signature::SignExt;
 use crate::crypto::signature::VerifySigExt;
 use crate::tx::{SignatureScheme, SignedTx, SigningError, TxSignature, UnsignedTx};
@@ -16,20 +19,20 @@ pub type WalletPk<PK: WalletPublicKey> = TypedPublicKey<WalletKind, PK>;
 pub trait WalletSecretKey: SecretKey + SignExt<Self::SigScheme> {
     type SigScheme: SignatureScheme;
 }
-impl WalletSecretKey for RsaPrivateKey<Rsa4096> {
+impl WalletSecretKey for RsaPrivateKey4096 {
     type SigScheme = RsaPss<Rsa4096>;
 }
-impl WalletSecretKey for RsaPrivateKey<Rsa2048> {
+impl WalletSecretKey for RsaPrivateKey2048 {
     type SigScheme = RsaPss<Rsa2048>;
 }
 
 pub trait WalletPublicKey: PublicKey + VerifySigExt<Self::SigScheme> {
     type SigScheme: SignatureScheme;
 }
-impl WalletPublicKey for RsaPublicKey<Rsa4096> {
+impl WalletPublicKey for RsaPublicKey4096 {
     type SigScheme = RsaPss<Rsa4096>;
 }
-impl WalletPublicKey for RsaPublicKey<Rsa2048> {
+impl WalletPublicKey for RsaPublicKey2048 {
     type SigScheme = RsaPss<Rsa2048>;
 }
 

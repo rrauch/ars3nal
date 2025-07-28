@@ -210,11 +210,31 @@ impl RsaParams for Rsa2048 {
     type KeyLen = U256;
 }
 
+pub enum SupportedPublicKey {
+    Rsa4096(RsaPublicKey4096),
+    Rsa2048(RsaPublicKey2048),
+}
+
 #[derive_where(Clone, Debug, PartialEq)]
 #[derive(TransparentWrapper)]
 #[transparent(ExternalRsaPublicKey)]
 #[repr(transparent)]
 pub struct RsaPublicKey<P: RsaParams>(ExternalRsaPublicKey, PhantomData<P>);
+
+pub type RsaPublicKey4096 = RsaPublicKey<Rsa4096>;
+pub type RsaPublicKey2048 = RsaPublicKey<Rsa2048>;
+
+impl TryFrom<Blob<'_>> for SupportedPublicKey {
+    type Error = KeyError;
+
+    fn try_from(value: Blob<'_>) -> Result<Self, Self::Error> {
+        Ok(match value.len() {
+            512 => SupportedPublicKey::Rsa4096(RsaPublicKey::<Rsa4096>::try_from(value)?),
+            256 => SupportedPublicKey::Rsa2048(RsaPublicKey::<Rsa2048>::try_from(value)?),
+            unsupported => return Err(KeyError::UnsupportedKeyLength(unsupported)),
+        })
+    }
+}
 
 impl<P: RsaParams> RsaPublicKey<P> {
     pub(crate) fn from_inner(inner: ExternalRsaPublicKey) -> Self {

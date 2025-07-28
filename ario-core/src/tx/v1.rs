@@ -1,39 +1,37 @@
 use crate::JsonError;
+use crate::blob::Blob;
 use crate::crypto::keys;
-use crate::crypto::signature::Scheme as SignatureScheme;
+use crate::crypto::rsa::{Rsa2048, Rsa4096, RsaPss, RsaPublicKey2048, RsaPublicKey4096};
 use crate::json::JsonSource;
 use crate::money::{CurrencyExt, Winston};
 use crate::tx::raw::{RawTxDataError, UnvalidatedRawTx, ValidatedRawTx};
-use crate::tx::v1::V1TxDataError::MissingOwner;
 use crate::tx::{EmbeddedData, Format, LastTx, Quantity, Reward, Tag, TxId, TxSignature};
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
 use crate::wallet::{WalletAddress, WalletPk};
-use anyhow::anyhow;
-use derive_where::derive_where;
 use thiserror::Error;
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(transparent)]
-pub(super) struct V1Tx<'a, S: SignatureScheme, const VALIDATED: bool = false>(V1TxData<'a, S>);
+pub(super) struct V1Tx<'a, const VALIDATED: bool = false>(V1TxData<'a>);
 
-pub(super) type UnvalidatedV1Tx<'a, S: SignatureScheme> = V1Tx<'a, S, false>;
-pub(super) type ValidatedV1Tx<'a, S: SignatureScheme> = V1Tx<'a, S, true>;
+pub(super) type UnvalidatedV1Tx<'a> = V1Tx<'a, false>;
+pub(super) type ValidatedV1Tx<'a> = V1Tx<'a, true>;
 
-impl<'a, S: SignatureScheme> From<V1TxData<'a, S>> for UnvalidatedV1Tx<'a, S> {
-    fn from(value: V1TxData<'a, S>) -> Self {
+impl<'a> From<V1TxData<'a>> for UnvalidatedV1Tx<'a> {
+    fn from(value: V1TxData<'a>) -> Self {
         V1Tx(value)
     }
 }
 
-impl<'a, S: SignatureScheme> From<ValidatedV1Tx<'a, S>> for V1TxData<'a, S> {
-    fn from(value: ValidatedV1Tx<'a, S>) -> Self {
+impl<'a> From<ValidatedV1Tx<'a>> for V1TxData<'a> {
+    fn from(value: ValidatedV1Tx<'a>) -> Self {
         value.0
     }
 }
 
-impl<'a, S: SignatureScheme> ValidatedV1Tx<'a, S> {
-    pub(super) fn into_inner(self) -> V1TxData<'a, S> {
+impl<'a> ValidatedV1Tx<'a> {
+    pub(super) fn into_inner(self) -> V1TxData<'a> {
         self.0
     }
 }
@@ -48,7 +46,7 @@ pub enum V1TxError {
     DataError(#[from] V1TxDataError),
 }
 
-impl<S: SignatureScheme> UnvalidatedV1Tx<'static, S> {
+impl UnvalidatedV1Tx<'static> {
     pub fn from_json<J: JsonSource>(json: J) -> Result<Self, V1TxError> {
         let tx_data = UnvalidatedRawTx::from_json(json)?
             .validate()
@@ -59,9 +57,9 @@ impl<S: SignatureScheme> UnvalidatedV1Tx<'static, S> {
     }
 }
 
-impl<'a, S: SignatureScheme> SupportsValidation for UnvalidatedV1Tx<'a, S> {
-    type Unvalidated = V1TxData<'a, S>;
-    type Validated = ValidatedV1Tx<'a, S>;
+impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
+    type Unvalidated = V1TxData<'a>;
+    type Validated = ValidatedV1Tx<'a>;
     type Validator = V1TxDataValidator;
 
     fn into_valid(self, _token: Valid<Self>) -> Self::Validated
@@ -76,18 +74,65 @@ impl<'a, S: SignatureScheme> SupportsValidation for UnvalidatedV1Tx<'a, S> {
     }
 }
 
-#[derive_where(Debug, Clone, PartialEq)]
-pub(super) struct V1TxData<'a, S: SignatureScheme> {
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum RsaPssSignatureData {
+    Rsa4096 {
+        owner: WalletPk<RsaPublicKey4096>,
+        signature: TxSignature<RsaPss<Rsa4096>>,
+    },
+    Rsa2048 {
+        owner: WalletPk<RsaPublicKey2048>,
+        signature: TxSignature<RsaPss<Rsa2048>>,
+    },
+}
+
+impl RsaPssSignatureData {
+    fn from_raw<'a>(
+        raw_owner: Option<Blob<'a>>,
+        raw_signature: Blob<'a>,
+    ) -> Result<Self, V1TxDataError> {
+        use crate::crypto::rsa::SupportedPublicKey;
+        use crate::crypto::signature::Scheme as SignatureScheme;
+        use crate::crypto::signature::Signature;
+        use crate::tx::v1::V1TxDataError::*;
+
+        // v1 tx always uses RSA_PSS
+        let raw_owner = raw_owner.ok_or(MissingOwner)?;
+
+        Ok(
+            match SupportedPublicKey::try_from(raw_owner)
+                .map_err(|e| keys::KeyError::RsaError(e))?
+            {
+                SupportedPublicKey::Rsa4096(pk) => Self::Rsa4096 {
+                    owner: WalletPk::from_inner(pk),
+                    signature: TxSignature::from_inner(Signature::from_inner(
+                        <<RsaPss<Rsa4096> as SignatureScheme>::Output>::try_from(raw_signature)
+                            .map_err(|e| InvalidSignature(e.to_string()))?,
+                    )),
+                },
+                SupportedPublicKey::Rsa2048(pk) => Self::Rsa2048 {
+                    owner: WalletPk::from_inner(pk),
+                    signature: TxSignature::from_inner(Signature::from_inner(
+                        <<RsaPss<Rsa2048> as SignatureScheme>::Output>::try_from(raw_signature)
+                            .map_err(|e| InvalidSignature(e.to_string()))?,
+                    )),
+                },
+            },
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct V1TxData<'a> {
     pub id: TxId,
     pub last_tx: LastTx,
-    pub owner: WalletPk<S::Verifier>,
     pub tags: Vec<Tag<'a>>,
     pub target: Option<WalletAddress>,
     pub quantity: Option<Quantity>,
     pub data_size: u64,
     pub data: Option<EmbeddedData<'a>>,
     pub reward: Reward,
-    pub signature: TxSignature<S>,
+    pub signature_data: RsaPssSignatureData,
 }
 
 #[derive(Error, Debug)]
@@ -112,7 +157,7 @@ pub enum V1TxDataError {
     InvalidKey(#[from] keys::KeyError),
 }
 
-impl<'a, S: SignatureScheme> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a, S> {
+impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
     type Error = V1TxDataError;
 
     fn try_from(raw: ValidatedRawTx<'a>) -> Result<Self, Self::Error> {
@@ -152,52 +197,35 @@ impl<'a, S: SignatureScheme> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a, S> {
                 .map_err(|e| V1TxDataError::InvalidReward(e.to_string()))?,
         );
 
-        // v1 tx always uses RSA
-        let owner = match raw.owner {
-            Some(owner) => {
-                WalletPk::from_inner(<S::Verifier>::try_from(owner).map_err(|e| {
-                    keys::KeyError::Other(anyhow!("error converting verifier: {}", e))
-                })?)
-            }
-            None => {
-                return Err(MissingOwner);
-            }
-        };
-
-        let signature = TxSignature::from_inner(raw.signature.try_into().map_err(|_| {
-            V1TxDataError::InvalidSignature("invalid signature length".to_string())
-        })?);
-
-        // todo: check if signature & owner are compatible
+        let signature_data = RsaPssSignatureData::from_raw(raw.owner, raw.signature)?;
 
         Ok(Self {
             id,
             last_tx,
-            owner,
             tags,
             target,
             quantity,
             data_size,
             data,
             reward,
-            signature,
+            signature_data,
         })
     }
 }
 
 pub struct V1TxDataValidator;
 
-impl<S: SignatureScheme> Validator<V1TxData<'_, S>> for V1TxDataValidator {
+impl Validator<V1TxData<'_>> for V1TxDataValidator {
     type Error = V1TxDataError;
 
-    fn validate(data: &V1TxData<S>) -> Result<(), Self::Error> {
+    fn validate(data: &V1TxData) -> Result<(), Self::Error> {
+        println!("");
         todo!()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::rsa::{Rsa4096, RsaPss};
     use crate::tx::Format;
     use crate::tx::v1::{UnvalidatedV1Tx, V1TxDataError, V1TxError};
     use crate::validation::ValidateExt;
@@ -207,14 +235,14 @@ mod tests {
 
     #[test]
     fn v1_ok() -> anyhow::Result<()> {
-        let unvalidated = UnvalidatedV1Tx::<RsaPss<Rsa4096>>::from_json(TX_V1)?;
+        let unvalidated = UnvalidatedV1Tx::from_json(TX_V1)?;
         let _validated = unvalidated.validate().map_err(|(_, e)| e)?;
         Ok(())
     }
 
     #[test]
     fn v2_err() -> anyhow::Result<()> {
-        match UnvalidatedV1Tx::<RsaPss<Rsa4096>>::from_json(TX_V2) {
+        match UnvalidatedV1Tx::from_json(TX_V2) {
             Err(V1TxError::DataError(V1TxDataError::IncorrectFormat(f))) => {
                 assert_eq!(f, Format::V2);
             }
