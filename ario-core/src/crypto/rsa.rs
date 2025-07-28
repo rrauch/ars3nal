@@ -1,20 +1,24 @@
-use crate::base64::{Base64Error, FromBase64, ToBase64};
+use crate::base64::{Base64Error, FromBase64};
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha256Hash};
 use crate::crypto::keys::{KeyLen, PublicKey, SecretKey};
 use crate::crypto::signature::{Scheme, Signature, SupportsSignatures};
+use crate::crypto::{Output, OutputLen};
 use crate::jwk::{Jwk, KeyType};
 use crate::{BigUint, RsaError};
 use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
 use digest::consts::{U256, U512};
 use hybrid_array::typenum::Unsigned;
+use rsa::pss::Signature as ExternalPssSignature;
 use rsa::pss::{SigningKey as PssSigningKey, VerifyingKey as PssVerifyingKey};
 use rsa::signature::SignatureEncoding;
 use rsa::signature::hazmat::{PrehashVerifier, RandomizedPrehashSigner};
 use rsa::traits::PublicKeyParts;
-use rsa::{RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey};
+use rsa::{
+    RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey, signature,
+};
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::LazyLock;
@@ -251,12 +255,6 @@ impl<P: RsaParams> AsBlob for RsaPublicKey<P> {
     }
 }
 
-impl<P: RsaParams> ToBase64 for RsaPublicKey<P> {
-    fn to_base64(&self) -> String {
-        self.as_blob().to_base64()
-    }
-}
-
 impl<'a, P: RsaParams> TryFrom<Blob<'a>> for RsaPublicKey<P> {
     type Error = KeyError;
 
@@ -274,15 +272,53 @@ impl<'a, P: RsaParams> TryFrom<Blob<'a>> for RsaPublicKey<P> {
     }
 }
 
+#[derive_where(Clone, Debug, PartialEq)]
+#[repr(transparent)]
+pub struct PssSignature<L: OutputLen>(ExternalPssSignature, PhantomData<L>);
+
+impl<L: OutputLen> Output for PssSignature<L> {
+    type Len = L;
+}
+
+impl<L: OutputLen> AsBlob for PssSignature<L> {
+    fn as_blob(&self) -> Blob<'_> {
+        self.0.to_bytes().into()
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("Invalid input length, expected '{expected}' but go '{actual}'")]
+    InvalidInputLength { expected: usize, actual: usize },
+    #[error(transparent)]
+    SignatureError(#[from] signature::Error),
+}
+
+impl<'a, L: OutputLen> TryFrom<Blob<'a>> for PssSignature<L> {
+    type Error = Error;
+
+    fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
+        if value.len() != L::to_usize() {
+            return Err(Error::InvalidInputLength {
+                expected: L::to_usize(),
+                actual: value.len(),
+            });
+        }
+        Ok(Self(
+            ExternalPssSignature::try_from(value.as_ref())?,
+            PhantomData,
+        ))
+    }
+}
+
 pub struct RsaPss<P: RsaParams>(PhantomData<P>);
 
 impl<P: RsaParams> Scheme for RsaPss<P> {
-    type SigLen = P::KeyLen;
-
+    type Output = PssSignature<<P as RsaParams>::KeyLen>;
     type Signer = RsaPrivateKey<P>;
-    type SigningError = rsa::signature::Error;
+    type SigningError = signature::Error;
     type Verifier = RsaPublicKey<P>;
-    type VerificationError = rsa::signature::Error;
+    type VerificationError = signature::Error;
     type Message<'a> = &'a Sha256Hash;
 
     fn sign(
@@ -300,8 +336,10 @@ impl<P: RsaParams> Scheme for RsaPss<P> {
         let mut rng = rand::rng();
 
         let sig = signing_key.sign_prehash_with_rng(&mut rng, msg.as_slice())?;
-        Ok(Signature::try_clone_from_bytes(sig.to_bytes())
-            .expect("signature to be of correct length"))
+        if sig.encoded_len() != <Self::Output as Output>::Len::to_usize() {
+            return Err(Self::SigningError::from_source("invalid signature length"));
+        }
+        Ok(Signature::from_inner(PssSignature(sig, PhantomData)))
     }
 
     fn verify(
@@ -319,7 +357,7 @@ impl<P: RsaParams> Scheme for RsaPss<P> {
 
         verifying_key.verify_prehash(
             msg.as_slice(),
-            &rsa::pss::Signature::try_from(signature.as_slice())?,
+            &rsa::pss::Signature::try_from(signature.as_blob().bytes())?,
         )
     }
 }

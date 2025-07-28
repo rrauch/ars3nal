@@ -33,8 +33,8 @@ impl From<SupportedRsaPrivateKey> for SupportedSecretKey {
     }
 }
 
-pub trait KeyLen: ArraySize {}
-impl<T> KeyLen for T where T: ArraySize {}
+pub trait KeyLen: ArraySize + Send + Sync {}
+impl<T> KeyLen for T where T: ArraySize + Send + Sync {}
 
 pub(crate) trait SecretKey {
     type Scheme;

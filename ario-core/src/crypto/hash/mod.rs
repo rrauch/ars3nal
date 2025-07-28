@@ -2,10 +2,10 @@ pub mod deep_hash;
 
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob};
+use crate::crypto::Output;
 use crate::typed::Typed;
 use bytes::Bytes;
 use derive_where::derive_where;
-use hybrid_array::{Array, ArraySize};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use uuid::Uuid;
@@ -18,15 +18,13 @@ pub type Sha384Hash = Digest<Sha384>;
 
 pub type TypedDigest<T, H: Hasher> = Typed<T, Digest<H>>;
 
-#[derive_where(Clone)]
+#[derive_where(Clone, PartialEq, Hash)]
 #[repr(transparent)]
 pub struct Digest<H: Hasher>(H::Output);
 
 impl<H: Hasher> Digest<H> {
-    pub(crate) fn from_bytes<'a>(
-        blob: impl Into<Blob<'a>>,
-    ) -> Result<Self, <<H as Hasher>::Output as TryFrom<Blob<'a>>>::Error> {
-        Ok(Self(H::Output::try_from(blob.into())?))
+    pub(crate) fn from_inner(inner: H::Output) -> Self {
+        Self(inner)
     }
 }
 
@@ -42,15 +40,9 @@ impl<H: Hasher> Debug for Digest<H> {
     }
 }
 
-impl<H: Hasher> PartialEq for Digest<H> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.as_ref() == other.0.as_ref()
-    }
-}
-
-impl<H: Hasher> Hash for Digest<H> {
-    fn hash<H2: std::hash::Hasher>(&self, state: &mut H2) {
-        self.0.as_ref().hash(state)
+impl<H: Hasher> AsBlob for Digest<H> {
+    fn as_blob(&self) -> Blob<'_> {
+        self.0.as_blob()
     }
 }
 
@@ -78,25 +70,8 @@ impl<H: Hasher> AsRef<[u8]> for Digest<H> {
     }
 }
 
-pub trait OutputLen: ArraySize {}
-impl<T> OutputLen for T where T: ArraySize {}
-
-pub trait Output: Clone + AsRef<[u8]> + AsBlob + for<'a> TryFrom<Blob<'a>> + Send + Sync {
-    type Len: OutputLen;
-}
-
-impl<L: OutputLen> AsBlob for Array<u8, L> {
-    fn as_blob(&self) -> Blob<'_> {
-        Blob::Slice(self.0.as_ref())
-    }
-}
-
-impl<L: OutputLen> Output for Array<u8, L> {
-    type Len = L;
-}
-
 pub trait Hasher: Send + Sync {
-    type Output: Output;
+    type Output: Output + PartialEq + Hash + AsRef<[u8]>;
 
     fn new() -> Self;
     fn update(&mut self, data: impl AsRef<[u8]>);
@@ -108,6 +83,7 @@ pub trait Hasher: Send + Sync {
 impl<H> Hasher for H
 where
     H: digest::Digest + Send + Sync,
+    <H as digest::OutputSizeUser>::OutputSize: Send + Sync,
 {
     type Output = digest::Output<Self>;
 
@@ -123,7 +99,7 @@ where
     where
         Self: Sized,
     {
-        Digest(digest::Digest::finalize(self))
+        Digest::from_inner(digest::Digest::finalize(self))
     }
 }
 

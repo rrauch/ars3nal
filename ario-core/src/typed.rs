@@ -1,4 +1,4 @@
-use crate::blob::Blob;
+use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
 use bytemuck::TransparentWrapper;
@@ -42,6 +42,15 @@ impl<T, I> AsRef<I> for Typed<T, I> {
 impl<T, I> AsMut<I> for Typed<T, I> {
     fn as_mut(&mut self) -> &mut I {
         &mut self.0
+    }
+}
+
+impl<T, I> AsBlob for Typed<T, I>
+where
+    I: AsBlob,
+{
+    fn as_blob(&self) -> Blob<'_> {
+        self.0.as_blob()
     }
 }
 

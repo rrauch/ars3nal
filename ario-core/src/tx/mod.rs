@@ -3,10 +3,10 @@ mod v1;
 
 use crate::JsonError;
 use crate::base64::ToBase64;
-use crate::blob::{Blob, TypedBlob};
+use crate::blob::{AsBlob, Blob, TypedBlob};
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Sha256, Sha384};
 use crate::crypto::hash::{Digest, Hashable, Hasher, HasherExt, TypedDigest};
+use crate::crypto::hash::{Sha256, Sha384};
 use crate::crypto::rsa::{Rsa4096, RsaPss, RsaPublicKey};
 use crate::crypto::signature::{Signature, TypedSignature};
 use crate::money::{Money, TypedMoney, Winston};
@@ -33,7 +33,7 @@ pub type TxId = TypedDigest<TxSignature, Sha256>;
 
 impl Display for TxId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0.to_base64().as_str())
+        f.write_str(self.to_base64().as_str())
     }
 }
 
@@ -41,12 +41,8 @@ pub type TxSignature = TypedSignature<TxHash, WalletKind, RsaPss<Rsa4096>>;
 pub type TxHash = TypedDigest<TxKind, Sha384>;
 
 impl TxSignature {
-    fn empty() -> Self {
-        Self::from_inner(Signature::empty())
-    }
-
     pub fn digest(&self) -> TxId {
-        TxId::from_inner(Sha256::digest(self.as_slice()))
+        TxId::from_inner(Sha256::digest(self.as_blob()))
     }
 }
 
@@ -114,6 +110,15 @@ impl AsRef<[u8]> for LastTx {
         match self {
             Self::V1(tx_id) => tx_id.as_slice(),
             Self::V2(tx_anchor) => tx_anchor.as_slice(),
+        }
+    }
+}
+
+impl AsBlob for LastTx {
+    fn as_blob(&self) -> Blob<'_> {
+        match self {
+            Self::V1(tx_id) => tx_id.as_blob(),
+            Self::V2(tx_anchor) => tx_anchor.as_blob(),
         }
     }
 }
@@ -490,7 +495,7 @@ impl<'a> SignedTx<'a> {
     pub fn try_make_mut(self) -> Result<UnsignedTx<'a>, (Self, EditError)> {
         match self {
             Self::V1(v1) => Err((v1.into(), EditError::V1Unsupported)),
-            Self::V2(v2) => Ok(v2.make_unsigned().into()),
+            Self::V2(v2) => todo!(),
         }
     }
 }
@@ -632,14 +637,6 @@ impl<'a> TxImpl<'a, Unsigned, V2> {
 
     pub fn set_last_tx(&mut self, anchor: TxAnchor) {
         self.0.last_tx = LastTx::V2(anchor);
-    }
-}
-
-impl<'a> TxImpl<'a, Signed, V2> {
-    fn make_unsigned(self) -> TxImpl<'a, Unsigned, V2> {
-        let mut data = self.0;
-        data.signature = TxSignature::empty();
-        TxImpl(data, PhantomData)
     }
 }
 

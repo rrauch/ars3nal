@@ -1,4 +1,4 @@
-use crate::blob::OwnedBlob;
+use crate::blob::{AsBlob, OwnedBlob};
 use core::fmt;
 use ct_codecs::{Base64UrlSafeNoPadding, Decoder, Encoder};
 use serde::de::Visitor;
@@ -18,9 +18,16 @@ pub trait ToBase64 {
     fn to_base64(&self) -> String;
 }
 
-impl<T: AsRef<[u8]>> ToBase64 for T {
+/*impl<T: AsRef<[u8]>> ToBase64 for T {
     fn to_base64(&self) -> String {
         Base64UrlSafeNoPadding::encode_to_string(self.as_ref())
+            .expect("base64 encoding should not fail")
+    }
+}*/
+
+impl<T: AsBlob> ToBase64 for T {
+    fn to_base64(&self) -> String {
+        Base64UrlSafeNoPadding::encode_to_string(self.as_blob().bytes())
             .expect("base64 encoding should not fail")
     }
 }
@@ -76,7 +83,7 @@ pub struct OptionalBase64As;
 
 impl<T> SerializeAs<Option<T>> for OptionalBase64As
 where
-    T: AsRef<[u8]>,
+    T: AsBlob,
 {
     fn serialize_as<S>(source: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
     where

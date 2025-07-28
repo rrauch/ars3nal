@@ -149,6 +149,18 @@ impl<'a, const N: usize> TryFrom<Blob<'a>> for [u8; N] {
     }
 }
 
-pub(crate) trait AsBlob {
+pub trait AsBlob {
     fn as_blob(&self) -> Blob<'_>;
+}
+
+impl AsBlob for Blob<'_> {
+    fn as_blob(&self) -> Blob<'_> {
+        Blob::Slice(self.bytes())
+    }
+}
+
+impl<const N: usize> AsBlob for [u8; N] {
+    fn as_blob(&self) -> Blob<'_> {
+        Blob::Slice(self.as_slice())
+    }
 }
