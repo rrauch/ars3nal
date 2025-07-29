@@ -1,9 +1,11 @@
 use crate::base64::{Base64Error, FromBase64};
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha256Hash};
+use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
 use crate::crypto::keys::{AsymmetricScheme, KeyLen, PublicKey, SecretKey};
-use crate::crypto::signature::{Scheme, Signature, SupportsSignatures};
+use crate::crypto::signature::{
+    Scheme, Signature, SigningError, SupportsSignatures, VerificationError,
+};
 use crate::crypto::{Output, OutputLen};
 use crate::jwk::{Jwk, KeyType};
 use crate::{BigUint, RsaError};
@@ -13,8 +15,7 @@ use digest::consts::{U256, U512};
 use hybrid_array::typenum::Unsigned;
 use rsa::pss::Signature as ExternalPssSignature;
 use rsa::pss::{SigningKey as PssSigningKey, VerifyingKey as PssVerifyingKey};
-use rsa::signature::SignatureEncoding;
-use rsa::signature::hazmat::{PrehashVerifier, RandomizedPrehashSigner};
+use rsa::signature::{RandomizedSigner, SignatureEncoding, Verifier};
 use rsa::traits::PublicKeyParts;
 use rsa::{
     RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey, signature,
@@ -349,10 +350,10 @@ where
 {
     type Output = PssSignature<<Rsa<BIT> as SupportedRsaScheme>::KeyLen>;
     type Signer = RsaPrivateKey<BIT>;
-    type SigningError = signature::Error;
+    type SigningError = SigningError;
     type Verifier = RsaPublicKey<BIT>;
-    type VerificationError = signature::Error;
-    type Message<'a> = &'a Sha256Hash;
+    type VerificationError = VerificationError;
+    type Message<'a> = Blob<'a>;
 
     fn sign(
         signer: &Self::Signer,
@@ -370,9 +371,9 @@ where
 
         let mut rng = rand::rng();
 
-        let sig = signing_key.sign_prehash_with_rng(&mut rng, msg.as_slice())?;
+        let sig = signing_key.sign_with_rng(&mut rng, msg.bytes());
         if sig.encoded_len() != <Self::Output as Output>::Len::to_usize() {
-            return Err(Self::SigningError::from_source("invalid signature length"));
+            return Err(SigningError::Other("invalid signature length".to_string()));
         }
         Ok(Signature::from_inner(PssSignature(sig, PhantomData)))
     }
@@ -392,10 +393,13 @@ where
             ),
         );
 
-        verifying_key.verify_prehash(
-            msg.as_slice(),
-            &rsa::pss::Signature::try_from(signature.as_blob().bytes())?,
-        )
+        verifying_key
+            .verify(
+                msg.bytes(),
+                &rsa::pss::Signature::try_from(signature.as_blob().bytes())
+                    .map_err(|e| VerificationError::Other(e.to_string()))?,
+            )
+            .map_err(|e| VerificationError::Other(e.to_string()))
     }
 }
 
@@ -407,7 +411,7 @@ fn calculate_rsa_pss_max_salt_len<D: digest::Digest>(key_size_bytes: usize) -> u
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::hash::HashableExt;
+    use crate::blob::Blob;
     use crate::crypto::keys::SecretKey;
     use crate::crypto::rsa::RsaPrivateKey;
     use crate::crypto::signature::{SignExt, VerifySigExt};
@@ -502,10 +506,10 @@ OTOdooS54PVffrqDRHz7dQ==
             ExternalRsaPrivateKey::from_pkcs8_pem(SECRET_KEY_4096_PEM)?,
         )?;
         let public_key = secret_key.public_key_impl();
+        let message = Blob::from("HEllO wOrlD".as_bytes());
 
-        let message = "HEllO wOrlD".digest();
-        let signature = secret_key.sign_impl(&message)?;
-        public_key.verify_sig_impl(&message, &signature)?;
+        let signature = secret_key.sign_impl(message.clone())?;
+        public_key.verify_sig_impl(message, &signature)?;
         Ok(())
     }
 
@@ -516,9 +520,9 @@ OTOdooS54PVffrqDRHz7dQ==
         )?;
         let public_key = secret_key.public_key_impl();
 
-        let message = "HEllO wOrlD2222".digest();
-        let signature = secret_key.sign_impl(&message)?;
-        public_key.verify_sig_impl(&message, &signature)?;
+        let message = Blob::from("HEllO wOrlD2222".as_bytes());
+        let signature = secret_key.sign_impl(message.clone())?;
+        public_key.verify_sig_impl(message, &signature)?;
         Ok(())
     }
 }

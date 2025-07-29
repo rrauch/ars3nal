@@ -1,21 +1,26 @@
 mod raw;
 mod v1;
+mod v2;
 
 use crate::JsonError;
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob, TypedBlob};
-use crate::crypto::hash::Sha256;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, HasherExt, TypedDigest};
+use crate::crypto::hash::{Sha256, Sha384};
 use crate::crypto::keys::{PublicKey, SecretKey};
 use crate::crypto::rsa::RsaPss;
 use crate::crypto::signature::TypedSignature;
+use crate::crypto::{keys, signature};
 use crate::money::{Money, TypedMoney, Winston};
-use crate::tx::raw::RawTag;
+use crate::tx::raw::{RawTag, RawTxDataError};
+use crate::tx::v1::V1TxDataError;
+use crate::tx::v2::V2TxDataError;
 use crate::typed::{FromInner, Typed};
 use crate::wallet::{
     Wallet, WalletAddress, WalletKind, WalletPk, WalletPublicKey, WalletSecretKey,
 };
+use anyhow::anyhow;
 use derive_where::derive_where;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Debug, Display, Formatter};
@@ -39,28 +44,64 @@ impl Display for TxId {
     }
 }
 
-pub(crate) trait SignatureScheme: crate::crypto::signature::Scheme {
+pub(crate) trait SignatureScheme: signature::Scheme {
     type Signer: SecretKey;
     type Verifier: PublicKey;
 }
 
 impl SignatureScheme for RsaPss<4096> {
-    type Signer = <Self as crate::crypto::signature::Scheme>::Signer;
-    type Verifier = <Self as crate::crypto::signature::Scheme>::Verifier;
+    type Signer = <Self as signature::Scheme>::Signer;
+    type Verifier = <Self as signature::Scheme>::Verifier;
 }
 
 impl SignatureScheme for RsaPss<2048> {
-    type Signer = <Self as crate::crypto::signature::Scheme>::Signer;
-    type Verifier = <Self as crate::crypto::signature::Scheme>::Verifier;
+    type Signer = <Self as signature::Scheme>::Signer;
+    type Verifier = <Self as signature::Scheme>::Verifier;
 }
 
 pub type TxSignature<S: SignatureScheme> = TypedSignature<TxHash, WalletKind, S>;
-pub type TxHash = TypedDigest<TxKind, Sha256>;
+pub type TxHash = TypedDigest<TxKind, Sha384>;
 
 impl<S: SignatureScheme> TxSignature<S> {
     pub fn digest(&self) -> TxId {
         TxId::from_inner(Sha256::digest(self.as_blob()))
     }
+}
+
+#[derive(Error, Debug)]
+pub enum TxError {
+    #[error(transparent)]
+    JsonError(#[from] JsonError),
+    #[error(transparent)]
+    RawDataError(#[from] RawTxDataError),
+    #[error(transparent)]
+    V1DataError(#[from] V1TxDataError),
+    #[error(transparent)]
+    V2DataError(#[from] V2TxDataError),
+    #[error(transparent)]
+    SignatureError(#[from] signature::Error),
+    #[error(transparent)]
+    Other(anyhow::Error),
+}
+
+#[derive(Error, Debug)]
+pub enum CommonTxDataError {
+    #[error("no owner field found but mandatory")]
+    MissingOwner,
+    #[error("invalid id: {0}")]
+    InvalidId(String),
+    #[error("invalid last_tx: {0}")]
+    InvalidLastTx(String),
+    #[error("invalid target: {0}")]
+    InvalidTarget(String),
+    #[error("invalid quantity: {0}")]
+    InvalidQuantity(String),
+    #[error("invalid reward: {0}")]
+    InvalidReward(String),
+    #[error("invalid signature: {0}")]
+    InvalidSignature(String),
+    #[error(transparent)]
+    InvalidKey(#[from] keys::KeyError),
 }
 
 pub struct TxAnchorKind;
@@ -456,14 +497,6 @@ pub struct Unsigned;
 pub type V1Tx<'a, S> = TxImpl<'a, S, V1>;
 pub type V2Tx<'a, S> = TxImpl<'a, S, V2>;
 
-#[derive(Error, Debug)]
-pub enum TxError {
-    #[error(transparent)]
-    DataError(#[from] TxDataError),
-    #[error(transparent)]
-    SigningError(#[from] SigningError),
-}
-
 #[derive_where(Debug, Clone)]
 pub enum Tx<'a, S: SignatureScheme> {
     V1(V1Tx<'a, S>),
@@ -502,7 +535,7 @@ impl<'a, S: SignatureScheme> Tx<'a, S> {
 
 impl<'a, S: SignatureScheme> SignedTx<'a, S> {
     pub fn try_from_json_slice(bytes: &[u8]) -> Result<Self, TxError> {
-        let tx_data = TxData::try_from_json_slice(bytes)?;
+        let tx_data = TxData::try_from_json_slice(bytes).map_err(|e| TxError::Other(anyhow!(e)))?;
         Ok(match tx_data.format {
             Format::V1 => Self::V1(TxImpl::new(tx_data)),
             Format::V2 => Self::V2(TxImpl::new(tx_data)),

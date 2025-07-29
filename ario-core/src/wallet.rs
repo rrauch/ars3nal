@@ -1,14 +1,18 @@
 use crate::Address;
-use crate::crypto::hash::{HashableExt, Sha256Hash};
+use crate::blob::{AsBlob, Blob};
+use crate::crypto::hash::{HashableExt, Sha256Hash, Sha384Hash};
 use crate::crypto::keys;
 use crate::crypto::keys::{
-    AsymmetricScheme, KeyError, PublicKey, SecretKey, TypedPublicKey, TypedSecretKey,
+    AsymmetricScheme, KeyError, PublicKey, SecretKey, SupportedSecretKey, TypedPublicKey,
+    TypedSecretKey,
 };
 use crate::crypto::rsa::RsaPss;
 use crate::crypto::signature::SignExt;
 use crate::crypto::signature::VerifySigExt;
 use crate::crypto::signature::{Scheme as SignatureScheme, SupportsSignatures};
-use crate::tx::{SignedTx, SigningError, TxSignature, UnsignedTx};
+use crate::json::JsonSource;
+use crate::jwk::{Jwk, KeyType};
+use crate::tx::{SignedTx, SigningError, TxHash, TxSignature, UnsignedTx};
 use crate::typed::FromInner;
 use bytemuck::TransparentWrapper;
 use thiserror::Error;
@@ -65,12 +69,12 @@ impl<SK: WalletSecretKey> Wallet<SK> {
         WalletPk::wrap_ref(self.public_key_impl())
     }
 
-    pub fn try_from_jwk<'a>(input: impl Into<&'a mut [u8]>) -> Result<Self, WalletKeyPairError> {
-        /*let bytes = input.into();
-        let res = RsaPrivateKeyComponents::try_from_jwk(bytes);
-        bytes.zeroize();
-        Ok(Self::try_from_components(res?)?)*/
-        todo!()
+    pub fn try_from_jwk(jwk: &Jwk) -> Result<Self, WalletKeyPairError> {
+        match SupportedSecretKey::try_from(jwk)? {
+            SupportedSecretKey::Rsa(rsa_sk) => {
+                todo!()
+            }
+        }
     }
 }
 
@@ -105,11 +109,12 @@ impl<PK: WalletPublicKey> WalletPk<PK> {
     }*/
 }
 
-impl<'a, S: SignatureScheme<Message<'a> = &'a Sha256Hash>, PK: WalletPublicKey<SigScheme = S>>
+impl<'a, S: SignatureScheme<Message<'a> = Blob<'a>>, PK: WalletPublicKey<SigScheme = S>>
     WalletPk<PK>
 {
-    pub(crate) fn verify_tx(&self, msg: &'a Sha256Hash, sig: &TxSignature<S>) -> Result<(), String> {
-        self.verify_sig_impl(msg, sig).map_err(|e| e.to_string())
+    pub(crate) fn verify_tx(&self, msg: &'a TxHash, sig: &TxSignature<S>) -> Result<(), String> {
+        self.verify_sig_impl(msg.as_blob(), sig)
+            .map_err(|e| e.into().to_string())
     }
 }
 
@@ -126,21 +131,16 @@ impl<'a, S: SignatureScheme<Message<'a> = &'a Sha256Hash>, PK: WalletPublicKey<S
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
+    use crate::crypto::rsa::{Rsa, RsaPrivateKey};
+    use crate::jwk::Jwk;
+    use crate::wallet::Wallet;
+
+    static AR_WALLET_RSA: &'static [u8] =
+        include_bytes!("../testdata/ar_wallet_tests_PS256_65537_fixture.json");
 
     #[test]
     fn wallet_from_jwk() -> anyhow::Result<()> {
-        let bytes = Bytes::from_static(include_bytes!("../testdata/wallet.jwk"));
-        /*let wallet = Wallet::try_from_jwk(BytesMut::from(bytes).as_mut())?;
-
-        let addr = wallet.address();
-
-        assert_eq!(
-            "GRQ7swQO1AMyFgnuAPI7AvGQlW3lzuQuwlJbIpWV7xk",
-            format!("{}", addr)
-        );*/
-        todo!();
-
-        Ok(())
+        let wallet = Wallet::<RsaPrivateKey<4096>>::try_from_jwk(&Jwk::from_json(AR_WALLET_RSA)?)?;
+        todo!()
     }
 }

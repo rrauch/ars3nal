@@ -1,13 +1,15 @@
-use crate::JsonError;
 use crate::blob::Blob;
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hasher, Sha256};
+use crate::crypto::hash::{Digest, Hasher, Sha384};
 use crate::crypto::keys;
 use crate::crypto::rsa::{RsaPss, RsaPublicKey};
 use crate::json::JsonSource;
 use crate::money::{CurrencyExt, Winston};
-use crate::tx::raw::{RawTxDataError, UnvalidatedRawTx, ValidatedRawTx};
-use crate::tx::{EmbeddedData, Format, LastTx, Quantity, Reward, Tag, TxHash, TxId, TxSignature};
+use crate::tx::raw::{UnvalidatedRawTx, ValidatedRawTx};
+use crate::tx::{
+    CommonTxDataError, EmbeddedData, Format, LastTx, Quantity, Reward, Tag, TxError, TxHash, TxId,
+    TxSignature,
+};
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
 use crate::wallet::{WalletAddress, WalletPk};
@@ -38,18 +40,8 @@ impl<'a> ValidatedV1Tx<'a> {
     }
 }
 
-#[derive(Error, Debug)]
-pub enum V1TxError {
-    #[error(transparent)]
-    JsonError(#[from] JsonError),
-    #[error(transparent)]
-    RawDataError(#[from] RawTxDataError),
-    #[error(transparent)]
-    DataError(#[from] V1TxDataError),
-}
-
 impl UnvalidatedV1Tx<'static> {
-    pub fn from_json<J: JsonSource>(json: J) -> Result<Self, V1TxError> {
+    pub fn from_json<J: JsonSource>(json: J) -> Result<Self, TxError> {
         let tx_data = UnvalidatedRawTx::from_json(json)?
             .validate()
             .map_err(|(_, e)| e)?
@@ -77,7 +69,7 @@ impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum RsaPssSignatureData {
+pub(super) enum V1SignatureData {
     Rsa4096 {
         owner: WalletPk<RsaPublicKey<4096>>,
         signature: TxSignature<RsaPss<4096>>,
@@ -88,7 +80,7 @@ pub(super) enum RsaPssSignatureData {
     },
 }
 
-impl RsaPssSignatureData {
+impl V1SignatureData {
     fn from_raw<'a>(
         raw_owner: Option<Blob<'a>>,
         raw_signature: Blob<'a>,
@@ -96,14 +88,14 @@ impl RsaPssSignatureData {
         use crate::crypto::rsa::SupportedPublicKey;
         use crate::crypto::signature::Scheme as SignatureScheme;
         use crate::crypto::signature::Signature;
-        use crate::tx::v1::V1TxDataError::*;
+        use crate::tx::CommonTxDataError::*;
 
         // v1 tx always uses RSA_PSS
         let raw_owner = raw_owner.ok_or(MissingOwner)?;
 
         Ok(
             match SupportedPublicKey::try_from(raw_owner)
-                .map_err(|e| keys::KeyError::RsaError(e))?
+                .map_err(|e| CommonTxDataError::from(keys::KeyError::RsaError(e)))?
             {
                 SupportedPublicKey::Rsa4096(pk) => Self::Rsa4096 {
                     owner: WalletPk::from_inner(pk),
@@ -124,13 +116,15 @@ impl RsaPssSignatureData {
     }
 
     fn verify_sig(&self, tx_hash: &TxHash) -> Result<(), V1TxDataError> {
+        use crate::tx::CommonTxDataError::*;
+
         match self {
             Self::Rsa4096 { owner, signature } => owner
                 .verify_tx(tx_hash, signature)
-                .map_err(|e| V1TxDataError::InvalidSignature(e)),
+                .map_err(|e| InvalidSignature(e).into()),
             Self::Rsa2048 { owner, signature } => owner
                 .verify_tx(tx_hash, signature)
-                .map_err(|e| V1TxDataError::InvalidSignature(e)),
+                .map_err(|e| InvalidSignature(e).into()),
         }
     }
 
@@ -152,13 +146,13 @@ pub(super) struct V1TxData<'a> {
     pub data_size: u64,
     pub data: Option<EmbeddedData<'a>>,
     pub reward: Reward,
-    pub signature_data: RsaPssSignatureData,
+    pub signature_data: V1SignatureData,
 }
 
 impl<'a> V1TxData<'a> {
     pub fn tx_hash(&self) -> TxHash {
         // todo: find out if there are very old transactions that require a different approach
-        TxHash::from_inner(self.deep_hash::<Sha256>())
+        TxHash::from_inner(self.deep_hash::<Sha384>())
     }
 }
 
@@ -180,22 +174,8 @@ impl DeepHashable for V1TxData<'_> {
 pub enum V1TxDataError {
     #[error("expected format '1' but found '{0}")]
     IncorrectFormat(Format),
-    #[error("no owner field found but mandatory")]
-    MissingOwner,
-    #[error("invalid id: {0}")]
-    InvalidId(String),
-    #[error("invalid last_tx: {0}")]
-    InvalidLastTx(String),
-    #[error("invalid target: {0}")]
-    InvalidTarget(String),
-    #[error("invalid quantity: {0}")]
-    InvalidQuantity(String),
-    #[error("invalid reward: {0}")]
-    InvalidReward(String),
-    #[error("invalid signature: {0}")]
-    InvalidSignature(String),
     #[error(transparent)]
-    InvalidKey(#[from] keys::KeyError),
+    Common(#[from] CommonTxDataError),
 }
 
 impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
@@ -207,10 +187,10 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
             return Err(V1TxDataError::IncorrectFormat(raw.format));
         }
 
-        let id = TxId::try_from(raw.id).map_err(|e| V1TxDataError::InvalidId(e.to_string()))?;
+        let id = TxId::try_from(raw.id).map_err(|e| CommonTxDataError::InvalidId(e.to_string()))?;
 
         let last_tx = LastTx::try_from(raw.last_tx)
-            .map_err(|e| V1TxDataError::InvalidLastTx(e.to_string()))?;
+            .map_err(|e| CommonTxDataError::InvalidLastTx(e.to_string()))?;
 
         let tags = raw
             .tags
@@ -222,23 +202,23 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
             .target
             .map(WalletAddress::try_from)
             .transpose()
-            .map_err(|e| V1TxDataError::InvalidTarget(e.to_string()))?;
+            .map_err(|e| CommonTxDataError::InvalidTarget(e.to_string()))?;
 
         let quantity = raw
             .quantity
             .map(|raw| Winston::try_new(raw).and_then(|w| Ok(Quantity::from(w))))
             .transpose()
-            .map_err(|e| V1TxDataError::InvalidQuantity(e.to_string()))?;
+            .map_err(|e| CommonTxDataError::InvalidQuantity(e.to_string()))?;
 
         let data_size = raw.data_size;
         let data = raw.data.map(|b| EmbeddedData::from_inner(b));
 
         let reward = Reward::from_inner(
             Winston::try_new(raw.reward)
-                .map_err(|e| V1TxDataError::InvalidReward(e.to_string()))?,
+                .map_err(|e| CommonTxDataError::InvalidReward(e.to_string()))?,
         );
 
-        let signature_data = RsaPssSignatureData::from_raw(raw.owner, raw.signature)?;
+        let signature_data = V1SignatureData::from_raw(raw.owner, raw.signature)?;
 
         Ok(Self {
             id,
@@ -267,10 +247,9 @@ impl Validator<V1TxData<'_>> for V1TxDataValidator {
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::crypto::rsa::RsaPss;
     use crate::money::{CurrencyExt, Winston};
-    use crate::tx::v1::{RsaPssSignatureData, UnvalidatedV1Tx, V1TxDataError, V1TxError};
-    use crate::tx::{Format, Reward, TxData, ZERO_QUANTITY};
+    use crate::tx::v1::{TxError, UnvalidatedV1Tx, V1SignatureData, V1TxDataError};
+    use crate::tx::{Format, Reward, ZERO_QUANTITY};
     use crate::validation::ValidateExt;
     use std::ops::Deref;
 
@@ -296,7 +275,7 @@ mod tests {
             "jUcuEDZQy2fC6T3fHnGfYsw0D0Zl4NfuaXfwBOLiQtA"
         );
 
-        if let RsaPssSignatureData::Rsa4096 { owner, .. } = &tx_data.signature_data {
+        if let V1SignatureData::Rsa4096 { owner, .. } = &tx_data.signature_data {
             assert_eq!(
                 owner.to_base64(),
                 "posmEh5k2_h7fgj-0JwB2l2AU72u-UizJOA2m8gyYYcVjh_6N3A3DhwbLmnbIWjVWmsidgQZDDibiJhhyHsy28ARxrt5BJ3OCa1VRAk2ffhbaUaGUoIkVt6G8mnnTScN9JNPS7UYEqG_L8J48c2tQNsydbon2ImKIwCYmnMHKcpyEgXcgLDGhtGhIKtkuI-QOAu-TMqVjn5EaWsfJTW5J-ty8mswAMSxepgsUbUB3GXZfCyOAK0EGjrClZ1MLvyc8ANGQfLPjwTipMcUtX47Udy8i4C-c-vLC9oB_z5ZCDCat-5wGh2OA-lyghro2SpkxX0e-D-nbi91Pp9LORwDZIRQ5RCMDvtQx1-QD2adxn_P2zDN0hk5IWXoCnHyeoj-IdNIyCXNkDzT2A184CxjReE5XOUF7UFeOmvVwbUTMfnNBOSWeRz3U_e3MPNlc2JTIprRLC8IegyfS6NdCr90lYnuviEr0g75NE6-muJdHAd9gu2QZ1MpkX9OnsbtvCvvFje-K_p_4AR9l43CLemfdSZeHHMIzdPwKe75SFMbsuklsyc-ieq-OHrJCeL0WrkLT4Gf6rpGVkS8MjORuMOBRFrHRE7XKswzhwmV2SuzeU6ojtPNP87aNdiUGHtYCIyt7cRN5bRbrVjdCAXj2NnuWMzM6J6dme4e2R8gqNpsEok"
@@ -321,7 +300,7 @@ mod tests {
     #[test]
     fn v2_err() -> anyhow::Result<()> {
         match UnvalidatedV1Tx::from_json(TX_V2) {
-            Err(V1TxError::DataError(V1TxDataError::IncorrectFormat(f))) => {
+            Err(TxError::V1DataError(V1TxDataError::IncorrectFormat(f))) => {
                 assert_eq!(f, Format::V2);
             }
             _ => unreachable!("should have been an incorrect format error"),

@@ -1,9 +1,10 @@
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob};
-use crate::crypto::{Output};
+use crate::crypto::Output;
 use crate::typed::Typed;
 use derive_where::derive_where;
 use std::fmt::{Debug, Display, Formatter};
+use thiserror::Error;
 
 pub type TypedSignature<T, SIGNER, S: Scheme> = Typed<(T, SIGNER), Signature<S>>;
 
@@ -47,12 +48,32 @@ impl<'a, S: Scheme> TryFrom<Blob<'a>> for Signature<S> {
     }
 }
 
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error(transparent)]
+    SigningError(#[from] SigningError),
+    #[error(transparent)]
+    VerificationError(#[from] VerificationError),
+}
+
+#[derive(Error, Debug)]
+pub enum SigningError {
+    #[error("signing error: {0}")]
+    Other(String),
+}
+
+#[derive(Error, Debug)]
+pub enum VerificationError {
+    #[error("verification error: {0}")]
+    Other(String),
+}
+
 pub trait Scheme {
     type Output: Output + PartialEq;
     type Signer;
-    type SigningError: Display;
+    type SigningError: Into<SigningError>;
     type Verifier: for<'a> TryFrom<Blob<'a>, Error: Display> + Debug + Clone + PartialEq;
-    type VerificationError: Display;
+    type VerificationError: Into<VerificationError>;
     type Message<'a>;
 
     fn sign(
@@ -77,7 +98,7 @@ pub(crate) trait SupportsSignatures {
 }
 
 pub(crate) trait VerifySigExt<S: Scheme> {
-    type VerificationError: Display;
+    type VerificationError: Into<VerificationError>;
 
     fn verify_sig_impl(
         &self,
@@ -87,6 +108,6 @@ pub(crate) trait VerifySigExt<S: Scheme> {
 }
 
 pub(crate) trait SignExt<S: Scheme> {
-    type SigningError: Display;
+    type SigningError: Into<SigningError>;
     fn sign_impl(&self, msg: S::Message<'_>) -> Result<Signature<S>, Self::SigningError>;
 }

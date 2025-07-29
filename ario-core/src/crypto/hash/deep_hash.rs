@@ -90,3 +90,9 @@ impl DeepHashable for Bytes {
         Self::blob(self)
     }
 }
+
+impl DeepHashable for u64 {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        self.to_be_bytes().deep_hash()
+    }
+}
