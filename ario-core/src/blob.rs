@@ -164,3 +164,9 @@ impl<const N: usize> AsBlob for [u8; N] {
         Blob::Slice(self.as_slice())
     }
 }
+
+impl AsBlob for String {
+    fn as_blob(&self) -> Blob<'_> {
+        self.as_bytes().into()
+    }
+}

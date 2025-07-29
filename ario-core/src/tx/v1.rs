@@ -94,8 +94,11 @@ impl<'a> V1TxData<'a> {
 
 impl DeepHashable for V1TxData<'_> {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
-        Self::list([
-            self.denomination.deep_hash(),
+        let mut elements = Vec::with_capacity(8);
+        if let Some(denomination) = self.denomination {
+            elements.push(denomination.deep_hash());
+        }
+        elements.extend([
             self.signature_data.deep_hash(),
             self.target.deep_hash(),
             self.data.deep_hash(),
@@ -103,7 +106,8 @@ impl DeepHashable for V1TxData<'_> {
             self.reward.deep_hash(),
             self.last_tx.deep_hash(),
             self.tags.deep_hash(),
-        ])
+        ]);
+        Self::list(elements)
     }
 }
 
@@ -204,17 +208,83 @@ mod tests {
     use crate::base64::ToBase64;
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::v1::{TxError, UnvalidatedV1Tx, V1SignatureData, V1TxDataError};
-    use crate::tx::{Format, Reward, ZERO_QUANTITY};
+    use crate::tx::{CommonTxDataError, Format, Reward, ZERO_QUANTITY};
     use crate::validation::ValidateExt;
     use std::ops::Deref;
 
     static TX_V1: &'static [u8] = include_bytes!("../../testdata/tx_v1.json");
+    static TX_V1_2: &'static [u8] = include_bytes!("../../testdata/tx_v1_2.json");
+    static TX_V1_INVALID_SIG: &'static [u8] =
+        include_bytes!("../../testdata/tx_v1_invalid_sig.json");
     static TX_V2: &'static [u8] = include_bytes!("../../testdata/tx_v2.json");
 
     #[test]
-    fn v1_ok() -> anyhow::Result<()> {
+    fn v1_hash() -> anyhow::Result<()> {
+        let tx_data = UnvalidatedV1Tx::from_json(TX_V1)?.0;
+        assert_eq!(
+            tx_data.id.to_base64(),
+            "BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ"
+        );
+
+        let tx_hash = tx_data.tx_hash();
+        let hash = tx_hash.as_slice();
+
+        let expected: [u8; 32] = [
+            0x38, 0xc0, 0xe2, 0x7a, 0x72, 0xbd, 0xa1, 0x40, 0x0f, 0x72, 0x61, 0x19, 0xda, 0xf7,
+            0xac, 0x0f, 0x47, 0xfe, 0x0a, 0xba, 0x65, 0xca, 0xd6, 0x5a, 0x78, 0x78, 0x84, 0xe5,
+            0x11, 0xce, 0x20, 0x57,
+        ];
+
+        assert_eq!(hash, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn v1_hash_2() -> anyhow::Result<()> {
+        let tx_data = UnvalidatedV1Tx::from_json(TX_V1_2)?.0;
+        assert_eq!(
+            tx_data.id.to_base64(),
+            "XnLdl7XiYIZoQ0pM6GcQeLLgYGsGwN9vM4E-kXa_rzY"
+        );
+
+        let tx_hash = tx_data.tx_hash();
+        let hash = tx_hash.as_slice();
+
+        let expected: [u8; 32] = [
+            0xa9, 0x90, 0xda, 0x4d, 0xad, 0x24, 0xef, 0xf8, 0x97, 0x3f, 0xaf, 0xc2, 0x32, 0x11,
+            0x4d, 0xbe, 0x1a, 0xdc, 0xbe, 0xfd, 0xf1, 0xa5, 0x1b, 0x1e, 0xce, 0xdb, 0x68, 0xef,
+            0xe5, 0x5c, 0xc2, 0x99,
+        ];
+
+        assert_eq!(hash, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn v1_verify_ok() -> anyhow::Result<()> {
         let unvalidated = UnvalidatedV1Tx::from_json(TX_V1)?;
         let _validated = unvalidated.validate().map_err(|(_, e)| e)?;
+        Ok(())
+    }
+
+    #[test]
+    fn v1_verify_2_ok() -> anyhow::Result<()> {
+        let unvalidated = UnvalidatedV1Tx::from_json(TX_V1_2)?;
+        let _validated = unvalidated.validate().map_err(|(_, e)| e)?;
+        Ok(())
+    }
+
+    #[test]
+    fn v1_verify_invalid() -> anyhow::Result<()> {
+        let tx = UnvalidatedV1Tx::from_json(TX_V1_INVALID_SIG)?;
+        match tx.validate() {
+            Err((_, V1TxDataError::Common(CommonTxDataError::InvalidSignature(_)))) => {
+                // ok
+            }
+            _ => unreachable!("signature validation failure expected"),
+        }
         Ok(())
     }
 
