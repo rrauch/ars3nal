@@ -394,15 +394,12 @@ where
         let msg = msg.as_slice();
 
         // Brute-force approach to salt length detection.
-        // todo: check if the last two values (0 & 20) are needed
-
         let candidates = vec![
             calculate_rsa_pss_max_salt_len::<Sha256>(
                 <<Rsa<BIT> as SupportedRsaScheme>::KeyLen>::to_usize(),
             ), // max length
-            32, // digest length
-            0,  // zero salt
-            20, // SHA-1 length
+            msg.len(), // digest length
+            0,         // zero salt
         ];
 
         for salt_len in candidates {
