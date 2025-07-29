@@ -1,6 +1,6 @@
 use crate::Address;
 use crate::blob::{AsBlob, Blob};
-use crate::crypto::hash::{HashableExt, Sha256Hash, Sha384Hash};
+use crate::crypto::hash::{Digest, HashableExt, Sha256, Sha256Hash, Sha384Hash};
 use crate::crypto::keys;
 use crate::crypto::keys::{
     AsymmetricScheme, KeyError, PublicKey, SecretKey, SupportedSecretKey, TypedPublicKey,
@@ -109,12 +109,19 @@ impl<PK: WalletPublicKey> WalletPk<PK> {
     }*/
 }
 
-impl<'a, S: SignatureScheme<Message<'a> = Blob<'a>>, PK: WalletPublicKey<SigScheme = S>>
-    WalletPk<PK>
+impl<S: SignatureScheme, PK: WalletPublicKey<SigScheme = S>> WalletPk<PK>
+where
+    for<'a> S: SignatureScheme<Message<'a> = &'a Digest<Sha256>>,
 {
-    pub(crate) fn verify_tx(&self, msg: &'a TxHash, sig: &TxSignature<S>) -> Result<(), String> {
-        self.verify_sig_impl(msg.as_blob(), sig)
-            .map_err(|e| e.into().to_string())
+    pub(crate) fn verify_tx(&self, tx_hash: &TxHash, sig: &TxSignature<S>) -> Result<(), String> {
+        match tx_hash {
+            TxHash::DeepHash(deep_hash) => {
+                let tx_hash = deep_hash.digest();
+                self.verify_sig_impl(&tx_hash, sig)
+            }
+            TxHash::Shallow(shallow) => self.verify_sig_impl(shallow, sig),
+        }
+        .map_err(|e| e.into().to_string())
     }
 }
 

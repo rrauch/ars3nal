@@ -93,6 +93,14 @@ impl DeepHashable for Bytes {
 
 impl DeepHashable for u64 {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
-        self.to_be_bytes().deep_hash()
+        // numbers have to be serialized to strings!
+        self.to_string().deep_hash()
+    }
+}
+
+impl DeepHashable for u32 {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        // numbers have to be serialized to strings!
+        self.to_string().deep_hash()
     }
 }

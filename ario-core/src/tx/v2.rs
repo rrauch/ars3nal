@@ -1,16 +1,15 @@
 use crate::blob::Blob;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384};
-use crate::crypto::keys;
-use crate::crypto::rsa::{RsaPss, RsaPublicKey};
 use crate::json::JsonSource;
+use crate::tx::CommonTxDataError::MissingOwner;
 use crate::tx::raw::{UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::{
-    CommonTxDataError, Format, LastTx, Quantity, Reward, Tag, TxError, TxHash, TxId, TxSignature,
+    CommonData, CommonTxDataError, Format, Quantity, Reward, RsaSignatureData, SignatureType, Tag,
+    TxAnchor, TxError, TxHash, TxId,
 };
-use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
-use crate::wallet::{WalletAddress, WalletPk};
+use crate::wallet::WalletAddress;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -68,66 +67,44 @@ impl<'a> SupportsValidation for UnvalidatedV2Tx<'a> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum V2SignatureData {
-    Rsa4096 {
-        owner: WalletPk<RsaPublicKey<4096>>,
-        signature: TxSignature<RsaPss<4096>>,
-    },
-    Rsa2048 {
-        owner: WalletPk<RsaPublicKey<2048>>,
-        signature: TxSignature<RsaPss<2048>>,
-    },
+    Rsa(RsaSignatureData),
 }
 
 impl V2SignatureData {
     fn from_raw<'a>(
+        signature_type: SignatureType,
         raw_owner: Option<Blob<'a>>,
         raw_signature: Blob<'a>,
     ) -> Result<Self, V2TxDataError> {
-        use crate::crypto::rsa::SupportedPublicKey;
-        use crate::crypto::signature::Scheme as SignatureScheme;
-        use crate::crypto::signature::Signature;
-        use CommonTxDataError::*;
-
-        // v1 tx always uses RSA_PSS
-        let raw_owner = raw_owner.ok_or(MissingOwner)?;
-
-        Ok(
-            match SupportedPublicKey::try_from(raw_owner)
-                .map_err(|e| CommonTxDataError::from(keys::KeyError::RsaError(e)))?
-            {
-                SupportedPublicKey::Rsa4096(pk) => Self::Rsa4096 {
-                    owner: WalletPk::from_inner(pk),
-                    signature: TxSignature::from_inner(Signature::from_inner(
-                        <<RsaPss<4096> as SignatureScheme>::Output>::try_from(raw_signature)
-                            .map_err(|e| InvalidSignature(e.to_string()))?,
-                    )),
-                },
-                SupportedPublicKey::Rsa2048(pk) => Self::Rsa2048 {
-                    owner: WalletPk::from_inner(pk),
-                    signature: TxSignature::from_inner(Signature::from_inner(
-                        <<RsaPss<2048> as SignatureScheme>::Output>::try_from(raw_signature)
-                            .map_err(|e| InvalidSignature(e.to_string()))?,
-                    )),
-                },
-            },
-        )
+        match signature_type {
+            SignatureType::RsaPss => {
+                let raw_owner = raw_owner.ok_or(MissingOwner)?;
+                Ok(Self::Rsa(RsaSignatureData::from_raw(
+                    raw_owner,
+                    raw_signature,
+                )?))
+            }
+            SignatureType::EcdsaSecp256k1 => {
+                todo!("ecdsa")
+            }
+        }
     }
 
     fn verify_sig(&self, tx_hash: &TxHash) -> Result<(), V2TxDataError> {
         match self {
-            Self::Rsa4096 { owner, signature } => owner
-                .verify_tx(tx_hash, signature)
-                .map_err(|e| CommonTxDataError::InvalidSignature(e).into()),
-            Self::Rsa2048 { owner, signature } => owner
-                .verify_tx(tx_hash, signature)
-                .map_err(|e| CommonTxDataError::InvalidSignature(e).into()),
+            Self::Rsa(rsa) => Ok(rsa.verify_sig(tx_hash)?),
         }
     }
 
-    fn deep_hash_owner<H: Hasher>(&self) -> Digest<H> {
+    fn signature_type(&self) -> SignatureType {
         match self {
-            Self::Rsa4096 { owner, .. } => owner.deep_hash(),
-            Self::Rsa2048 { owner, .. } => owner.deep_hash(),
+            Self::Rsa(_) => SignatureType::RsaPss,
+        }
+    }
+
+    fn deep_hash<H: Hasher>(&self) -> Option<Digest<H>> {
+        match self {
+            Self::Rsa(rsa) => Some(rsa.deep_hash()),
         }
     }
 }
@@ -135,7 +112,7 @@ impl V2SignatureData {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct V2TxData<'a> {
     pub id: TxId,
-    pub last_tx: LastTx,
+    pub last_tx: TxAnchor,
     pub tags: Vec<Tag<'a>>,
     pub target: Option<WalletAddress>,
     pub quantity: Option<Quantity>,
@@ -143,12 +120,12 @@ pub(super) struct V2TxData<'a> {
     pub data_root: Option<Blob<'a>>, //todo
     pub reward: Reward,
     pub signature_data: V2SignatureData,
+    pub denomination: Option<u32>,
 }
 
 impl<'a> V2TxData<'a> {
     pub fn tx_hash(&self) -> TxHash {
-        // todo: find out if there are very old transactions that require a different approach
-        TxHash::from_inner(self.deep_hash::<Sha384>())
+        TxHash::DeepHash(self.deep_hash::<Sha384>())
     }
 }
 
@@ -160,15 +137,56 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
         if raw.format != Format::V2 {
             return Err(V2TxDataError::IncorrectFormat(raw.format));
         }
-        todo!()
+        let signature_data = V2SignatureData::from_raw(
+            raw.signature_type.unwrap_or_default(),
+            raw.owner,
+            raw.signature,
+        )?;
+
+        let common_data = CommonData::try_from_raw(
+            raw.id,
+            raw.tags,
+            raw.target,
+            raw.quantity,
+            raw.reward,
+            raw.denomination,
+        )?;
+
+        let last_tx = TxAnchor::try_from(raw.last_tx)
+            .map_err(|e| CommonTxDataError::InvalidLastTx(e.to_string()))?;
+
+        if raw.data_root.is_some() && raw.data_size == 0 {
+            return Err(V2TxDataError::DataRootWithoutDataSize);
+        }
+
+        if raw.data_root.is_none() && raw.data_size > 0 {
+            return Err(V2TxDataError::DataSizeWithoutDataRoot(raw.data_size));
+        }
+
+        //todo: data_root
+
+        Ok(Self {
+            id: common_data.id,
+            last_tx,
+            tags: common_data.tags,
+            target: common_data.target,
+            quantity: common_data.quantity,
+            data_size: raw.data_size,
+            data_root: raw.data_root,
+            reward: common_data.reward,
+            signature_data,
+            denomination: common_data.denomination,
+        })
     }
 }
 
 impl DeepHashable for V2TxData<'_> {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
-        Self::list([
-            Format::V2.deep_hash(),
-            self.signature_data.deep_hash_owner(),
+        let mut elements = vec![Format::V2.deep_hash()];
+        if let Some(signature_data) = self.signature_data.deep_hash() {
+            elements.push(signature_data);
+        }
+        elements.extend([
             self.target.deep_hash(),
             self.quantity.deep_hash(),
             self.reward.deep_hash(),
@@ -176,7 +194,13 @@ impl DeepHashable for V2TxData<'_> {
             self.tags.deep_hash(),
             self.data_size.deep_hash(),
             self.data_root.deep_hash(),
-        ])
+        ]);
+
+        if let Some(denomination) = self.denomination {
+            elements.push(denomination.deep_hash());
+        }
+
+        Self::list(elements)
     }
 }
 
@@ -186,6 +210,10 @@ pub enum V2TxDataError {
     IncorrectFormat(Format),
     #[error(transparent)]
     Common(#[from] CommonTxDataError),
+    #[error("data size set  to '{0}' but data root is empty")]
+    DataSizeWithoutDataRoot(u64),
+    #[error("data root is set but data size is '0'")]
+    DataRootWithoutDataSize,
 }
 
 pub struct V2TxDataValidator;
@@ -195,5 +223,151 @@ impl Validator<V2TxData<'_>> for V2TxDataValidator {
 
     fn validate(data: &V2TxData) -> Result<(), Self::Error> {
         data.signature_data.verify_sig(&(data.tx_hash()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::base64::ToBase64;
+    use crate::money::{CurrencyExt, Winston};
+    use crate::tx::v2::{UnvalidatedV2Tx, V2TxDataError};
+    use crate::tx::{CommonTxDataError, Quantity, Reward, ZERO_QUANTITY};
+    use crate::validation::ValidateExt;
+    use std::ops::Deref;
+
+    static TX_V2: &'static [u8] = include_bytes!("../../testdata/tx_v2.json");
+    static TX_V2_2: &'static [u8] = include_bytes!("../../testdata/tx_v2_2.json");
+    static TX_V2_3: &'static [u8] = include_bytes!("../../testdata/tx_v2_3.json");
+    static TX_V2_INVALID: &'static [u8] = include_bytes!("../../testdata/tx_v2_invalid_sig.json");
+
+    #[test]
+    fn tx_hash_ok() -> anyhow::Result<()> {
+        let tx_data = UnvalidatedV2Tx::from_json(TX_V2_3)?.0;
+        let tx_hash = tx_data.tx_hash();
+        let deep_digest = tx_hash.as_slice();
+
+        let expected: [u8; 48] = [
+            74, 15, 74, 255, 248, 205, 47, 229, 107, 195, 69, 76, 215, 249, 34, 186, 197, 31, 178,
+            163, 72, 54, 78, 179, 19, 178, 1, 132, 183, 231, 131, 213, 146, 203, 6, 99, 106, 231,
+            215, 199, 181, 171, 52, 255, 205, 55, 203, 117,
+        ];
+
+        assert_eq!(deep_digest, &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn tx_data_ok_v2() -> anyhow::Result<()> {
+        let tx_data = UnvalidatedV2Tx::from_json(TX_V2)?.0;
+        assert_eq!(
+            tx_data.id.to_base64(),
+            "bXGqzNQNmHTeL54cUQ6wPo-MO0thLP44FeAoM93kEwk"
+        );
+        assert_eq!(
+            tx_data.last_tx.to_base64(),
+            "gVhey9KN6Fjc3nZbSOqLPRyDjjw6O5-sLSWPLZ_S7LoX5XOrFRja8A_wuj22OpHj"
+        );
+        assert!(tx_data.target.is_none());
+        assert_eq!(tx_data.quantity.as_ref().unwrap(), ZERO_QUANTITY.deref(),);
+        //todo: data root
+        assert_eq!(tx_data.data_size, 128355);
+        assert_eq!(
+            tx_data.reward,
+            Reward::from(Winston::from_str("557240107")?),
+        );
+
+        assert_eq!(tx_data.tags.len(), 6);
+        assert_eq!(
+            tx_data.tags.get(0).unwrap().name.bytes(),
+            "App-Name".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(0).unwrap().value.bytes(),
+            "trackmycontainer.io".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(1).unwrap().name.bytes(),
+            "Application".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(1).unwrap().value.bytes(),
+            "Traxa.io".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(2).unwrap().name.bytes(),
+            "Content-Type".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(2).unwrap().value.bytes(),
+            "image/jpeg".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(3).unwrap().name.bytes(),
+            "Modified".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(3).unwrap().value.bytes(),
+            "1753107957".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(4).unwrap().name.bytes(),
+            "Shipping-Container-GPS".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(4).unwrap().value.bytes(),
+            "(40.7549755075, -112.0129563668)".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(5).unwrap().name.bytes(),
+            "Shipping-Container-IDs".as_bytes()
+        );
+        assert_eq!(
+            tx_data.tags.get(5).unwrap().value.bytes(),
+            "SEGU4454314".as_bytes()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn tx_data_ok_transfer() -> anyhow::Result<()> {
+        let tx_data = UnvalidatedV2Tx::from_json(TX_V2_2)?.0;
+        assert_eq!(
+            tx_data.id.to_base64(),
+            "oo6wzsvLtpGmOInBvyJ3ORjbhVelFEZKTOAy6wtjZtQ"
+        );
+        assert_eq!(
+            tx_data.last_tx.to_base64(),
+            "mxi51DabflJu7YNcJSIm54cWjXDu69MAknQFuujhzDp7lEI7MT5zCufHlyhpq5lm"
+        );
+        assert_eq!(
+            tx_data.quantity.as_ref(),
+            Some(&Quantity::from(Winston::from_str("2199990000000000")?))
+        );
+        assert_eq!(
+            tx_data.target.as_ref().unwrap().to_base64(),
+            "fGPsv2_-ueOvwFQF5zvYCRmawBGgc9FiDOXkbfurQtI"
+        );
+        assert_eq!(tx_data.reward, Reward::from(Winston::from_str("6727794")?));
+        Ok(())
+    }
+
+    #[test]
+    fn tx_valid_sig() -> anyhow::Result<()> {
+        let tx = UnvalidatedV2Tx::from_json(TX_V2_2)?;
+        let valid = tx.validate().expect("sig to be valid");
+        Ok(())
+    }
+
+    #[test]
+    fn tx_invalid_sig() -> anyhow::Result<()> {
+        let tx = UnvalidatedV2Tx::from_json(TX_V2_INVALID)?;
+        match tx.validate() {
+            Err((_, V2TxDataError::Common(CommonTxDataError::InvalidSignature(_)))) => {
+                // ok
+            }
+            _ => unreachable!("signature validation failure expected"),
+        }
+        Ok(())
     }
 }

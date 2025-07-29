@@ -9,22 +9,24 @@ use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, HasherExt, TypedDigest};
 use crate::crypto::hash::{Sha256, Sha384};
 use crate::crypto::keys::{PublicKey, SecretKey};
-use crate::crypto::rsa::RsaPss;
+use crate::crypto::rsa::{RsaPss, RsaPublicKey};
 use crate::crypto::signature::TypedSignature;
 use crate::crypto::{keys, signature};
-use crate::money::{Money, TypedMoney, Winston};
-use crate::tx::raw::{RawTag, RawTxDataError};
-use crate::tx::v1::V1TxDataError;
+use crate::money::{CurrencyExt, Money, TypedMoney, Winston};
+use crate::tx::raw::{RawTag, RawTx, RawTxData, RawTxDataError};
+use crate::tx::v1::{V1SignatureData, V1TxDataError};
 use crate::tx::v2::V2TxDataError;
 use crate::typed::{FromInner, Typed};
 use crate::wallet::{
     Wallet, WalletAddress, WalletKind, WalletPk, WalletPublicKey, WalletSecretKey,
 };
 use anyhow::anyhow;
+use bigdecimal::BigDecimal;
 use derive_where::derive_where;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
+use std::str::FromStr;
 use std::sync::LazyLock;
 use thiserror::Error;
 
@@ -60,7 +62,100 @@ impl SignatureScheme for RsaPss<2048> {
 }
 
 pub type TxSignature<S: SignatureScheme> = TypedSignature<TxHash, WalletKind, S>;
-pub type TxHash = TypedDigest<TxKind, Sha384>;
+//pub type TxHash = TypedDigest<TxKind, Sha384>;
+pub enum TxHash {
+    DeepHash(Digest<Sha384>),
+    Shallow(Digest<Sha256>),
+}
+
+impl TxHash {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::DeepHash(h) => h.as_slice(),
+            Self::Shallow(h) => h.as_slice(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RsaSignatureData {
+    Rsa4096 {
+        owner: WalletPk<RsaPublicKey<4096>>,
+        signature: TxSignature<RsaPss<4096>>,
+    },
+    Rsa2048 {
+        owner: WalletPk<RsaPublicKey<2048>>,
+        signature: TxSignature<RsaPss<2048>>,
+    },
+}
+
+impl RsaSignatureData {
+    fn from_raw<'a>(
+        raw_owner: Blob<'a>,
+        raw_signature: Blob<'a>,
+    ) -> Result<Self, CommonTxDataError> {
+        use crate::crypto::rsa::SupportedPublicKey;
+        use crate::crypto::signature::Scheme as SignatureScheme;
+        use crate::crypto::signature::Signature;
+        use crate::tx::CommonTxDataError::*;
+
+        Ok(
+            match SupportedPublicKey::try_from(raw_owner)
+                .map_err(|e| CommonTxDataError::from(keys::KeyError::RsaError(e)))?
+            {
+                SupportedPublicKey::Rsa4096(pk) => Self::Rsa4096 {
+                    owner: WalletPk::from_inner(pk),
+                    signature: TxSignature::from_inner(Signature::from_inner(
+                        <<RsaPss<4096> as SignatureScheme>::Output>::try_from(raw_signature)
+                            .map_err(|e| InvalidSignature(e.to_string()))?,
+                    )),
+                },
+                SupportedPublicKey::Rsa2048(pk) => Self::Rsa2048 {
+                    owner: WalletPk::from_inner(pk),
+                    signature: TxSignature::from_inner(Signature::from_inner(
+                        <<RsaPss<2048> as SignatureScheme>::Output>::try_from(raw_signature)
+                            .map_err(|e| InvalidSignature(e.to_string()))?,
+                    )),
+                },
+            },
+        )
+    }
+
+    fn verify_sig(&self, tx_hash: &TxHash) -> Result<(), CommonTxDataError> {
+        use crate::tx::CommonTxDataError::*;
+
+        match self {
+            Self::Rsa4096 { owner, signature } => owner
+                .verify_tx(tx_hash, signature)
+                .map_err(|e| InvalidSignature(e)),
+            Self::Rsa2048 { owner, signature } => owner
+                .verify_tx(tx_hash, signature)
+                .map_err(|e| InvalidSignature(e)),
+        }
+    }
+}
+
+impl DeepHashable for RsaSignatureData {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        match self {
+            Self::Rsa4096 { owner, .. } => owner.deep_hash(),
+            Self::Rsa2048 { owner, .. } => owner.deep_hash(),
+        }
+    }
+}
+
+impl Hashable for RsaSignatureData {
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        match self {
+            Self::Rsa4096 { owner, .. } => owner.feed(hasher),
+            Self::Rsa2048 { owner, .. } => owner.feed(hasher),
+        }
+    }
+}
+
+pub(crate) trait TxHashProducer {
+    fn derive_tx_hash(&self) -> TxHash;
+}
 
 impl<S: SignatureScheme> TxSignature<S> {
     pub fn digest(&self) -> TxId {
@@ -102,6 +197,59 @@ pub enum CommonTxDataError {
     InvalidSignature(String),
     #[error(transparent)]
     InvalidKey(#[from] keys::KeyError),
+    #[error("invalid signature type: {0}")]
+    InvalidSignatureType(String),
+}
+
+pub(crate) struct CommonData<'a> {
+    pub id: TxId,
+    pub tags: Vec<Tag<'a>>,
+    pub target: Option<WalletAddress>,
+    pub quantity: Option<Quantity>,
+    pub reward: Reward,
+    pub denomination: Option<u32>,
+}
+
+impl<'a> CommonData<'a> {
+    pub fn try_from_raw(
+        raw_id: Blob<'a>,
+        raw_tags: Vec<RawTag<'a>>,
+        raw_target: Option<Blob<'a>>,
+        raw_quantity: Option<BigDecimal>,
+        raw_reward: BigDecimal,
+        raw_denomination: Option<u32>,
+    ) -> Result<Self, CommonTxDataError> {
+        let id = TxId::try_from(raw_id).map_err(|e| CommonTxDataError::InvalidId(e.to_string()))?;
+
+        let tags = raw_tags
+            .into_iter()
+            .map(|t| Tag::from(t))
+            .collect::<Vec<_>>();
+
+        let target = raw_target
+            .map(WalletAddress::try_from)
+            .transpose()
+            .map_err(|e| CommonTxDataError::InvalidTarget(e.to_string()))?;
+
+        let quantity = raw_quantity
+            .map(|raw| Winston::try_new(raw).and_then(|w| Ok(Quantity::from(w))))
+            .transpose()
+            .map_err(|e| CommonTxDataError::InvalidQuantity(e.to_string()))?;
+
+        let reward = Reward::from_inner(
+            Winston::try_new(raw_reward)
+                .map_err(|e| CommonTxDataError::InvalidReward(e.to_string()))?,
+        );
+
+        Ok(CommonData {
+            id,
+            tags,
+            target,
+            quantity,
+            reward,
+            denomination: raw_denomination,
+        })
+    }
 }
 
 pub struct TxAnchorKind;
@@ -222,6 +370,54 @@ impl DeepHashable for Format {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum SignatureType {
+    RsaPss,
+    EcdsaSecp256k1,
+}
+
+impl Default for SignatureType {
+    fn default() -> Self {
+        Self::RsaPss
+    }
+}
+
+const RSA_PSS_SIG_TYPE: &'static str = "rsa_pss?";
+const ECDSA_SECP256K1_SIG_TYPE: &'static str = "ecdsa_secp256k1?";
+
+impl SignatureType {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::RsaPss => RSA_PSS_SIG_TYPE,
+            Self::EcdsaSecp256k1 => ECDSA_SECP256K1_SIG_TYPE,
+        }
+    }
+}
+
+impl Display for SignatureType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SignatureType {
+    type Err = CommonTxDataError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            RSA_PSS_SIG_TYPE => Ok(Self::RsaPss),
+            ECDSA_SECP256K1_SIG_TYPE => Ok(Self::EcdsaSecp256k1),
+            invalid => Err(CommonTxDataError::InvalidSignatureType(invalid.to_string())),
+        }
+    }
+}
+
+impl DeepHashable for SignatureType {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        self.as_str().deep_hash()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tag<'a> {
     pub name: TagName<'a>,
@@ -239,7 +435,14 @@ impl<'a> From<RawTag<'a>> for Tag<'a> {
 
 impl DeepHashable for Tag<'_> {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
-        Self::list(vec![self.name.deep_hash(), self.value.deep_hash()])
+        Self::list([self.name.deep_hash(), self.value.deep_hash()])
+    }
+}
+
+impl Hashable for Tag<'_> {
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        self.name.feed(hasher);
+        self.value.feed(hasher);
     }
 }
 
@@ -315,7 +518,7 @@ impl<'a, S: SignatureScheme> TxData<'a, S> {
         &self,
         pkey: &WalletPk<PK>,
     ) -> Result<(), TxDataError> {
-        let digest = TxHash::from_inner(self.deep_hash());
+        let digest = TxHash::DeepHash(self.deep_hash());
         /*Ok(pkey
         .verify_signature(digest.as_slice(), &self.signature)
         .map_err(|_e| TxDataError::SignatureError)?)*/

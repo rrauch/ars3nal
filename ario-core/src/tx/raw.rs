@@ -3,18 +3,20 @@ use crate::blob::Blob;
 use crate::crypto::hash::HashableExt;
 use crate::crypto::hash::Sha256;
 use crate::json::JsonSource;
-use crate::tx::Format;
+use crate::tx::{Format, SignatureType};
 use crate::validation::{SupportsValidation, Valid, Validator};
 use crate::{JsonError, JsonValue};
 use bigdecimal::{BigDecimal, Zero};
 use serde::{Deserialize, Serialize};
-use serde_with::DisplayFromStr;
 use serde_with::NoneAsEmptyString;
 use serde_with::base64::Base64;
 use serde_with::base64::UrlSafe;
 use serde_with::formats::Unpadded;
 use serde_with::serde_as;
+use serde_with::{DeserializeAs, DisplayFromStr, SerializeAs};
+use std::fmt::Display;
 use std::ops::Deref;
+use std::str::FromStr;
 use std::sync::LazyLock;
 use thiserror::Error;
 
@@ -100,8 +102,9 @@ pub(super) struct RawTxData<'a> {
     pub id: Blob<'a>,
     #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
     pub last_tx: Blob<'a>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub denomination: Option<JsonValue>,
+    #[serde_as(as = "NoneIfDefault")]
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
+    pub denomination: Option<u32>,
     #[serde_as(as = "OptionalBase64As")]
     #[serde(default)]
     pub owner: Option<Blob<'a>>,
@@ -126,8 +129,47 @@ pub(super) struct RawTxData<'a> {
     pub reward: BigDecimal,
     #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
     pub signature: Blob<'a>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signature_type: Option<JsonValue>,
+    #[serde_as(as = "NoneIfDefault")]
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
+    pub signature_type: Option<SignatureType>,
+}
+
+fn is_none_or_default<T: Default + PartialEq>(value: &Option<T>) -> bool {
+    value.as_ref().map(|v| v == &(T::default())).unwrap_or(true)
+}
+
+struct NoneIfDefault;
+
+impl<T> SerializeAs<Option<T>> for NoneIfDefault
+where
+    T: Default + PartialEq + Display,
+{
+    fn serialize_as<S>(source: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match source {
+            Some(value) if value != &T::default() => Some(value.to_string()).serialize(serializer),
+            _ => None::<String>.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T> DeserializeAs<'de, Option<T>> for NoneIfDefault
+where
+    T: Default + PartialEq + FromStr,
+    <T as FromStr>::Err: Display,
+{
+    fn deserialize_as<D>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Option::<String>::deserialize(deserializer)?
+            .map(|s| T::from_str(s.as_str()))
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        Ok(value.filter(|v| v != &T::default()))
+    }
 }
 
 impl<'a> RawTxData<'a> {

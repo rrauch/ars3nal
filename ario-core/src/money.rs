@@ -1,5 +1,5 @@
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hasher};
+use crate::crypto::hash::{Digest, Hashable, Hasher};
 use crate::money::MoneyError::{ParseError, PrecisionError, RepresentationError};
 use crate::typed::{FromInner, Typed};
 use bigdecimal::{BigDecimal, One, ParseBigDecimalError, RoundingMode};
@@ -61,8 +61,13 @@ impl ConversionRate<'static, Winston, AR> for () {
 
 impl DeepHashable for Money<Winston> {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
-        let str = self.0.to_plain_string();
-        str.as_bytes().deep_hash()
+        self.0.to_plain_string().deep_hash()
+    }
+}
+
+impl Hashable for Money<Winston> {
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        self.0.to_plain_string().feed(hasher)
     }
 }
 

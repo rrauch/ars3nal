@@ -1,18 +1,15 @@
-use crate::blob::Blob;
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hasher, Sha384};
-use crate::crypto::keys;
-use crate::crypto::rsa::{RsaPss, RsaPublicKey};
+use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha384};
 use crate::json::JsonSource;
-use crate::money::{CurrencyExt, Winston};
+use crate::tx::CommonTxDataError::MissingOwner;
 use crate::tx::raw::{UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::{
-    CommonTxDataError, EmbeddedData, Format, LastTx, Quantity, Reward, Tag, TxError, TxHash, TxId,
-    TxSignature,
+    CommonData, CommonTxDataError, EmbeddedData, Format, LastTx, Quantity, Reward,
+    RsaSignatureData, SignatureType, Tag, TxError, TxHash, TxId,
 };
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
-use crate::wallet::{WalletAddress, WalletPk};
+use crate::wallet::WalletAddress;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -68,73 +65,7 @@ impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum V1SignatureData {
-    Rsa4096 {
-        owner: WalletPk<RsaPublicKey<4096>>,
-        signature: TxSignature<RsaPss<4096>>,
-    },
-    Rsa2048 {
-        owner: WalletPk<RsaPublicKey<2048>>,
-        signature: TxSignature<RsaPss<2048>>,
-    },
-}
-
-impl V1SignatureData {
-    fn from_raw<'a>(
-        raw_owner: Option<Blob<'a>>,
-        raw_signature: Blob<'a>,
-    ) -> Result<Self, V1TxDataError> {
-        use crate::crypto::rsa::SupportedPublicKey;
-        use crate::crypto::signature::Scheme as SignatureScheme;
-        use crate::crypto::signature::Signature;
-        use crate::tx::CommonTxDataError::*;
-
-        // v1 tx always uses RSA_PSS
-        let raw_owner = raw_owner.ok_or(MissingOwner)?;
-
-        Ok(
-            match SupportedPublicKey::try_from(raw_owner)
-                .map_err(|e| CommonTxDataError::from(keys::KeyError::RsaError(e)))?
-            {
-                SupportedPublicKey::Rsa4096(pk) => Self::Rsa4096 {
-                    owner: WalletPk::from_inner(pk),
-                    signature: TxSignature::from_inner(Signature::from_inner(
-                        <<RsaPss<4096> as SignatureScheme>::Output>::try_from(raw_signature)
-                            .map_err(|e| InvalidSignature(e.to_string()))?,
-                    )),
-                },
-                SupportedPublicKey::Rsa2048(pk) => Self::Rsa2048 {
-                    owner: WalletPk::from_inner(pk),
-                    signature: TxSignature::from_inner(Signature::from_inner(
-                        <<RsaPss<2048> as SignatureScheme>::Output>::try_from(raw_signature)
-                            .map_err(|e| InvalidSignature(e.to_string()))?,
-                    )),
-                },
-            },
-        )
-    }
-
-    fn verify_sig(&self, tx_hash: &TxHash) -> Result<(), V1TxDataError> {
-        use crate::tx::CommonTxDataError::*;
-
-        match self {
-            Self::Rsa4096 { owner, signature } => owner
-                .verify_tx(tx_hash, signature)
-                .map_err(|e| InvalidSignature(e).into()),
-            Self::Rsa2048 { owner, signature } => owner
-                .verify_tx(tx_hash, signature)
-                .map_err(|e| InvalidSignature(e).into()),
-        }
-    }
-
-    fn deep_hash_owner<H: Hasher>(&self) -> Digest<H> {
-        match self {
-            Self::Rsa4096 { owner, .. } => owner.deep_hash(),
-            Self::Rsa2048 { owner, .. } => owner.deep_hash(),
-        }
-    }
-}
+pub(super) type V1SignatureData = RsaSignatureData;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct V1TxData<'a> {
@@ -143,23 +74,29 @@ pub(super) struct V1TxData<'a> {
     pub tags: Vec<Tag<'a>>,
     pub target: Option<WalletAddress>,
     pub quantity: Option<Quantity>,
-    pub data_size: u64,
     pub data: Option<EmbeddedData<'a>>,
     pub reward: Reward,
     pub signature_data: V1SignatureData,
+    pub denomination: Option<u32>,
 }
 
 impl<'a> V1TxData<'a> {
     pub fn tx_hash(&self) -> TxHash {
-        // todo: find out if there are very old transactions that require a different approach
-        TxHash::from_inner(self.deep_hash::<Sha384>())
+        if self.denomination.is_some() {
+            TxHash::DeepHash(self.deep_hash::<Sha384>())
+        } else {
+            let mut hasher = Sha256::new();
+            self.feed(&mut hasher);
+            TxHash::Shallow(hasher.finalize())
+        }
     }
 }
 
 impl DeepHashable for V1TxData<'_> {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
         Self::list([
-            self.signature_data.deep_hash_owner(),
+            self.denomination.deep_hash(),
+            self.signature_data.deep_hash(),
             self.target.deep_hash(),
             self.data.deep_hash(),
             self.quantity.deep_hash(),
@@ -170,12 +107,28 @@ impl DeepHashable for V1TxData<'_> {
     }
 }
 
+impl Hashable for V1TxData<'_> {
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        self.signature_data.feed(hasher);
+        self.target.feed(hasher);
+        self.data.feed(hasher);
+        self.quantity.feed(hasher);
+        self.reward.feed(hasher);
+        self.last_tx.feed(hasher);
+        self.tags.feed(hasher);
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum V1TxDataError {
     #[error("expected format '1' but found '{0}")]
     IncorrectFormat(Format),
     #[error(transparent)]
     Common(#[from] CommonTxDataError),
+    #[error("v1 transactions only support RSA_PSS signatures, found: '{0}")]
+    NonRsaSignatureType(SignatureType),
+    #[error("data_size '{expected}' does not correspond to actual data size '{actual}'")]
+    IncorrectDataSize { actual: u64, expected: u64 },
 }
 
 impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
@@ -187,49 +140,51 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
             return Err(V1TxDataError::IncorrectFormat(raw.format));
         }
 
-        let id = TxId::try_from(raw.id).map_err(|e| CommonTxDataError::InvalidId(e.to_string()))?;
+        let signature_type = raw.signature_type.unwrap_or_default();
+        if signature_type != SignatureType::RsaPss {
+            return Err(V1TxDataError::NonRsaSignatureType(signature_type));
+        }
+
+        let raw_owner = raw.owner.ok_or(MissingOwner)?;
+        let signature_data = V1SignatureData::from_raw(raw_owner, raw.signature)?;
 
         let last_tx = LastTx::try_from(raw.last_tx)
             .map_err(|e| CommonTxDataError::InvalidLastTx(e.to_string()))?;
 
-        let tags = raw
-            .tags
-            .into_iter()
-            .map(|t| Tag::from(t))
-            .collect::<Vec<_>>();
-
-        let target = raw
-            .target
-            .map(WalletAddress::try_from)
-            .transpose()
-            .map_err(|e| CommonTxDataError::InvalidTarget(e.to_string()))?;
-
-        let quantity = raw
-            .quantity
-            .map(|raw| Winston::try_new(raw).and_then(|w| Ok(Quantity::from(w))))
-            .transpose()
-            .map_err(|e| CommonTxDataError::InvalidQuantity(e.to_string()))?;
-
-        let data_size = raw.data_size;
         let data = raw.data.map(|b| EmbeddedData::from_inner(b));
 
-        let reward = Reward::from_inner(
-            Winston::try_new(raw.reward)
-                .map_err(|e| CommonTxDataError::InvalidReward(e.to_string()))?,
-        );
+        match (
+            data.as_ref().map(|d| d.len() as u64).unwrap_or(0),
+            raw.data_size,
+        ) {
+            (actual, expected) if actual != expected => {
+                // incorrect length
+                return Err(V1TxDataError::IncorrectDataSize { actual, expected });
+            }
+            _ => {
+                // correct length, do nothing
+            }
+        }
 
-        let signature_data = V1SignatureData::from_raw(raw.owner, raw.signature)?;
+        let common_data = CommonData::try_from_raw(
+            raw.id,
+            raw.tags,
+            raw.target,
+            raw.quantity,
+            raw.reward,
+            raw.denomination,
+        )?;
 
         Ok(Self {
-            id,
+            id: common_data.id,
             last_tx,
-            tags,
-            target,
-            quantity,
-            data_size,
+            tags: common_data.tags,
+            target: common_data.target,
+            quantity: common_data.quantity,
             data,
-            reward,
+            reward: common_data.reward,
             signature_data,
+            denomination: common_data.denomination,
         })
     }
 }
@@ -240,7 +195,7 @@ impl Validator<V1TxData<'_>> for V1TxDataValidator {
     type Error = V1TxDataError;
 
     fn validate(data: &V1TxData) -> Result<(), Self::Error> {
-        data.signature_data.verify_sig(&(data.tx_hash()))
+        Ok(data.signature_data.verify_sig(&(data.tx_hash()))?)
     }
 }
 
@@ -286,8 +241,8 @@ mod tests {
 
         assert_eq!(&tx_data.tags, &vec![]);
         assert!(tx_data.target.is_none());
+        assert!(tx_data.denomination.is_none());
         assert_eq!(tx_data.quantity.as_ref().unwrap(), ZERO_QUANTITY.deref(),);
-        assert_eq!(tx_data.data_size, 1033478);
         assert_eq!(tx_data.data.as_ref().unwrap().len(), 1033478);
         //todo: verify data value
         assert_eq!(

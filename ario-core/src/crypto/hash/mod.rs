@@ -213,3 +213,17 @@ impl Hashable for Bytes {
         self.as_ref().feed(hasher)
     }
 }
+
+impl Hashable for u64 {
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        // numbers have to be serialized to strings!
+        self.to_string().feed(hasher)
+    }
+}
+
+impl Hashable for u32 {
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        // numbers have to be serialized to strings!
+        self.to_string().feed(hasher)
+    }
+}
