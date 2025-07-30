@@ -3,7 +3,7 @@ use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
 use crate::crypto::rsa::{RsaPss, RsaPublicKey};
 use crate::crypto::{keys, signature};
-use crate::tx::{CommonTxDataError, Owner, Signature, TxSignatureScheme, TxHash, TxSignature};
+use crate::tx::{CommonTxDataError, Owner, Signature, TxHash, TxSignature, TxSignatureScheme};
 use crate::typed::FromInner;
 use crate::wallet::WalletPk;
 
@@ -74,14 +74,14 @@ impl RsaSignatureData {
         }
     }
 
-    fn owner(&self) -> Owner {
+    pub(super) fn owner(&self) -> Owner {
         match self {
             Self::Rsa4096 { owner, .. } => Owner::Rsa4096(owner.into()),
             Self::Rsa2048 { owner, .. } => Owner::Rsa2048(owner.into()),
         }
     }
 
-    fn signature(&self) -> Signature {
+    pub(super) fn signature(&self) -> Signature {
         match self {
             Self::Rsa4096 { signature, .. } => Signature::Rsa4096(signature.into()),
             Self::Rsa2048 { signature, .. } => Signature::Rsa2048(signature.into()),

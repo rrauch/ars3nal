@@ -169,6 +169,12 @@ impl<C: Currency> Money<C> {
     }
 }
 
+impl<C: Currency> From<Money<C>> for BigDecimal {
+    fn from(value: Money<C>) -> Self {
+        value.0
+    }
+}
+
 impl<C: Currency> Debug for Money<C> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         Display::fmt(self, f)

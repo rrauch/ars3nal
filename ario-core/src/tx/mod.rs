@@ -41,10 +41,27 @@ pub enum Owner<'a> {
     Rsa4096(Mown<'a, WalletPk<RsaPublicKey<4096>>>),
     Rsa2048(Mown<'a, WalletPk<RsaPublicKey<2048>>>),
 }
+impl AsBlob for Owner<'_> {
+    fn as_blob(&self) -> Blob<'_> {
+        match self {
+            Self::Rsa4096(rsa) => rsa.as_blob(),
+            Self::Rsa2048(rsa) => rsa.as_blob(),
+        }
+    }
+}
 
 pub enum Signature<'a> {
     Rsa4096(Mown<'a, TxSignature<RsaPss<4096>>>),
     Rsa2048(Mown<'a, TxSignature<RsaPss<2048>>>),
+}
+
+impl AsBlob for Signature<'_> {
+    fn as_blob(&self) -> Blob<'_> {
+        match self {
+            Self::Rsa4096(rsa) => rsa.as_blob(),
+            Self::Rsa2048(rsa) => rsa.as_blob(),
+        }
+    }
 }
 
 pub trait TxSignatureScheme: signature::Scheme {
@@ -346,6 +363,15 @@ impl<'a> From<RawTag<'a>> for Tag<'a> {
         Self {
             name: TagName::from_inner(raw.name),
             value: TagValue::from_inner(raw.value),
+        }
+    }
+}
+
+impl<'a> From<Tag<'a>> for RawTag<'a> {
+    fn from(value: Tag<'a>) -> Self {
+        Self {
+            name: value.name.into_inner(),
+            value: value.value.into_inner(),
         }
     }
 }

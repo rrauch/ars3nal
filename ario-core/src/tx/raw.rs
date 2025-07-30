@@ -40,8 +40,21 @@ impl<'a> From<ValidatedRawTx<'a>> for RawTxData<'a> {
 }
 
 impl<'a> ValidatedRawTx<'a> {
+    /// Ensure the raw tx data is *actually* valid when calling this function.
+    pub(super) fn danger_from_raw_tx_data(pre_validated_data: RawTxData<'a>) -> Self {
+        Self(pre_validated_data)
+    }
+
     pub(super) fn into_inner(self) -> RawTxData<'a> {
         self.0
+    }
+
+    pub fn to_json_string(&self) -> Result<String, JsonError> {
+        self.0.to_json_string()
+    }
+
+    pub fn to_json(&self) -> Result<JsonValue, JsonError> {
+        self.0.to_json()
     }
 }
 
@@ -177,11 +190,11 @@ impl<'a> RawTxData<'a> {
         self.tags.iter().map(|t| t.byte_len()).sum()
     }
 
-    pub fn to_json_string(&self) -> Result<String, JsonError> {
+    fn to_json_string(&self) -> Result<String, JsonError> {
         serde_json::to_string_pretty(self)
     }
 
-    pub fn into_json(self) -> Result<JsonValue, JsonError> {
+    fn to_json(&self) -> Result<JsonValue, JsonError> {
         serde_json::to_value(self)
     }
 }

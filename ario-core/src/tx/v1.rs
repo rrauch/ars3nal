@@ -1,8 +1,9 @@
+use crate::blob::AsBlob;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha384};
 use crate::json::JsonSource;
 use crate::tx::CommonTxDataError::MissingOwner;
-use crate::tx::raw::{UnvalidatedRawTx, ValidatedRawTx};
+use crate::tx::raw::{RawTxData, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::rsa::RsaSignatureData;
 use crate::tx::{
     CommonData, CommonTxDataError, EmbeddedData, Format, LastTx, Quantity, Reward, SignatureType,
@@ -20,21 +21,36 @@ pub(super) struct V1Tx<'a, const VALIDATED: bool = false>(V1TxData<'a>);
 pub(super) type UnvalidatedV1Tx<'a> = V1Tx<'a, false>;
 pub(super) type ValidatedV1Tx<'a> = V1Tx<'a, true>;
 
-impl<'a> From<V1TxData<'a>> for UnvalidatedV1Tx<'a> {
-    fn from(value: V1TxData<'a>) -> Self {
-        V1Tx(value)
-    }
-}
-
-impl<'a> From<ValidatedV1Tx<'a>> for V1TxData<'a> {
+impl<'a> From<ValidatedV1Tx<'a>> for ValidatedRawTx<'a> {
     fn from(value: ValidatedV1Tx<'a>) -> Self {
-        value.0
+        let v1 = value.0;
+        Self::danger_from_raw_tx_data(RawTxData {
+            format: Format::V1,
+            id: v1.id.as_blob().into_owned(),
+            last_tx: v1.last_tx.as_blob().into_owned(),
+            denomination: v1.denomination,
+            owner: Some(v1.signature_data.owner().as_blob().into_owned()),
+            tags: v1.tags.into_iter().map(|t| t.into()).collect(),
+            target: v1.target.map(|w| w.as_blob().into_owned()),
+            quantity: v1.quantity.map(|q| q.into_inner().into()),
+            data_tree: vec![],
+            data_root: None,
+            data_size: v1.data.as_ref().map(|d| d.len() as u64).unwrap_or(0),
+            data: v1.data.map(|d| d.into_inner()),
+            reward: v1.reward.into_inner().into(),
+            signature: v1.signature_data.signature().as_blob().into_owned(),
+            signature_type: None,
+        })
     }
 }
 
 impl<'a> ValidatedV1Tx<'a> {
     pub(super) fn into_inner(self) -> V1TxData<'a> {
         self.0
+    }
+
+    pub fn invalidate(self) -> UnvalidatedV1Tx<'a> {
+        V1Tx(self.0)
     }
 }
 
@@ -46,6 +62,12 @@ impl UnvalidatedV1Tx<'static> {
             .try_into()?;
 
         Ok(Self(tx_data))
+    }
+}
+
+impl<'a> UnvalidatedV1Tx<'a> {
+    pub(crate) fn try_from_raw(raw: ValidatedRawTx<'a>) -> Result<Self, TxError> {
+        Ok(Self(V1TxData::try_from(raw)?))
     }
 }
 
@@ -208,6 +230,7 @@ impl Validator<V1TxData<'_>> for V1TxDataValidator {
 mod tests {
     use crate::base64::ToBase64;
     use crate::money::{CurrencyExt, Winston};
+    use crate::tx::raw::ValidatedRawTx;
     use crate::tx::v1::{TxError, UnvalidatedV1Tx, V1SignatureData, V1TxDataError};
     use crate::tx::{CommonTxDataError, Format, Quantity, Reward};
     use crate::validation::ValidateExt;
@@ -275,6 +298,17 @@ mod tests {
     #[test]
     fn v1_verify_2_ok() -> anyhow::Result<()> {
         let unvalidated = UnvalidatedV1Tx::from_json(TX_V1_2)?;
+        let _validated = unvalidated.validate().map_err(|(_, e)| e)?;
+        Ok(())
+    }
+
+    #[test]
+    fn v1_raw_rountrip() -> anyhow::Result<()> {
+        let unvalidated = UnvalidatedV1Tx::from_json(TX_V1_2)?;
+        let validated = unvalidated.validate().map_err(|(_, e)| e)?;
+        let raw = ValidatedRawTx::from(validated);
+        let json_string = raw.to_json_string()?;
+        let unvalidated = UnvalidatedV1Tx::from_json(&json_string)?;
         let _validated = unvalidated.validate().map_err(|(_, e)| e)?;
         Ok(())
     }
