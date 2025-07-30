@@ -1,13 +1,14 @@
-use crate::blob::Blob;
+use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384};
 use crate::json::JsonSource;
 use crate::tx::CommonTxDataError::MissingOwner;
-use crate::tx::raw::{UnvalidatedRawTx, ValidatedRawTx};
+use crate::tx::Format::V2;
+use crate::tx::raw::{RawTxData, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::rsa::RsaSignatureData;
 use crate::tx::{
-    CommonData, CommonTxDataError, Format, Quantity, Reward, SignatureType, Tag, TxAnchor, TxError,
-    TxHash, TxId,
+    CommonData, CommonTxDataError, Format, Owner, Quantity, Reward, Signature, SignatureType, Tag,
+    TxAnchor, TxError, TxHash, TxId,
 };
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
 use crate::wallet::WalletAddress;
@@ -20,15 +21,26 @@ pub(super) struct V2Tx<'a, const VALIDATED: bool = false>(V2TxData<'a>);
 pub(super) type UnvalidatedV2Tx<'a> = V2Tx<'a, false>;
 pub(super) type ValidatedV2Tx<'a> = V2Tx<'a, true>;
 
-impl<'a> From<V2TxData<'a>> for UnvalidatedV2Tx<'a> {
-    fn from(value: V2TxData<'a>) -> Self {
-        V2Tx(value)
-    }
-}
-
-impl<'a> From<ValidatedV2Tx<'a>> for V2TxData<'a> {
+impl<'a> From<ValidatedV2Tx<'a>> for ValidatedRawTx<'a> {
     fn from(value: ValidatedV2Tx<'a>) -> Self {
-        value.0
+        let v2 = value.0;
+        Self::danger_from_raw_tx_data(RawTxData {
+            format: V2,
+            id: v2.id.as_blob().into_owned(),
+            last_tx: v2.last_tx.as_blob().into_owned(),
+            denomination: v2.denomination,
+            owner: Some(v2.signature_data.owner().as_blob().into_owned()),
+            tags: v2.tags.into_iter().map(|t| t.into()).collect(),
+            target: v2.target.map(|w| w.as_blob().into_owned()),
+            quantity: v2.quantity.map(|q| q.into_inner().into()),
+            data_tree: vec![],
+            data_root: v2.data_root,
+            data_size: v2.data_size,
+            data: None,
+            reward: v2.reward.into_inner().into(),
+            signature: v2.signature_data.signature().as_blob().into_owned(),
+            signature_type: Some(v2.signature_data.signature_type()),
+        })
     }
 }
 
@@ -88,6 +100,18 @@ impl V2SignatureData {
             SignatureType::EcdsaSecp256k1 => {
                 todo!("ecdsa")
             }
+        }
+    }
+
+    fn owner(&self) -> Owner {
+        match self {
+            Self::Rsa(rsa) => rsa.owner(),
+        }
+    }
+
+    fn signature(&self) -> Signature {
+        match self {
+            Self::Rsa(rsa) => rsa.signature(),
         }
     }
 
@@ -231,6 +255,7 @@ impl Validator<V2TxData<'_>> for V2TxDataValidator {
 mod tests {
     use crate::base64::ToBase64;
     use crate::money::{CurrencyExt, Winston};
+    use crate::tx::raw::ValidatedRawTx;
     use crate::tx::v2::{UnvalidatedV2Tx, V2TxDataError};
     use crate::tx::{CommonTxDataError, Quantity, Reward};
     use crate::validation::ValidateExt;
@@ -371,6 +396,17 @@ mod tests {
             }
             _ => unreachable!("signature validation failure expected"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn tx_raw_rountrip() -> anyhow::Result<()> {
+        let unvalidated = UnvalidatedV2Tx::from_json(TX_V2)?;
+        let validated = unvalidated.validate().map_err(|(_, e)| e)?;
+        let raw = ValidatedRawTx::from(validated);
+        let json_string = raw.to_json_string()?;
+        let unvalidated = UnvalidatedV2Tx::from_json(&json_string)?;
+        let _validated = unvalidated.validate().map_err(|(_, e)| e)?;
         Ok(())
     }
 }
