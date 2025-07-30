@@ -3,9 +3,10 @@ use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha384};
 use crate::json::JsonSource;
 use crate::tx::CommonTxDataError::MissingOwner;
 use crate::tx::raw::{UnvalidatedRawTx, ValidatedRawTx};
+use crate::tx::rsa::RsaSignatureData;
 use crate::tx::{
-    CommonData, CommonTxDataError, EmbeddedData, Format, LastTx, Quantity, Reward,
-    RsaSignatureData, SignatureType, Tag, TxError, TxHash, TxId,
+    CommonData, CommonTxDataError, EmbeddedData, Format, LastTx, Quantity, Reward, SignatureType,
+    Tag, TxError, TxHash, TxId,
 };
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
@@ -208,10 +209,12 @@ mod tests {
     use crate::base64::ToBase64;
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::v1::{TxError, UnvalidatedV1Tx, V1SignatureData, V1TxDataError};
-    use crate::tx::{CommonTxDataError, Format, Reward, ZERO_QUANTITY};
+    use crate::tx::{CommonTxDataError, Format, Quantity, Reward};
     use crate::validation::ValidateExt;
     use std::ops::Deref;
+    use std::sync::LazyLock;
 
+    static ZERO_QUANTITY: LazyLock<Quantity> = LazyLock::new(|| Quantity::zero());
     static TX_V1: &'static [u8] = include_bytes!("../../testdata/tx_v1.json");
     static TX_V1_2: &'static [u8] = include_bytes!("../../testdata/tx_v1_2.json");
     static TX_V1_INVALID_SIG: &'static [u8] =
