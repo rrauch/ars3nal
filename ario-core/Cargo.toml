@@ -14,7 +14,7 @@ digest = "0.11.0-rc.0"
 hybrid-array = { version = "0.3", features = ["serde", "zeroize", "bytemuck"] }
 maybe-owned = "0.3"
 rand = { version = "0.9", features = ["thread_rng"] }
-rsa = "0.10.0-rc.3"
+rsa = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_repr = "0.1"

@@ -3,5 +3,6 @@ resolver = "3"
 members = ["ario-core", "ario-client", "arfs", "ars3nal"]
 
 [workspace.dependencies]
+rsa = { git = "https://github.com/rrauch/RSA.git", rev = "941f6849ffe7cc8cd7e232699377cf70a625984f" }
 serde = "1.0"
 zeroize = "1.8"

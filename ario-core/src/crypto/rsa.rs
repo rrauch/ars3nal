@@ -391,44 +391,12 @@ where
     {
         let sig = rsa::pss::Signature::try_from(signature.as_blob().bytes())
             .map_err(|e| VerificationError::Other(e.to_string()))?;
-        let msg = msg.as_slice();
 
-        // Brute-force approach to salt length detection.
-        let candidates = vec![
-            calculate_rsa_pss_max_salt_len::<Sha256>(
-                <<Rsa<BIT> as SupportedRsaScheme>::KeyLen>::to_usize(),
-            ), // max length
-            msg.len(), // digest length
-            0,         // zero salt
-        ];
-
-        for salt_len in candidates {
-            if Self::verify_prehashed(verifier, msg, &sig, salt_len).is_ok() {
-                return Ok(());
-            }
-        }
-
-        Err(VerificationError::Other(
-            "signature verification failed".to_string(),
-        ))
-    }
-}
-
-impl<const BIT: usize> RsaPss<BIT>
-where
-    Rsa<BIT>: SupportedRsaScheme,
-{
-    fn verify_prehashed(
-        verifier: &RsaPublicKey<BIT>,
-        msg: &[u8],
-        sig: &rsa::pss::Signature,
-        salt_len: usize,
-    ) -> Result<(), VerificationError> {
         let verifying_key: PssVerifyingKey<Sha256> =
-            PssVerifyingKey::new_with_salt_len(verifier.as_inner().clone(), salt_len);
+            PssVerifyingKey::new_with_auto_salt_len(verifier.as_inner().clone());
 
         verifying_key
-            .verify_prehash(msg, sig)
+            .verify_prehash(msg.as_slice(), &sig)
             .map_err(|e| VerificationError::Other(e.to_string()))
     }
 }
