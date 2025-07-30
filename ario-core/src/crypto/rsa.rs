@@ -77,10 +77,12 @@ pub enum KeyError {
 }
 
 impl<const BIT: usize> RsaPrivateKey<BIT> {
+    const EXPECTED_BYTES: usize = (BIT + 7) / 8;
+
     pub(crate) fn try_from_inner(inner: ExternalRsaPrivateKey) -> Result<Self, KeyError> {
-        if inner.size() != { BIT / 8 } {
+        if inner.size() != Self::EXPECTED_BYTES {
             return Err(KeyError::UnexpectedKeyLength {
-                expected: { BIT / 8 },
+                expected: Self::EXPECTED_BYTES,
                 actual: inner.size(),
             });
         }
@@ -240,10 +242,12 @@ impl TryFrom<Blob<'_>> for SupportedPublicKey {
 }
 
 impl<const BIT: usize> RsaPublicKey<BIT> {
+    const EXPECTED_BYTES: usize = (BIT + 7) / 8;
+
     pub(crate) fn try_from_inner(inner: ExternalRsaPublicKey) -> Result<Self, KeyError> {
-        if inner.size() != { BIT / 8 } {
+        if inner.size() != Self::EXPECTED_BYTES {
             return Err(KeyError::UnexpectedKeyLength {
-                expected: { BIT / 8 },
+                expected: Self::EXPECTED_BYTES,
                 actual: inner.size(),
             });
         }
@@ -291,10 +295,12 @@ impl<'a, const BIT: usize> TryFrom<Blob<'a>> for RsaPublicKey<BIT> {
     type Error = KeyError;
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
+        let expected: usize = (BIT + 7) / 8;
         let len = value.len();
-        if len != { BIT / 8 } {
+
+        if len != expected {
             return Err(Self::Error::UnexpectedKeyLength {
-                expected: { BIT / 8 },
+                expected,
                 actual: len,
             });
         }
