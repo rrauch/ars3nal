@@ -12,6 +12,7 @@ use crate::tx::{
 };
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
 use crate::wallet::WalletAddress;
+use crate::{JsonError, JsonValue};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +21,16 @@ pub(super) struct V2Tx<'a, const VALIDATED: bool = false>(V2TxData<'a>);
 
 pub(super) type UnvalidatedV2Tx<'a> = V2Tx<'a, false>;
 pub(super) type ValidatedV2Tx<'a> = V2Tx<'a, true>;
+
+impl<'a, const VALIDATED: bool> V2Tx<'a, VALIDATED> {
+    pub(super) fn as_inner(&self) -> &V2TxData<'a> {
+        &self.0
+    }
+
+    pub(super) fn into_owned(self) -> V2Tx<'static, VALIDATED> {
+        V2Tx(self.0.into_owned())
+    }
+}
 
 impl<'a> From<ValidatedV2Tx<'a>> for ValidatedRawTx<'a> {
     fn from(value: ValidatedV2Tx<'a>) -> Self {
@@ -45,8 +56,16 @@ impl<'a> From<ValidatedV2Tx<'a>> for ValidatedRawTx<'a> {
 }
 
 impl<'a> ValidatedV2Tx<'a> {
-    pub(super) fn into_inner(self) -> V2TxData<'a> {
-        self.0
+    pub fn invalidate(self) -> UnvalidatedV2Tx<'a> {
+        V2Tx(self.0)
+    }
+
+    pub(super) fn to_json_string(&self) -> Result<String, JsonError> {
+        ValidatedRawTx::from(self.clone()).to_json_string()
+    }
+
+    pub(super) fn to_json(&self) -> Result<JsonValue, JsonError> {
+        ValidatedRawTx::from(self.clone()).to_json()
     }
 }
 
@@ -58,6 +77,12 @@ impl UnvalidatedV2Tx<'static> {
             .try_into()?;
 
         Ok(Self(tx_data))
+    }
+}
+
+impl<'a> UnvalidatedV2Tx<'a> {
+    pub(crate) fn try_from_raw(raw: ValidatedRawTx<'a>) -> Result<Self, TxError> {
+        Ok(Self(V2TxData::try_from(raw)?))
     }
 }
 
@@ -103,13 +128,13 @@ impl V2SignatureData {
         }
     }
 
-    fn owner(&self) -> Owner {
+    pub(super) fn owner(&self) -> Owner {
         match self {
             Self::Rsa(rsa) => rsa.owner(),
         }
     }
 
-    fn signature(&self) -> Signature {
+    pub(super) fn signature(&self) -> Signature {
         match self {
             Self::Rsa(rsa) => rsa.signature(),
         }
@@ -151,6 +176,21 @@ pub(super) struct V2TxData<'a> {
 impl<'a> V2TxData<'a> {
     pub fn tx_hash(&self) -> TxHash {
         TxHash::DeepHash(self.deep_hash::<Sha384>())
+    }
+
+    fn into_owned(self) -> V2TxData<'static> {
+        V2TxData {
+            id: self.id,
+            last_tx: self.last_tx,
+            tags: self.tags.into_iter().map(|t| t.into_owned()).collect(),
+            target: self.target,
+            quantity: self.quantity,
+            data_size: self.data_size,
+            data_root: self.data_root.map(|d| d.into_owned()),
+            reward: self.reward,
+            signature_data: self.signature_data,
+            denomination: self.denomination,
+        }
     }
 }
 

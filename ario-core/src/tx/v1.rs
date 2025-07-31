@@ -12,6 +12,7 @@ use crate::tx::{
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
 use crate::wallet::WalletAddress;
+use crate::{JsonError, JsonValue};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +21,16 @@ pub(super) struct V1Tx<'a, const VALIDATED: bool = false>(V1TxData<'a>);
 
 pub(super) type UnvalidatedV1Tx<'a> = V1Tx<'a, false>;
 pub(super) type ValidatedV1Tx<'a> = V1Tx<'a, true>;
+
+impl<'a, const VALIDATED: bool> V1Tx<'a, VALIDATED> {
+    pub(super) fn as_inner(&self) -> &V1TxData<'a> {
+        &self.0
+    }
+
+    pub(super) fn into_owned(self) -> V1Tx<'static, VALIDATED> {
+        V1Tx(self.0.into_owned())
+    }
+}
 
 impl<'a> From<ValidatedV1Tx<'a>> for ValidatedRawTx<'a> {
     fn from(value: ValidatedV1Tx<'a>) -> Self {
@@ -45,12 +56,16 @@ impl<'a> From<ValidatedV1Tx<'a>> for ValidatedRawTx<'a> {
 }
 
 impl<'a> ValidatedV1Tx<'a> {
-    pub(super) fn into_inner(self) -> V1TxData<'a> {
-        self.0
-    }
-
     pub fn invalidate(self) -> UnvalidatedV1Tx<'a> {
         V1Tx(self.0)
+    }
+
+    pub(super) fn to_json_string(&self) -> Result<String, JsonError> {
+        ValidatedRawTx::from(self.clone()).to_json_string()
+    }
+
+    pub(super) fn to_json(&self) -> Result<JsonValue, JsonError> {
+        ValidatedRawTx::from(self.clone()).to_json()
     }
 }
 
@@ -93,7 +108,7 @@ pub(super) type V1SignatureData = RsaSignatureData;
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct V1TxData<'a> {
     pub id: TxId,
-    pub last_tx: LastTx,
+    pub last_tx: LastTx<'a>,
     pub tags: Vec<Tag<'a>>,
     pub target: Option<WalletAddress>,
     pub quantity: Option<Quantity>,
@@ -111,6 +126,20 @@ impl<'a> V1TxData<'a> {
             let mut hasher = Sha256::new();
             self.feed(&mut hasher);
             TxHash::Shallow(hasher.finalize())
+        }
+    }
+
+    fn into_owned(self) -> V1TxData<'static> {
+        V1TxData {
+            id: self.id,
+            last_tx: self.last_tx.into_owned(),
+            tags: self.tags.into_iter().map(|t| t.into_owned()).collect(),
+            target: self.target,
+            quantity: self.quantity,
+            data: self.data.map(|d| d.into_owned()),
+            reward: self.reward,
+            signature_data: self.signature_data,
+            denomination: self.denomination,
         }
     }
 }

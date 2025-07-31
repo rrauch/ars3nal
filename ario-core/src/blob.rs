@@ -1,4 +1,4 @@
-use crate::typed::Typed;
+use crate::typed::{FromInner, Typed};
 use bytes::Bytes;
 use hybrid_array::{Array, ArraySize};
 use std::array::TryFromSliceError;
@@ -7,6 +7,12 @@ use std::ops::Deref;
 use thiserror::Error;
 
 pub type TypedBlob<'a, T> = Typed<T, Blob<'a>>;
+
+impl<'a, T> TypedBlob<'a, T> {
+    pub fn into_owned(self) -> TypedBlob<'static, T> {
+        TypedBlob::from_inner(self.into_inner().into_owned())
+    }
+}
 
 #[derive(Clone, PartialEq)]
 pub enum Blob<'a> {

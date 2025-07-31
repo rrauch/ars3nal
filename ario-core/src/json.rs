@@ -1,7 +1,7 @@
 use crate::blob::Blob;
 use crate::{JsonError, JsonValue};
 
-pub(crate) trait JsonSource {
+pub trait JsonSource {
     fn try_into_json(self) -> Result<JsonValue, JsonError>;
 }
 

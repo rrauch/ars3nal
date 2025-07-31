@@ -3,7 +3,6 @@ mod rsa;
 mod v1;
 mod v2;
 
-use crate::JsonError;
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob, TypedBlob};
 use crate::crypto::hash::deep_hash::DeepHashable;
@@ -13,18 +12,256 @@ use crate::crypto::keys::{PublicKey, SecretKey};
 use crate::crypto::rsa::{RsaPss, RsaPublicKey};
 use crate::crypto::signature::TypedSignature;
 use crate::crypto::{keys, signature};
+use crate::json::JsonSource;
 use crate::money::{CurrencyExt, Money, TypedMoney, Winston};
-use crate::tx::raw::{RawTag, RawTxDataError};
-use crate::tx::v1::V1TxDataError;
-use crate::tx::v2::V2TxDataError;
+use crate::tx::raw::{RawTag, RawTx, RawTxDataError, UnvalidatedRawTx, ValidatedRawTx};
+use crate::tx::v1::{UnvalidatedV1Tx, V1Tx, V1TxDataError};
+use crate::tx::v2::{UnvalidatedV2Tx, V2Tx, V2TxDataError};
 use crate::typed::{FromInner, Typed};
+use crate::validation::ValidateExt;
 use crate::wallet::{WalletAddress, WalletKind, WalletPk};
+use crate::{JsonError, JsonValue};
 use bigdecimal::BigDecimal;
 use mown::Mown;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
 use thiserror::Error;
+
+#[derive(Debug, Clone, PartialEq)]
+#[repr(transparent)]
+pub struct Tx<'a, const VALIDATED: bool = false>(TxInner<'a, VALIDATED>);
+
+#[derive(Debug, Clone, PartialEq)]
+enum TxInner<'a, const VALIDATED: bool> {
+    V1(V1Tx<'a, VALIDATED>),
+    V2(V2Tx<'a, VALIDATED>),
+}
+
+impl<'a, const VALIDATED: bool> TxInner<'a, VALIDATED> {
+    fn into_owned(self) -> TxInner<'static, VALIDATED> {
+        match self {
+            Self::V1(v1) => TxInner::V1(v1.into_owned()),
+            Self::V2(v2) => TxInner::V2(v2.into_owned()),
+        }
+    }
+}
+
+pub type UnvalidatedTx<'a> = Tx<'a, false>;
+pub type ValidatedTx<'a> = Tx<'a, true>;
+
+impl<'a, const VALIDATED: bool> From<V1Tx<'a, VALIDATED>> for Tx<'a, VALIDATED> {
+    fn from(value: V1Tx<'a, VALIDATED>) -> Self {
+        Self(TxInner::V1(value))
+    }
+}
+
+impl<'a, const VALIDATED: bool> From<V2Tx<'a, VALIDATED>> for Tx<'a, VALIDATED> {
+    fn from(value: V2Tx<'a, VALIDATED>) -> Self {
+        Self(TxInner::V2(value))
+    }
+}
+
+impl<'a, const VALIDATED: bool> TryFrom<Tx<'a, VALIDATED>> for V1Tx<'a, VALIDATED> {
+    type Error = Tx<'a, VALIDATED>;
+
+    fn try_from(value: Tx<'a, VALIDATED>) -> Result<Self, Self::Error> {
+        match value.0 {
+            TxInner::V1(v1) => Ok(v1),
+            incorrect => Err(Tx(incorrect)),
+        }
+    }
+}
+
+impl<'a, const VALIDATED: bool> TryFrom<Tx<'a, VALIDATED>> for V2Tx<'a, VALIDATED> {
+    type Error = Tx<'a, VALIDATED>;
+
+    fn try_from(value: Tx<'a, VALIDATED>) -> Result<Self, Self::Error> {
+        match value.0 {
+            TxInner::V2(v2) => Ok(v2),
+            incorrect => Err(Tx(incorrect)),
+        }
+    }
+}
+
+impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
+    pub fn format(&self) -> Format {
+        match &self.0 {
+            TxInner::V1(_) => Format::V1,
+            TxInner::V2(_) => Format::V2,
+        }
+    }
+
+    pub fn id(&self) -> &TxId {
+        match &self.0 {
+            TxInner::V1(tx) => &tx.as_inner().id,
+            TxInner::V2(tx) => &tx.as_inner().id,
+        }
+    }
+
+    pub fn last_tx(&self) -> LastTx<'_> {
+        match &self.0 {
+            TxInner::V1(tx) => (&tx.as_inner().last_tx).into(),
+            TxInner::V2(tx) => LastTx::TxAnchor(Mown::Borrowed(&tx.as_inner().last_tx)),
+        }
+    }
+
+    pub fn owner(&self) -> Owner<'_> {
+        match &self.0 {
+            TxInner::V1(tx) => tx.as_inner().signature_data.owner(),
+            TxInner::V2(tx) => tx.as_inner().signature_data.owner(),
+        }
+    }
+
+    pub fn tags(&self) -> &Vec<Tag<'a>> {
+        match &self.0 {
+            TxInner::V1(tx) => tx.as_inner().tags.as_ref(),
+            TxInner::V2(tx) => tx.as_inner().tags.as_ref(),
+        }
+    }
+
+    pub fn target(&self) -> Option<&WalletAddress> {
+        match &self.0 {
+            TxInner::V1(tx) => tx.as_inner().target.as_ref(),
+            TxInner::V2(tx) => tx.as_inner().target.as_ref(),
+        }
+    }
+
+    pub fn quantity(&self) -> Option<&Quantity> {
+        match &self.0 {
+            TxInner::V1(tx) => tx.as_inner().quantity.as_ref(),
+            TxInner::V2(tx) => tx.as_inner().quantity.as_ref(),
+        }
+    }
+
+    pub fn data(&'a self) -> Option<Data<'a>> {
+        match &self.0 {
+            TxInner::V1(tx) => tx
+                .as_inner()
+                .data
+                .as_ref()
+                .map(|d| Data::Embedded(Mown::Borrowed(d))),
+
+            TxInner::V2(tx) => tx.as_inner().data_root.as_ref().map(|dr| {
+                Data::External(Mown::Owned(ExternalData {
+                    size: tx.as_inner().data_size,
+                    root: dr.clone(),
+                }))
+            }),
+        }
+    }
+
+    pub fn reward(&self) -> &Reward {
+        match &self.0 {
+            TxInner::V1(tx) => &tx.as_inner().reward,
+            TxInner::V2(tx) => &tx.as_inner().reward,
+        }
+    }
+
+    pub fn signature(&'a self) -> Signature<'a> {
+        match &self.0 {
+            TxInner::V1(tx) => tx.as_inner().signature_data.signature(),
+            TxInner::V2(tx) => tx.as_inner().signature_data.signature(),
+        }
+    }
+
+    pub fn is_validated(&self) -> bool {
+        VALIDATED
+    }
+
+    pub fn into_owned(self) -> Tx<'static, VALIDATED> {
+        Tx(self.0.into_owned())
+    }
+}
+
+pub enum Data<'a> {
+    Embedded(Mown<'a, EmbeddedData<'a>>),
+    External(Mown<'a, ExternalData<'a>>),
+}
+
+pub struct ExternalData<'a> {
+    size: u64,
+    root: Blob<'a>, //todo
+}
+
+impl<'a> ExternalData<'a> {
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum ValidationError {
+    #[error(transparent)]
+    V1TxValidationError(#[from] V1TxDataError),
+    #[error(transparent)]
+    V2TxValidationError(#[from] V2TxDataError),
+}
+
+impl<'a> UnvalidatedTx<'a> {
+    pub fn validate(self) -> Result<ValidatedTx<'a>, (Self, ValidationError)> {
+        match self.0 {
+            TxInner::V1(v1) => {
+                Ok(Tx(TxInner::V1(v1.validate().map_err(|(v1, err)| {
+                    (v1.into(), ValidationError::from(err))
+                })?)))
+            }
+            TxInner::V2(v2) => {
+                Ok(Tx(TxInner::V2(v2.validate().map_err(|(v2, err)| {
+                    (v2.into(), ValidationError::from(err))
+                })?)))
+            }
+        }
+    }
+}
+
+impl UnvalidatedTx<'static> {
+    pub fn from_json<J: JsonSource>(json: J) -> Result<Self, TxError> {
+        RawTx::from_json(json)?.try_into()
+    }
+}
+
+impl<'a> ValidatedTx<'a> {
+    pub fn invalidate(self) -> UnvalidatedTx<'a> {
+        match self.0 {
+            TxInner::V1(v1) => v1.invalidate().into(),
+            TxInner::V2(v2) => v2.invalidate().into(),
+        }
+    }
+
+    pub fn to_json_string(&self) -> Result<String, JsonError> {
+        match &self.0 {
+            TxInner::V1(v1) => v1.to_json_string(),
+            TxInner::V2(v2) => v2.to_json_string(),
+        }
+    }
+
+    pub fn to_json(&self) -> Result<JsonValue, JsonError> {
+        match &self.0 {
+            TxInner::V1(v1) => v1.to_json(),
+            TxInner::V2(v2) => v2.to_json(),
+        }
+    }
+}
+
+impl<'a> TryFrom<UnvalidatedRawTx<'a>> for UnvalidatedTx<'a> {
+    type Error = TxError;
+
+    fn try_from(value: UnvalidatedRawTx<'a>) -> Result<Self, Self::Error> {
+        UnvalidatedTx::try_from(value.validate().map_err(|(_, err)| TxError::from(err))?)
+    }
+}
+
+impl<'a> TryFrom<ValidatedRawTx<'a>> for UnvalidatedTx<'a> {
+    type Error = TxError;
+
+    fn try_from(value: ValidatedRawTx<'a>) -> Result<Self, Self::Error> {
+        match value.as_inner().format {
+            Format::V1 => Ok(Self(TxInner::V1(UnvalidatedV1Tx::try_from_raw(value)?))),
+            Format::V2 => Ok(Self(TxInner::V2(UnvalidatedV2Tx::try_from_raw(value)?))),
+        }
+    }
+}
 
 pub struct TxKind;
 pub struct TxSignatureKind;
@@ -41,6 +278,16 @@ pub enum Owner<'a> {
     Rsa4096(Mown<'a, WalletPk<RsaPublicKey<4096>>>),
     Rsa2048(Mown<'a, WalletPk<RsaPublicKey<2048>>>),
 }
+
+impl<'a> Owner<'a> {
+    pub fn address(&self) -> WalletAddress {
+        match self {
+            Self::Rsa4096(inner) => inner.derive_address(),
+            Self::Rsa2048(inner) => inner.derive_address(),
+        }
+    }
+}
+
 impl AsBlob for Owner<'_> {
     fn as_blob(&self) -> Blob<'_> {
         match self {
@@ -53,6 +300,15 @@ impl AsBlob for Owner<'_> {
 pub enum Signature<'a> {
     Rsa4096(Mown<'a, TxSignature<RsaPss<4096>>>),
     Rsa2048(Mown<'a, TxSignature<RsaPss<2048>>>),
+}
+
+impl<'a> Signature<'a> {
+    pub fn signature_type(&self) -> SignatureType {
+        match self {
+            Self::Rsa4096(_) => SignatureType::RsaPss,
+            Self::Rsa2048(_) => SignatureType::RsaPss,
+        }
+    }
 }
 
 impl AsBlob for Signature<'_> {
@@ -103,6 +359,8 @@ pub enum TxError {
     V2DataError(#[from] V2TxDataError),
     #[error(transparent)]
     SignatureError(#[from] signature::Error),
+    #[error(transparent)]
+    ValidationError(#[from] ValidationError),
     #[error(transparent)]
     Other(anyhow::Error),
 }
@@ -189,70 +447,101 @@ impl Display for TxAnchor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum LastTx {
-    V1(TxId),
-    V2(TxAnchor),
+#[derive(Debug, PartialEq)]
+pub enum LastTx<'a> {
+    TxId(Mown<'a, TxId>),
+    TxAnchor(Mown<'a, TxAnchor>),
 }
 
-impl<'a> TryFrom<Blob<'a>> for LastTx {
+impl<'a> LastTx<'a> {
+    pub fn into_owned(self) -> LastTx<'static> {
+        match self {
+            Self::TxId(id) => LastTx::TxId(Mown::Owned(id.into_owned())),
+            Self::TxAnchor(anchor) => LastTx::TxAnchor(Mown::Owned(anchor.into_owned())),
+        }
+    }
+}
+
+impl<'a> Clone for LastTx<'a> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::TxId(Mown::Owned(id)) => Self::TxId(Mown::Owned(id.clone())),
+            Self::TxId(Mown::Borrowed(id)) => Self::TxId(Mown::Borrowed(*id)),
+            Self::TxAnchor(Mown::Owned(anchor)) => Self::TxAnchor(Mown::Owned(anchor.clone())),
+            Self::TxAnchor(Mown::Borrowed(anchor)) => Self::TxAnchor(Mown::Borrowed(*anchor)),
+        }
+    }
+}
+
+impl<'a> From<&'a LastTx<'a>> for LastTx<'a> {
+    fn from(value: &'a LastTx<'a>) -> Self {
+        match value {
+            LastTx::TxId(Mown::Owned(id)) => LastTx::TxId(Mown::Borrowed(id)),
+            LastTx::TxId(Mown::Borrowed(id)) => LastTx::TxId(Mown::Borrowed(*id)),
+            LastTx::TxAnchor(Mown::Owned(anchor)) => LastTx::TxAnchor(Mown::Borrowed(anchor)),
+            LastTx::TxAnchor(Mown::Borrowed(anchor)) => LastTx::TxAnchor(Mown::Borrowed(*anchor)),
+        }
+    }
+}
+
+impl<'a> TryFrom<Blob<'a>> for LastTx<'a> {
     type Error =
         LastTxError<<TxId as TryFrom<Blob<'a>>>::Error, <TxAnchor as TryFrom<Blob<'a>>>::Error>;
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
         match value.len() {
-            32 => Ok(Self::V1(
+            32 => Ok(Self::TxId(Mown::Owned(
                 TxId::try_from(value).map_err(LastTxError::V1Error)?,
-            )),
-            48 => Ok(Self::V2(
+            ))),
+            48 => Ok(Self::TxAnchor(Mown::Owned(
                 TxAnchor::try_from(value).map_err(LastTxError::V2Error)?,
-            )),
+            ))),
             invalid => Err(LastTxError::InvalidLength(invalid)),
         }
     }
 }
 
-impl Display for LastTx {
+impl Display for LastTx<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::V1(tx_id) => Display::fmt(tx_id, f),
-            Self::V2(tx_anchor) => Display::fmt(tx_anchor, f),
+            Self::TxId(tx_id) => Display::fmt(tx_id, f),
+            Self::TxAnchor(tx_anchor) => Display::fmt(tx_anchor, f),
         }
     }
 }
 
-impl DeepHashable for LastTx {
+impl DeepHashable for LastTx<'_> {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
         match self {
-            Self::V1(tx_id) => tx_id.deep_hash(),
-            Self::V2(tx_anchor) => tx_anchor.deep_hash(),
+            Self::TxId(tx_id) => tx_id.deep_hash(),
+            Self::TxAnchor(tx_anchor) => tx_anchor.deep_hash(),
         }
     }
 }
 
-impl Hashable for LastTx {
+impl Hashable for LastTx<'_> {
     fn feed<H: Hasher>(&self, hasher: &mut H) {
         match self {
-            Self::V1(tx_id) => tx_id.feed(hasher),
-            Self::V2(tx_anchor) => tx_anchor.feed(hasher),
+            Self::TxId(tx_id) => tx_id.feed(hasher),
+            Self::TxAnchor(tx_anchor) => tx_anchor.feed(hasher),
         }
     }
 }
 
-impl AsRef<[u8]> for LastTx {
+impl AsRef<[u8]> for LastTx<'_> {
     fn as_ref(&self) -> &[u8] {
         match self {
-            Self::V1(tx_id) => tx_id.as_slice(),
-            Self::V2(tx_anchor) => tx_anchor.as_slice(),
+            Self::TxId(tx_id) => tx_id.as_slice(),
+            Self::TxAnchor(tx_anchor) => tx_anchor.as_slice(),
         }
     }
 }
 
-impl AsBlob for LastTx {
+impl AsBlob for LastTx<'_> {
     fn as_blob(&self) -> Blob<'_> {
         match self {
-            Self::V1(tx_id) => tx_id.as_blob(),
-            Self::V2(tx_anchor) => tx_anchor.as_blob(),
+            Self::TxId(tx_id) => tx_id.as_blob(),
+            Self::TxAnchor(tx_anchor) => tx_anchor.as_blob(),
         }
     }
 }
@@ -352,6 +641,15 @@ pub struct Tag<'a> {
     pub value: TagValue<'a>,
 }
 
+impl<'a> Tag<'a> {
+    pub fn into_owned(self) -> Tag<'static> {
+        Tag {
+            name: self.name.into_owned(),
+            value: self.value.into_owned(),
+        }
+    }
+}
+
 pub struct TagNameKind;
 pub type TagName<'a> = TypedBlob<'a, TagNameKind>;
 
@@ -435,5 +733,105 @@ pub type Reward = TypedMoney<TxRewardKind, Winston>;
 impl Reward {
     pub(crate) fn from<I: Into<Money<Winston>>>(money: I) -> Self {
         Self::from_inner(money.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::base64::ToBase64;
+    use crate::tx::{Data, Format, SignatureType, UnvalidatedTx};
+
+    static TX_V1: &'static [u8] = include_bytes!("../../testdata/tx_v1.json");
+    static TX_V1_2: &'static [u8] = include_bytes!("../../testdata/tx_v1_2.json");
+    static TX_V2: &'static [u8] = include_bytes!("../../testdata/tx_v2.json");
+    static TX_V2_2: &'static [u8] = include_bytes!("../../testdata/tx_v2_2.json");
+    #[test]
+    fn v1() -> anyhow::Result<()> {
+        let unvalidated = UnvalidatedTx::from_json(TX_V1)?;
+        assert!(!unvalidated.is_validated());
+        let validated = unvalidated.validate().map_err(|(_, e)| e)?;
+        assert!(validated.is_validated());
+
+        assert_eq!(validated.format(), Format::V1);
+
+        assert_eq!(
+            validated.id().to_base64(),
+            "BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ"
+        );
+
+        assert_eq!(
+            validated.signature().signature_type(),
+            SignatureType::RsaPss
+        );
+
+        assert_eq!(
+            validated.owner().address().to_base64(),
+            "_qa4arkdjK2X9SjechexnWzTtbOKcPkBPhrDDej6lI8"
+        );
+
+        match validated.data() {
+            Some(Data::Embedded(data)) => {
+                assert_eq!(data.len(), 1033478);
+            }
+            _ => panic!("invalid data"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn v1_rountrip() -> anyhow::Result<()> {
+        let unvalidated = UnvalidatedTx::from_json(TX_V1_2)?;
+        let validated = unvalidated.validate().map_err(|(_, e)| e)?;
+        let json = validated.to_json_string()?;
+        let unvalidated = UnvalidatedTx::from_json(&json)?;
+        let validated_2 = unvalidated.validate().map_err(|(_, e)| e)?;
+        assert_eq!(validated, validated_2);
+        Ok(())
+    }
+
+    #[test]
+    fn v2() -> anyhow::Result<()> {
+        let unvalidated = UnvalidatedTx::from_json(TX_V2)?;
+        assert!(!unvalidated.is_validated());
+        let validated = unvalidated.validate().map_err(|(_, e)| e)?;
+        assert!(validated.is_validated());
+
+        assert_eq!(validated.format(), Format::V2);
+
+        assert_eq!(
+            validated.id().to_base64(),
+            "bXGqzNQNmHTeL54cUQ6wPo-MO0thLP44FeAoM93kEwk"
+        );
+
+        assert_eq!(
+            validated.signature().signature_type(),
+            SignatureType::RsaPss
+        );
+
+        assert_eq!(
+            validated.owner().address().to_base64(),
+            "OK_m2Tk41N94KZLl5WQSx_-iNWbvcp8EMfrYsel_QeQ"
+        );
+
+        match validated.data() {
+            Some(Data::External(data)) => {
+                assert_eq!(data.size(), 128355);
+            }
+            _ => panic!("invalid data"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn v2_rountrip() -> anyhow::Result<()> {
+        let unvalidated = UnvalidatedTx::from_json(TX_V2_2)?;
+        let validated = unvalidated.validate().map_err(|(_, e)| e)?;
+        let json = validated.to_json_string()?;
+        let unvalidated = UnvalidatedTx::from_json(&json)?;
+        let validated_2 = unvalidated.validate().map_err(|(_, e)| e)?;
+        assert_eq!(validated, validated_2);
+        Ok(())
     }
 }

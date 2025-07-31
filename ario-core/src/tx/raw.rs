@@ -24,6 +24,12 @@ use thiserror::Error;
 #[repr(transparent)]
 pub(super) struct RawTx<'a, const VALIDATED: bool = false>(RawTxData<'a>);
 
+impl<'a, const VALIDATED: bool> RawTx<'a, VALIDATED> {
+    pub(super) fn as_inner(&self) -> &RawTxData<'a> {
+        &self.0
+    }
+}
+
 pub(super) type UnvalidatedRawTx<'a> = RawTx<'a, false>;
 pub(super) type ValidatedRawTx<'a> = RawTx<'a, true>;
 
@@ -49,11 +55,11 @@ impl<'a> ValidatedRawTx<'a> {
         self.0
     }
 
-    pub fn to_json_string(&self) -> Result<String, JsonError> {
+    pub(super) fn to_json_string(&self) -> Result<String, JsonError> {
         self.0.to_json_string()
     }
 
-    pub fn to_json(&self) -> Result<JsonValue, JsonError> {
+    pub(super) fn to_json(&self) -> Result<JsonValue, JsonError> {
         self.0.to_json()
     }
 }
