@@ -1,4 +1,5 @@
-use crate::Address;
+use crate::base64::{TryFromBase64, TryFromBase64Error};
+use crate::blob::Blob;
 use crate::crypto::hash::{Digest, HashableExt, Sha256};
 use crate::crypto::keys;
 use crate::crypto::keys::{KeyError, PublicKey, SecretKey, TypedPublicKey, TypedSecretKey};
@@ -8,7 +9,10 @@ use crate::crypto::signature::VerifySigExt;
 use crate::crypto::signature::{Scheme as SignatureScheme, SupportsSignatures};
 use crate::tx::{TxHash, TxSignature};
 use crate::typed::FromInner;
+use crate::{Address, blob};
 use bytemuck::TransparentWrapper;
+use std::convert::Infallible;
+use std::str::FromStr;
 use thiserror::Error;
 
 pub struct WalletKind;
@@ -30,6 +34,23 @@ where
     <SK::Scheme as SupportsSignatures>::Scheme: SupportedSignatureScheme,
 {
     type SigScheme = <SK::Scheme as SupportsSignatures>::Scheme;
+}
+
+impl<S: SignatureScheme, SK: WalletSecretKey<SigScheme = S>> Wallet<SK>
+where
+    for<'a> S: SignatureScheme<Message<'a> = &'a Digest<Sha256>>,
+{
+    pub(crate) fn sign_tx(&self, tx_hash: &TxHash) -> Result<TxSignature<S>, String> {
+        let sig = match tx_hash {
+            TxHash::DeepHash(deep_hash) => {
+                let tx_hash = deep_hash.digest();
+                self.sign_impl(&tx_hash)
+            }
+            TxHash::Shallow(shallow) => self.sign_impl(shallow),
+        }
+        .map_err(|e| e.into().to_string())?;
+        Ok(TxSignature::from_inner(sig))
+    }
 }
 
 pub(crate) trait WalletPublicKey: PublicKey + VerifySigExt<Self::SigScheme> {
@@ -58,6 +79,23 @@ impl<SK: WalletSecretKey> Wallet<SK> {
 }
 
 pub type WalletAddress = Address<WalletKind>;
+
+#[derive(Error, Debug)]
+pub enum WalletAddressError {
+    #[error(transparent)]
+    Base64Error(#[from] TryFromBase64Error<Infallible>),
+    #[error(transparent)]
+    BlobError(#[from] blob::Error),
+}
+
+impl FromStr for WalletAddress {
+    type Err = WalletAddressError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = Blob::try_from_base64(s.as_bytes())?;
+        Ok(WalletAddress::try_from(bytes)?)
+    }
+}
 
 impl<PK: WalletPublicKey> WalletPk<PK> {
     pub fn derive_address(&self) -> WalletAddress {

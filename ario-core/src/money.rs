@@ -7,6 +7,7 @@ use derive_where::derive_where;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
+use std::convert::Infallible;
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::ops::{Add, Deref, Div, Mul, Sub};
@@ -95,6 +96,12 @@ pub enum MoneyError {
     RepresentationError,
     #[error(transparent)]
     ParseError(ParseBigDecimalError),
+}
+
+impl From<Infallible> for MoneyError {
+    fn from(_: Infallible) -> Self {
+        unreachable!("infallible can never be an error")
+    }
 }
 
 #[derive_where(Clone)]
@@ -192,6 +199,54 @@ impl<C: Currency> FromStr for Money<C> {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::try_from(BigDecimal::from_str(s).map_err(ParseError)?)
+    }
+}
+
+macro_rules! impl_try_from_int {
+    ($($int_type:ty),*) => {
+        $(
+            impl<C: Currency> TryFrom<$int_type> for Money<C> {
+                type Error = MoneyError;
+
+                fn try_from(value: $int_type) -> Result<Self, Self::Error> {
+                    Self::try_from(BigDecimal::from(value))
+                }
+            }
+        )*
+    };
+}
+
+impl_try_from_int!(i8, i16, i32, i64, i128, u8, u16, u32, u64, u128);
+
+impl<C: Currency> TryFrom<isize> for Money<C> {
+    type Error = MoneyError;
+
+    fn try_from(value: isize) -> Result<Self, Self::Error> {
+        Self::try_from(BigDecimal::from(value as i64))
+    }
+}
+
+impl<C: Currency> TryFrom<usize> for Money<C> {
+    type Error = MoneyError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        Self::try_from(BigDecimal::from(value as u64))
+    }
+}
+
+impl<C: Currency> TryFrom<BigDecimal> for Money<C> {
+    type Error = MoneyError;
+
+    fn try_from(value: BigDecimal) -> Result<Self, Self::Error> {
+        Self::try_from(value)
+    }
+}
+
+impl<'a, C: Currency> TryFrom<&'a str> for Money<C> {
+    type Error = MoneyError;
+
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        Money::<C>::from_str(value)
     }
 }
 

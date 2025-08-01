@@ -7,7 +7,7 @@ use crate::tx::raw::{RawTxData, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::rsa::RsaSignatureData;
 use crate::tx::{
     CommonData, CommonTxDataError, EmbeddedData, Format, LastTx, Quantity, Reward, SignatureType,
-    Tag, TxError, TxHash, TxId,
+    Tag, TxDeepHash, TxError, TxHash, TxId, TxShallowHash,
 };
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
@@ -121,11 +121,11 @@ pub(super) struct V1TxData<'a> {
 impl<'a> V1TxData<'a> {
     pub fn tx_hash(&self) -> TxHash {
         if self.denomination.is_some() {
-            TxHash::DeepHash(self.deep_hash::<Sha384>())
+            TxHash::DeepHash(TxDeepHash::from_inner(self.deep_hash::<Sha384>()))
         } else {
             let mut hasher = Sha256::new();
             self.feed(&mut hasher);
-            TxHash::Shallow(hasher.finalize())
+            TxHash::Shallow(TxShallowHash::from_inner(hasher.finalize()))
         }
     }
 
@@ -258,7 +258,6 @@ impl Validator<V1TxData<'_>> for V1TxDataValidator {
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::money::{CurrencyExt, Winston};
     use crate::tx::raw::ValidatedRawTx;
     use crate::tx::v1::{TxError, UnvalidatedV1Tx, V1SignatureData, V1TxDataError};
     use crate::tx::{CommonTxDataError, Format, Quantity, Reward};
@@ -381,10 +380,7 @@ mod tests {
         assert_eq!(tx_data.quantity.as_ref().unwrap(), ZERO_QUANTITY.deref(),);
         assert_eq!(tx_data.data.as_ref().unwrap().len(), 1033478);
         //todo: verify data value
-        assert_eq!(
-            &tx_data.reward,
-            &Reward::from(Winston::from_str("124145681682")?),
-        );
+        assert_eq!(&tx_data.reward, &Reward::try_from("124145681682")?);
         Ok(())
     }
 

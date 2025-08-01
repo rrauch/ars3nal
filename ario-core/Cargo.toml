@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 bigdecimal = { version = "0.4", features = ["serde-json"] }
+bon = "3.6"
 bytemuck = { version = "1.23", features = ["derive"] }
 bytes = "1"
 ct-codecs = "1.1"

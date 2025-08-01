@@ -45,12 +45,14 @@ impl<'a> From<ValidatedRawTx<'a>> for RawTxData<'a> {
     }
 }
 
-impl<'a> ValidatedRawTx<'a> {
-    /// Ensure the raw tx data is *actually* valid when calling this function.
-    pub(super) fn danger_from_raw_tx_data(pre_validated_data: RawTxData<'a>) -> Self {
-        Self(pre_validated_data)
+impl<'a, const VALIDATED: bool> RawTx<'a, VALIDATED> {
+    /// Ensure the raw tx data is *actually* valid when calling this function in a `VALIDATED` context
+    pub(super) fn danger_from_raw_tx_data(data: RawTxData<'a>) -> Self {
+        Self(data)
     }
+}
 
+impl<'a> ValidatedRawTx<'a> {
     pub(super) fn into_inner(self) -> RawTxData<'a> {
         self.0
     }

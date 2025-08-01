@@ -57,6 +57,15 @@ impl<'a> DeepHashable for &'a str {
     }
 }
 
+impl<'a, T> DeepHashable for &'a T
+where
+    T: DeepHashable,
+{
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        T::deep_hash(self)
+    }
+}
+
 impl<T> DeepHashable for Option<T>
 where
     T: DeepHashable,

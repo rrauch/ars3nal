@@ -1,18 +1,26 @@
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384};
+use crate::crypto::rsa::{Rsa, RsaPrivateKey, SupportedRsaScheme};
+use crate::crypto::signature;
+use crate::crypto::signature::SigningError;
 use crate::json::JsonSource;
+use crate::money::{Money, MoneyError, Winston};
 use crate::tx::CommonTxDataError::MissingOwner;
 use crate::tx::Format::V2;
-use crate::tx::raw::{RawTxData, UnvalidatedRawTx, ValidatedRawTx};
+use crate::tx::raw::{RawTx, RawTxData, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::rsa::RsaSignatureData;
 use crate::tx::{
     CommonData, CommonTxDataError, Format, Owner, Quantity, Reward, Signature, SignatureType, Tag,
-    TxAnchor, TxError, TxHash, TxId,
+    TxAnchor, TxDeepHash, TxError, TxHash, TxId,
 };
+use crate::tx::{RewardError, Transfer};
+use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
-use crate::wallet::WalletAddress;
+use crate::wallet::{Wallet, WalletAddress};
 use crate::{JsonError, JsonValue};
+use anyhow::anyhow;
+use bon::Builder;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -32,15 +40,18 @@ impl<'a, const VALIDATED: bool> V2Tx<'a, VALIDATED> {
     }
 }
 
-impl<'a> From<ValidatedV2Tx<'a>> for ValidatedRawTx<'a> {
-    fn from(value: ValidatedV2Tx<'a>) -> Self {
+impl<'a, const VALIDATED: bool> From<V2Tx<'a, VALIDATED>> for RawTx<'a, VALIDATED> {
+    fn from(value: V2Tx<'a, VALIDATED>) -> Self {
         let v2 = value.0;
         Self::danger_from_raw_tx_data(RawTxData {
             format: V2,
             id: v2.id.as_blob().into_owned(),
             last_tx: v2.last_tx.as_blob().into_owned(),
             denomination: v2.denomination,
-            owner: Some(v2.signature_data.owner().as_blob().into_owned()),
+            owner: v2
+                .signature_data
+                .tx_owner()
+                .map(|o| o.as_blob().into_owned()),
             tags: v2.tags.into_iter().map(|t| t.into()).collect(),
             target: v2.target.map(|w| w.as_blob().into_owned()),
             quantity: v2.quantity.map(|q| q.into_inner().into()),
@@ -134,6 +145,12 @@ impl V2SignatureData {
         }
     }
 
+    pub(super) fn tx_owner(&self) -> Option<Owner> {
+        match self {
+            Self::Rsa(rsa) => Some(rsa.owner()),
+        }
+    }
+
     pub(super) fn signature(&self) -> Signature {
         match self {
             Self::Rsa(rsa) => rsa.signature(),
@@ -149,12 +166,6 @@ impl V2SignatureData {
     fn signature_type(&self) -> SignatureType {
         match self {
             Self::Rsa(_) => SignatureType::RsaPss,
-        }
-    }
-
-    fn deep_hash<H: Hasher>(&self) -> Option<Digest<H>> {
-        match self {
-            Self::Rsa(rsa) => Some(rsa.deep_hash()),
         }
     }
 }
@@ -175,7 +186,14 @@ pub(super) struct V2TxData<'a> {
 
 impl<'a> V2TxData<'a> {
     pub fn tx_hash(&self) -> TxHash {
-        TxHash::DeepHash(self.deep_hash::<Sha384>())
+        let owner = self
+            .signature_data
+            .tx_owner()
+            .map(|o| o.as_blob().into_owned());
+
+        let mut tx_hash_builder = TxHashBuilder::from(self);
+        tx_hash_builder.owner = owner.as_ref();
+        tx_hash_builder.tx_hash()
     }
 
     fn into_owned(self) -> V2TxData<'static> {
@@ -245,11 +263,45 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
     }
 }
 
-impl DeepHashable for V2TxData<'_> {
+struct TxHashBuilder<'a> {
+    owner: Option<&'a Blob<'a>>,
+    target: Option<&'a WalletAddress>,
+    quantity: Option<&'a Quantity>,
+    reward: &'a Reward,
+    last_tx: &'a TxAnchor,
+    tags: &'a Vec<Tag<'a>>,
+    data_size: u64,
+    data_root: Option<&'a Blob<'a>>, //todo
+    denomination: Option<u32>,
+}
+
+impl<'a> From<&'a V2TxData<'a>> for TxHashBuilder<'a> {
+    fn from(value: &'a V2TxData<'a>) -> Self {
+        Self {
+            owner: None,
+            target: value.target.as_ref(),
+            quantity: value.quantity.as_ref(),
+            reward: &value.reward,
+            last_tx: &value.last_tx,
+            tags: &value.tags,
+            data_size: value.data_size,
+            data_root: value.data_root.as_ref(),
+            denomination: value.denomination.clone(),
+        }
+    }
+}
+
+impl TxHashBuilder<'_> {
+    pub fn tx_hash(&self) -> TxHash {
+        TxHash::DeepHash(TxDeepHash::from_inner(self.deep_hash::<Sha384>()))
+    }
+}
+
+impl DeepHashable for TxHashBuilder<'_> {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
         let mut elements = vec![Format::V2.deep_hash()];
-        if let Some(signature_data) = self.signature_data.deep_hash() {
-            elements.push(signature_data);
+        if let Some(owner) = self.owner {
+            elements.push(owner.deep_hash());
         }
         elements.extend([
             self.target.deep_hash(),
@@ -288,6 +340,140 @@ impl Validator<V2TxData<'_>> for V2TxDataValidator {
 
     fn validate(data: &V2TxData) -> Result<(), Self::Error> {
         data.signature_data.verify_sig(&(data.tx_hash()))
+    }
+}
+
+trait TxSigner {
+    fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError>;
+}
+
+impl TxSigner for Wallet<RsaPrivateKey<4096>> {
+    fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError> {
+        sign_rsa::<4096>(self, data)
+    }
+}
+
+impl TxSigner for Wallet<RsaPrivateKey<2048>> {
+    fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError> {
+        sign_rsa::<2048>(self, data)
+    }
+}
+
+fn sign_rsa<const BIT: usize>(
+    wallet: &Wallet<RsaPrivateKey<BIT>>,
+    data: &TxDraft,
+) -> Result<V2SignatureData, TxError>
+where
+    Rsa<BIT>: SupportedRsaScheme,
+{
+    let pk = wallet.public_key().clone();
+    let pk_blob = pk.as_blob();
+    let mut tx_hash_builder = TxHashBuilder::from(data);
+    tx_hash_builder.owner = Some(&pk_blob);
+    let tx_hash = tx_hash_builder.tx_hash();
+
+    let sig = wallet
+        .sign_tx(&tx_hash)
+        .map_err(|s| TxError::Other(anyhow!("tx signing failed: {}", s)))?;
+
+    Ok(V2SignatureData::Rsa(
+        RsaSignatureData::from_rsa(pk, sig)
+            .map_err(|e| signature::Error::SigningError(SigningError::Other(e.to_string())))?,
+    ))
+}
+
+#[derive(Builder)]
+#[builder(
+    builder_type(
+      name = V2TxBuilder,
+      vis = "pub",
+    ),
+    derive(Clone, Debug),
+    finish_fn(
+      name = draft,
+    )
+)]
+pub struct TxDraft<'a> {
+    #[builder(with = |r: impl TryInto<Money<Winston>, Error: Into<MoneyError>>| -> Result<_, RewardError> {
+        Ok(Reward::try_from(r)?)
+    })]
+    reward: Reward,
+    #[builder(default)]
+    tags: Vec<Tag<'a>>,
+    last_tx: TxAnchor,
+    transfer: Option<Transfer>,
+    data_upload: Option<DataUpload<'a>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DataUpload<'a> {
+    data_size: u64,
+    data_root: Blob<'a>, // todo
+}
+
+impl<'a> DataUpload<'a> {
+    pub fn new(data_root: Blob<'a>, data_size: u64) -> Self {
+        Self {
+            data_root,
+            data_size,
+        }
+    }
+}
+
+impl<'a> From<&'a TxDraft<'a>> for TxHashBuilder<'a> {
+    fn from(value: &'a TxDraft<'a>) -> Self {
+        let (target, quantity) = match &value.transfer {
+            Some(transfer) => (Some(&transfer.target), Some(&transfer.quantity)),
+            None => (None, None),
+        };
+
+        let (data_size, data_root) = match &value.data_upload {
+            Some(upload) => (upload.data_size, Some(&upload.data_root)),
+            None => (0, None),
+        };
+
+        Self {
+            owner: None,
+            target,
+            quantity,
+            reward: &value.reward,
+            last_tx: &value.last_tx,
+            tags: &value.tags,
+            data_size,
+            data_root,
+            denomination: None,
+        }
+    }
+}
+
+impl<'a> TxDraft<'a> {
+    pub fn sign<T: TxSigner>(self, signer: &T) -> Result<ValidatedV2Tx<'a>, TxError> {
+        let signature_data = signer.sign(&self)?;
+        let (target, quantity) = match self.transfer {
+            Some(transfer) => (Some(transfer.target), Some(transfer.quantity)),
+            None => (None, None),
+        };
+
+        let (data_size, data_root) = match self.data_upload {
+            Some(upload) => (upload.data_size, Some(upload.data_root)),
+            None => (0, None),
+        };
+
+        let tx_data = V2TxData {
+            id: signature_data.signature().digest(),
+            last_tx: self.last_tx,
+            tags: self.tags,
+            target,
+            quantity,
+            data_size,
+            data_root,
+            reward: self.reward,
+            signature_data,
+            denomination: None,
+        };
+        V2Tx::try_from_raw(RawTx::from(V2Tx(tx_data)).validate().map_err(|(_, e)| e)?)?
+            .validate()
+            .map_err(|(_, e)| e.into())
     }
 }
 
@@ -339,10 +525,7 @@ mod tests {
         assert_eq!(tx_data.quantity.as_ref().unwrap(), ZERO_QUANTITY.deref(),);
         //todo: data root
         assert_eq!(tx_data.data_size, 128355);
-        assert_eq!(
-            tx_data.reward,
-            Reward::from(Winston::from_str("557240107")?),
-        );
+        assert_eq!(tx_data.reward, Reward::try_from(557240107)?,);
 
         assert_eq!(tx_data.tags.len(), 6);
         assert_eq!(
@@ -410,13 +593,13 @@ mod tests {
         );
         assert_eq!(
             tx_data.quantity.as_ref(),
-            Some(&Quantity::from(Winston::from_str("2199990000000000")?))
+            Some(&Quantity::try_from(Winston::from_str("2199990000000000")?)?)
         );
         assert_eq!(
             tx_data.target.as_ref().unwrap().to_base64(),
             "fGPsv2_-ueOvwFQF5zvYCRmawBGgc9FiDOXkbfurQtI"
         );
-        assert_eq!(tx_data.reward, Reward::from(Winston::from_str("6727794")?));
+        assert_eq!(tx_data.reward, Reward::try_from(6727794)?);
         Ok(())
     }
 

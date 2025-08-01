@@ -1,11 +1,12 @@
 use crate::blob::Blob;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
-use crate::crypto::rsa::{RsaPss, RsaPublicKey};
+use crate::crypto::rsa::{Rsa, RsaPss, RsaPublicKey, SupportedRsaScheme};
 use crate::crypto::{keys, signature};
 use crate::tx::{CommonTxDataError, Owner, Signature, TxHash, TxSignature, TxSignatureScheme};
 use crate::typed::FromInner;
 use crate::wallet::WalletPk;
+use thiserror::Error;
 
 impl TxSignatureScheme for RsaPss<4096> {
     type Signer = <Self as signature::Scheme>::Signer;
@@ -15,6 +16,12 @@ impl TxSignatureScheme for RsaPss<4096> {
 impl TxSignatureScheme for RsaPss<2048> {
     type Signer = <Self as signature::Scheme>::Signer;
     type Verifier = <Self as signature::Scheme>::Verifier;
+}
+
+#[derive(Error, Debug)]
+pub(crate) enum RsaSignatureError {
+    #[error("unsupported rsa bit length: '{0}'")]
+    UnsupportedBitLength(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +37,36 @@ pub(crate) enum RsaSignatureData {
 }
 
 impl RsaSignatureData {
+    pub(super) fn from_rsa<const BIT: usize>(
+        owner: WalletPk<RsaPublicKey<BIT>>,
+        signature: TxSignature<RsaPss<BIT>>,
+    ) -> Result<Self, RsaSignatureError>
+    where
+        Rsa<BIT>: SupportedRsaScheme,
+    {
+        match BIT {
+            4096 => {
+                // SAFETY: BIT is 4096, so types are identical
+                unsafe {
+                    Ok(Self::Rsa4096 {
+                        owner: std::mem::transmute(owner),
+                        signature: std::mem::transmute(signature),
+                    })
+                }
+            }
+            2048 => {
+                // SAFETY: BIT is 2048, so types are identical
+                unsafe {
+                    Ok(Self::Rsa2048 {
+                        owner: std::mem::transmute(owner),
+                        signature: std::mem::transmute(signature),
+                    })
+                }
+            }
+            unsupported => Err(RsaSignatureError::UnsupportedBitLength(unsupported)),
+        }
+    }
+
     pub(super) fn from_raw<'a>(
         raw_owner: Blob<'a>,
         raw_signature: Blob<'a>,

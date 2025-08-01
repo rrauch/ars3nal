@@ -13,10 +13,10 @@ use crate::crypto::rsa::{RsaPss, RsaPublicKey};
 use crate::crypto::signature::TypedSignature;
 use crate::crypto::{keys, signature};
 use crate::json::JsonSource;
-use crate::money::{CurrencyExt, Money, TypedMoney, Winston};
+use crate::money::{CurrencyExt, Money, MoneyError, TypedMoney, Winston};
 use crate::tx::raw::{RawTag, RawTx, RawTxDataError, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::v1::{UnvalidatedV1Tx, V1Tx, V1TxDataError};
-use crate::tx::v2::{UnvalidatedV2Tx, V2Tx, V2TxDataError};
+use crate::tx::v2::{TxDraft, UnvalidatedV2Tx, V2Tx, V2TxBuilder, V2TxDataError};
 use crate::typed::{FromInner, Typed};
 use crate::validation::ValidateExt;
 use crate::wallet::{WalletAddress, WalletKind, WalletPk};
@@ -25,8 +25,12 @@ use bigdecimal::BigDecimal;
 use mown::Mown;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Debug, Display, Formatter};
+use std::ops::Deref;
 use std::str::FromStr;
+use std::sync::LazyLock;
 use thiserror::Error;
+
+static ZERO_WINSTON: LazyLock<Money<Winston>> = LazyLock::new(|| Winston::zero());
 
 #[derive(Debug, Clone, PartialEq)]
 #[repr(transparent)]
@@ -44,6 +48,14 @@ impl<'a, const VALIDATED: bool> TxInner<'a, VALIDATED> {
             Self::V1(v1) => TxInner::V1(v1.into_owned()),
             Self::V2(v2) => TxInner::V2(v2.into_owned()),
         }
+    }
+}
+
+pub struct TxBuilder;
+
+impl TxBuilder {
+    pub fn v2<'a>() -> V2TxBuilder<'a> {
+        TxDraft::builder()
     }
 }
 
@@ -309,6 +321,13 @@ impl<'a> Signature<'a> {
             Self::Rsa2048(_) => SignatureType::RsaPss,
         }
     }
+
+    pub fn digest(&self) -> TxId {
+        match self {
+            Self::Rsa4096(rsa) => rsa.digest(),
+            Self::Rsa2048(rsa) => rsa.digest(),
+        }
+    }
 }
 
 impl AsBlob for Signature<'_> {
@@ -326,10 +345,11 @@ pub trait TxSignatureScheme: signature::Scheme {
 }
 
 pub type TxSignature<S: TxSignatureScheme> = TypedSignature<TxHash, WalletKind, S>;
-//pub type TxHash = TypedDigest<TxKind, Sha384>;
+pub type TxDeepHash = TypedDigest<TxKind, Sha384>;
+pub type TxShallowHash = TypedDigest<TxKind, Sha256>;
 pub enum TxHash {
-    DeepHash(Digest<Sha384>),
-    Shallow(Digest<Sha256>),
+    DeepHash(TxDeepHash),
+    Shallow(TxShallowHash),
 }
 
 impl TxHash {
@@ -375,10 +395,10 @@ pub enum CommonTxDataError {
     InvalidLastTx(String),
     #[error("invalid target: {0}")]
     InvalidTarget(String),
-    #[error("invalid quantity: {0}")]
-    InvalidQuantity(String),
-    #[error("invalid reward: {0}")]
-    InvalidReward(String),
+    #[error(transparent)]
+    QuantityError(#[from] QuantityError),
+    #[error(transparent)]
+    RewardError(#[from] RewardError),
     #[error("invalid signature: {0}")]
     InvalidSignature(String),
     #[error(transparent)]
@@ -418,14 +438,10 @@ impl<'a> CommonData<'a> {
             .map_err(|e| CommonTxDataError::InvalidTarget(e.to_string()))?;
 
         let quantity = raw_quantity
-            .map(|raw| Winston::try_new(raw).and_then(|w| Ok(Quantity::from(w))))
-            .transpose()
-            .map_err(|e| CommonTxDataError::InvalidQuantity(e.to_string()))?;
+            .map(|raw| Quantity::try_from(raw))
+            .transpose()?;
 
-        let reward = Reward::from_inner(
-            Winston::try_new(raw_reward)
-                .map_err(|e| CommonTxDataError::InvalidReward(e.to_string()))?,
-        );
+        let reward = Reward::try_from(raw_reward)?;
 
         Ok(CommonData {
             id,
@@ -687,34 +703,6 @@ impl Hashable for Tag<'_> {
     }
 }
 
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error(transparent)]
-    TxDataError(#[from] TxDataError),
-}
-
-#[derive(Error, Debug)]
-pub enum TxDataError {
-    #[error(transparent)]
-    JsonError(#[from] JsonError),
-    #[error("Incorrect last_tx variant found")]
-    IncorrectLastTxVariant,
-    #[error("Incorrect data length found: expected '{expected}' but found '{actual}'")]
-    IncorrectDataLen { actual: u64, expected: u64 },
-    #[error("quantity cannot be negative")]
-    NegativeQuantity,
-    #[error("reward cannot be negative")]
-    NegativeReward,
-    #[error("quantity is missing but mandatory for this tx")]
-    MissingQuantity,
-    #[error("target is missing but mandatory for this tx")]
-    MissingTarget,
-    #[error("tx id does not match the signature")]
-    IdSignatureMismatch,
-    #[error("tx signature not valid")]
-    SignatureError,
-}
-
 pub struct EmbeddedDataKind;
 pub type EmbeddedData<'a> = TypedBlob<'a, EmbeddedDataKind>;
 
@@ -722,29 +710,95 @@ pub struct TxQuantityKind;
 pub type Quantity = TypedMoney<TxQuantityKind, Winston>;
 
 impl Quantity {
-    pub(crate) fn from<I: Into<Money<Winston>>>(money: I) -> Self {
-        Self::from_inner(money.into())
+    pub(crate) fn try_from<I, E>(money: I) -> Result<Self, QuantityError>
+    where
+        I: TryInto<Money<Winston>, Error = E>,
+        E: Into<MoneyError>,
+    {
+        let money = money.try_into().map_err(|e| e.into())?;
+        if &money < ZERO_WINSTON.deref() {
+            return Err(QuantityError::NegativeQuantity);
+        }
+        Ok(Self::from_inner(money))
     }
+}
+
+#[derive(Error, Debug)]
+pub enum QuantityError {
+    #[error("quantity cannot be negative")]
+    NegativeQuantity,
+    #[error(transparent)]
+    InvalidQuantity(#[from] MoneyError),
 }
 
 pub struct TxRewardKind;
 pub type Reward = TypedMoney<TxRewardKind, Winston>;
 
 impl Reward {
-    pub(crate) fn from<I: Into<Money<Winston>>>(money: I) -> Self {
-        Self::from_inner(money.into())
+    pub(crate) fn try_from<I, E>(money: I) -> Result<Self, RewardError>
+    where
+        I: TryInto<Money<Winston>, Error = E>,
+        E: Into<MoneyError>,
+    {
+        let money = money.try_into().map_err(|e| e.into())?;
+        if &money < ZERO_WINSTON.deref() {
+            return Err(RewardError::NegativeReward);
+        }
+        Ok(Self::from_inner(money))
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum RewardError {
+    #[error("reward cannot be negative")]
+    NegativeReward,
+    #[error(transparent)]
+    InvalidReward(#[from] MoneyError),
+}
+
+#[derive(Debug, Clone)]
+pub struct Transfer {
+    target: WalletAddress,
+    quantity: Quantity,
+}
+
+impl Transfer {
+    pub fn new(
+        target: WalletAddress,
+        quantity: impl TryInto<Money<Winston>, Error: Into<MoneyError>>,
+    ) -> Result<Self, QuantityError> {
+        Ok(Self {
+            target,
+            quantity: Quantity::try_from(quantity)?,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::tx::{Data, Format, SignatureType, UnvalidatedTx};
+    use crate::blob::Blob;
+    use crate::crypto::keys::SupportedSecretKey;
+    use crate::crypto::rsa::SupportedPrivateKey;
+    use crate::jwk::Jwk;
+    use crate::money::{CurrencyExt, Winston};
+    use crate::tx::v2::DataUpload;
+    use crate::tx::{
+        Data, Format, Quantity, Reward, SignatureType, Transfer, Tx, TxAnchor, TxBuilder,
+        UnvalidatedTx,
+    };
+    use crate::typed::FromInner;
+    use crate::wallet::{Wallet, WalletAddress};
+    use bytes::Bytes;
+    use std::str::FromStr;
 
     static TX_V1: &'static [u8] = include_bytes!("../../testdata/tx_v1.json");
     static TX_V1_2: &'static [u8] = include_bytes!("../../testdata/tx_v1_2.json");
     static TX_V2: &'static [u8] = include_bytes!("../../testdata/tx_v2.json");
     static TX_V2_2: &'static [u8] = include_bytes!("../../testdata/tx_v2_2.json");
+    static WALLET_RSA_JWK: &'static [u8] =
+        include_bytes!("../../testdata/ar_wallet_tests_PS256_65537_fixture.json");
+
     #[test]
     fn v1() -> anyhow::Result<()> {
         let unvalidated = UnvalidatedTx::from_json(TX_V1)?;
@@ -832,6 +886,55 @@ mod tests {
         let unvalidated = UnvalidatedTx::from_json(&json)?;
         let validated_2 = unvalidated.validate().map_err(|(_, e)| e)?;
         assert_eq!(validated, validated_2);
+        Ok(())
+    }
+
+    #[test]
+    fn builder() -> anyhow::Result<()> {
+        let wallet = match SupportedSecretKey::try_from(&Jwk::from_json(WALLET_RSA_JWK)?)? {
+            SupportedSecretKey::Rsa(SupportedPrivateKey::Rsa4096(sk)) => Wallet::from_inner(sk),
+            _ => panic!("wrong key"),
+        };
+
+        let target_str = "OK_m2Tk41N94KZLl5WQSx_-iNWbvcp8EMfrYsel_QeQ";
+
+        let data_root: Blob = Bytes::from_static(&[0u8; 32]).into(); //todo
+        let data_size = data_root.len() as u64;
+
+        let draft = TxBuilder::v2()
+            .reward(1234)?
+            .last_tx(TxAnchor::from_inner([0u8; 48]))
+            .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 101)?)
+            .data_upload(DataUpload::new(data_root.clone(), data_size))
+            .draft();
+
+        let valid_tx = draft.sign(&wallet)?;
+        let json = valid_tx.to_json_string()?;
+        let valid_tx = Tx::from_json(&json)?.validate().map_err(|(_, err)| err)?;
+
+        assert_eq!(
+            valid_tx.reward(),
+            &Reward::try_from(Winston::from_str("1234")?)?,
+        );
+
+        assert_eq!(
+            valid_tx.target(),
+            Some(WalletAddress::from_str(target_str)?).as_ref()
+        );
+
+        assert_eq!(
+            valid_tx.quantity(),
+            Some(Quantity::try_from(Winston::from_str("101")?)?).as_ref()
+        );
+
+        let data = match valid_tx.data() {
+            Some(Data::External(data)) => data,
+            _ => panic!("invalid data"),
+        };
+
+        assert_eq!(data.size, data_size);
+        assert_eq!(data.root, data_root);
+
         Ok(())
     }
 }
