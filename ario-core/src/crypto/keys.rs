@@ -4,7 +4,7 @@ use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::rsa::KeyError as RsaKeyError;
 use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
 use crate::crypto::signature;
-use crate::crypto::signature::{SignExt, Signature, SupportsSignatures, VerifySigExt};
+use crate::crypto::signature::{SignSigExt, Signature, SupportsSignatures, VerifySigExt};
 use crate::jwk::{Jwk, KeyType};
 use crate::typed::Typed;
 use hybrid_array::ArraySize;
@@ -65,7 +65,7 @@ where
     type VerificationError =
         <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::VerificationError;
 
-    fn verify_sig_impl(
+    fn verify_sig(
         &self,
         data: <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::Message<'_>,
         sig: &Signature<<PK::Scheme as SupportsSignatures>::Scheme>,
@@ -74,14 +74,14 @@ where
     }
 }
 
-impl<SK: SecretKey> SignExt<<SK::Scheme as SupportsSignatures>::Scheme> for SK
+impl<SK: SecretKey> SignSigExt<<SK::Scheme as SupportsSignatures>::Scheme> for SK
 where
     SK::Scheme: SupportsSignatures<Signer = SK>,
 {
     type SigningError =
         <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::SigningError;
 
-    fn sign_impl(
+    fn sign_sig(
         &self,
         data: <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::Message<'_>,
     ) -> Result<Signature<<SK::Scheme as SupportsSignatures>::Scheme>, Self::SigningError> {

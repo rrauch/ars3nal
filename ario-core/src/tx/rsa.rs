@@ -103,10 +103,10 @@ impl RsaSignatureData {
 
         match self {
             Self::Rsa4096 { owner, signature } => owner
-                .verify_tx(tx_hash, signature)
+                .verify_tx_hash(tx_hash, signature)
                 .map_err(|e| InvalidSignature(e)),
             Self::Rsa2048 { owner, signature } => owner
-                .verify_tx(tx_hash, signature)
+                .verify_tx_hash(tx_hash, signature)
                 .map_err(|e| InvalidSignature(e)),
         }
     }

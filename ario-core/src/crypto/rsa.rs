@@ -418,7 +418,7 @@ mod tests {
     use crate::crypto::hash::HashableExt;
     use crate::crypto::keys::SecretKey;
     use crate::crypto::rsa::RsaPrivateKey;
-    use crate::crypto::signature::{SignExt, VerifySigExt};
+    use crate::crypto::signature::{SignSigExt, VerifySigExt};
     use rsa::RsaPrivateKey as ExternalRsaPrivateKey;
     use rsa::pkcs8::DecodePrivateKey;
 
@@ -512,8 +512,8 @@ OTOdooS54PVffrqDRHz7dQ==
         let public_key = secret_key.public_key_impl();
         let message = "HEllO wOrlD".as_bytes().digest();
 
-        let signature = secret_key.sign_impl(&message)?;
-        public_key.verify_sig_impl(&message, &signature)?;
+        let signature = secret_key.sign_sig(&message)?;
+        public_key.verify_sig(&message, &signature)?;
         Ok(())
     }
 
@@ -525,8 +525,8 @@ OTOdooS54PVffrqDRHz7dQ==
         let public_key = secret_key.public_key_impl();
 
         let message = "HEllO wOrlD2222".digest();
-        let signature = secret_key.sign_impl(&message)?;
-        public_key.verify_sig_impl(&message, &signature)?;
+        let signature = secret_key.sign_sig(&message)?;
+        public_key.verify_sig(&message, &signature)?;
         Ok(())
     }
 }

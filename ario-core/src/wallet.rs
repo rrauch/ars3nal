@@ -4,7 +4,7 @@ use crate::crypto::hash::{Digest, HashableExt, Sha256};
 use crate::crypto::keys;
 use crate::crypto::keys::{KeyError, PublicKey, SecretKey, TypedPublicKey, TypedSecretKey};
 use crate::crypto::rsa::RsaPss;
-use crate::crypto::signature::SignExt;
+use crate::crypto::signature::SignSigExt;
 use crate::crypto::signature::VerifySigExt;
 use crate::crypto::signature::{Scheme as SignatureScheme, SupportsSignatures};
 use crate::tx::{TxHash, TxSignature};
@@ -23,7 +23,7 @@ pub trait SupportedSignatureScheme: SignatureScheme {}
 
 impl<const BIT: usize> SupportedSignatureScheme for RsaPss<BIT> where RsaPss<BIT>: SignatureScheme {}
 
-pub(crate) trait WalletSecretKey: SecretKey + SignExt<Self::SigScheme> {
+pub(crate) trait WalletSecretKey: SecretKey + SignSigExt<Self::SigScheme> {
     type SigScheme: SupportedSignatureScheme;
 }
 
@@ -40,13 +40,13 @@ impl<S: SignatureScheme, SK: WalletSecretKey<SigScheme = S>> Wallet<SK>
 where
     for<'a> S: SignatureScheme<Message<'a> = &'a Digest<Sha256>>,
 {
-    pub(crate) fn sign_tx(&self, tx_hash: &TxHash) -> Result<TxSignature<S>, String> {
+    pub(crate) fn sign_tx_hash(&self, tx_hash: &TxHash) -> Result<TxSignature<S>, String> {
         let sig = match tx_hash {
             TxHash::DeepHash(deep_hash) => {
                 let tx_hash = deep_hash.digest();
-                self.sign_impl(&tx_hash)
+                self.sign_sig(&tx_hash)
             }
-            TxHash::Shallow(shallow) => self.sign_impl(shallow),
+            TxHash::Shallow(shallow) => self.sign_sig(shallow),
         }
         .map_err(|e| e.into().to_string())?;
         Ok(TxSignature::from_inner(sig))
@@ -107,13 +107,17 @@ impl<S: SignatureScheme, PK: WalletPublicKey<SigScheme = S>> WalletPk<PK>
 where
     for<'a> S: SignatureScheme<Message<'a> = &'a Digest<Sha256>>,
 {
-    pub(crate) fn verify_tx(&self, tx_hash: &TxHash, sig: &TxSignature<S>) -> Result<(), String> {
+    pub(crate) fn verify_tx_hash(
+        &self,
+        tx_hash: &TxHash,
+        sig: &TxSignature<S>,
+    ) -> Result<(), String> {
         match tx_hash {
             TxHash::DeepHash(deep_hash) => {
                 let tx_hash = deep_hash.digest();
-                self.verify_sig_impl(&tx_hash, sig)
+                self.verify_sig(&tx_hash, sig)
             }
-            TxHash::Shallow(shallow) => self.verify_sig_impl(shallow, sig),
+            TxHash::Shallow(shallow) => self.verify_sig(shallow, sig),
         }
         .map_err(|e| e.into().to_string())
     }

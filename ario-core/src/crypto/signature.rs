@@ -100,14 +100,14 @@ pub(crate) trait SupportsSignatures {
 pub(crate) trait VerifySigExt<S: Scheme> {
     type VerificationError: Into<VerificationError>;
 
-    fn verify_sig_impl(
+    fn verify_sig(
         &self,
         msg: S::Message<'_>,
         sig: &Signature<S>,
     ) -> Result<(), Self::VerificationError>;
 }
 
-pub(crate) trait SignExt<S: Scheme> {
+pub(crate) trait SignSigExt<S: Scheme> {
     type SigningError: Into<SigningError>;
-    fn sign_impl(&self, msg: S::Message<'_>) -> Result<Signature<S>, Self::SigningError>;
+    fn sign_sig(&self, msg: S::Message<'_>) -> Result<Signature<S>, Self::SigningError>;
 }

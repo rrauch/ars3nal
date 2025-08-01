@@ -373,7 +373,7 @@ where
     let tx_hash = tx_hash_builder.tx_hash();
 
     let sig = wallet
-        .sign_tx(&tx_hash)
+        .sign_tx_hash(&tx_hash)
         .map_err(|s| TxError::Other(anyhow!("tx signing failed: {}", s)))?;
 
     Ok(V2SignatureData::Rsa(
