@@ -615,8 +615,8 @@ impl Default for SignatureType {
     }
 }
 
-const RSA_PSS_SIG_TYPE: &'static str = "rsa_pss?";
-const ECDSA_SECP256K1_SIG_TYPE: &'static str = "ecdsa_secp256k1?";
+const RSA_PSS_SIG_TYPE: &'static str = "PS256_65537";
+const ECDSA_SECP256K1_SIG_TYPE: &'static str = "ES256K";
 
 impl SignatureType {
     fn as_str(&self) -> &str {

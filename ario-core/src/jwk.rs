@@ -37,6 +37,10 @@ impl Jwk {
     pub fn from_json<J: JsonSource>(json: J) -> Result<Self, JsonError> {
         serde_json::from_value(json.try_into_json()?)
     }
+
+    pub(crate) fn to_json_str(&self) -> Result<String, JsonError> {
+        serde_json::to_string_pretty(self)
+    }
 }
 
 impl Zeroize for Jwk {

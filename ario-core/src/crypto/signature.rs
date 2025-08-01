@@ -35,8 +35,12 @@ impl<S: Scheme> Signature<S> {
         Self(inner)
     }
 
-    pub fn into_inner(self) -> S::Output {
+    pub(crate) fn into_inner(self) -> S::Output {
         self.0
+    }
+
+    pub(crate) fn as_inner(&self) -> &S::Output {
+        &self.0
     }
 }
 

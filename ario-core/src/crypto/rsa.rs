@@ -1,7 +1,7 @@
 use crate::base64::{Base64Error, FromBase64};
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
+use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha256Hash};
 use crate::crypto::keys::{AsymmetricScheme, KeyLen, PublicKey, SecretKey};
 use crate::crypto::signature::{
     Scheme, Signature, SigningError, SupportsSignatures, VerificationError,
@@ -101,7 +101,6 @@ where
     Rsa<BIT>: SupportedRsaScheme,
 {
     type Scheme = Rsa<BIT>;
-    type KeyLen = <Rsa<BIT> as SupportedRsaScheme>::KeyLen;
 
     fn public_key_impl(&self) -> &<Self::Scheme as AsymmetricScheme>::PublicKey {
         RsaPublicKey::wrap_ref(self.0.as_ref())
@@ -270,7 +269,6 @@ where
     Rsa<BIT>: SupportedRsaScheme,
 {
     type Scheme = Rsa<BIT>;
-    type KeyLen = <Rsa<BIT> as SupportedRsaScheme>::KeyLen;
 }
 
 impl<const BIT: usize> Hashable for RsaPublicKey<BIT> {
@@ -360,7 +358,7 @@ where
     type SigningError = SigningError;
     type Verifier = RsaPublicKey<BIT>;
     type VerificationError = VerificationError;
-    type Message<'a> = &'a Digest<Sha256>;
+    type Message<'a> = &'a Sha256Hash;
 
     fn sign(
         signer: &Self::Signer,
@@ -395,14 +393,13 @@ where
     where
         Self: Sized,
     {
-        let sig = rsa::pss::Signature::try_from(signature.as_blob().bytes())
-            .map_err(|e| VerificationError::Other(e.to_string()))?;
+        let sig = &signature.as_inner().0;
 
         let verifying_key: PssVerifyingKey<Sha256> =
             PssVerifyingKey::new_with_auto_salt_len(verifier.as_inner().clone());
 
         verifying_key
-            .verify_prehash(msg.as_slice(), &sig)
+            .verify_prehash(msg.as_slice(), sig)
             .map_err(|e| VerificationError::Other(e.to_string()))
     }
 }

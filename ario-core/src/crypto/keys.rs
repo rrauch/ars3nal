@@ -44,7 +44,6 @@ impl<T> KeyLen for T where T: ArraySize + Send + Sync {}
 
 pub(crate) trait SecretKey {
     type Scheme: AsymmetricScheme;
-    type KeyLen: KeyLen;
 
     fn public_key_impl(&self) -> &<Self::Scheme as AsymmetricScheme>::PublicKey;
 }
@@ -55,7 +54,6 @@ pub(crate) trait PublicKey:
     Hashable + DeepHashable + AsBlob + PartialEq + Clone + Debug
 {
     type Scheme: AsymmetricScheme;
-    type KeyLen: KeyLen;
 }
 
 impl<PK: PublicKey> VerifySigExt<<PK::Scheme as SupportsSignatures>::Scheme> for PK
