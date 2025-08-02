@@ -25,8 +25,8 @@ impl TryFrom<&Jwk> for SupportedSecretKey {
 
     fn try_from(jwk: &Jwk) -> Result<Self, Self::Error> {
         match jwk.kty {
-            KeyType::Rsa => Ok(Self::Rsa(SupportedRsaPrivateKey::try_from(jwk)?)),
-            KeyType::Ec => Ok(Self::Ec(SupportedEcSecretKey::try_from(jwk)?)),
+            KeyType::Rsa => Ok(Self::from(SupportedRsaPrivateKey::try_from(jwk)?)),
+            KeyType::Ec => Ok(Self::from(SupportedEcSecretKey::try_from(jwk)?)),
             unsupported => Err(KeyError::UnsupportedKeyType(unsupported)),
         }
     }
@@ -35,6 +35,12 @@ impl TryFrom<&Jwk> for SupportedSecretKey {
 impl From<SupportedRsaPrivateKey> for SupportedSecretKey {
     fn from(value: SupportedRsaPrivateKey) -> Self {
         Self::Rsa(value)
+    }
+}
+
+impl From<SupportedEcSecretKey> for SupportedSecretKey {
+    fn from(value: SupportedEcSecretKey) -> Self {
+        Self::Ec(value)
     }
 }
 

@@ -20,7 +20,7 @@ use crate::tx::{
 use crate::tx::{RewardError, Transfer};
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
-use crate::wallet::{Wallet, WalletAddress, WalletPk};
+use crate::wallet::{WalletAddress, WalletPk, WalletSk};
 use crate::{JsonError, JsonValue};
 use anyhow::anyhow;
 use bon::Builder;
@@ -29,10 +29,10 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
 #[repr(transparent)]
-pub(super) struct V2Tx<'a, const VALIDATED: bool = false>(V2TxData<'a>);
+pub(crate) struct V2Tx<'a, const VALIDATED: bool = false>(V2TxData<'a>);
 
-pub(super) type UnvalidatedV2Tx<'a> = V2Tx<'a, false>;
-pub(super) type ValidatedV2Tx<'a> = V2Tx<'a, true>;
+pub(crate) type UnvalidatedV2Tx<'a> = V2Tx<'a, false>;
+pub(crate) type ValidatedV2Tx<'a> = V2Tx<'a, true>;
 
 impl<'a, const VALIDATED: bool> V2Tx<'a, VALIDATED> {
     pub(super) fn as_inner(&self) -> &V2TxData<'a> {
@@ -162,7 +162,7 @@ impl V2SignatureData {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct V2TxData<'a> {
+pub(crate) struct V2TxData<'a> {
     id: TxId,
     last_tx: TxAnchor,
     tags: Vec<Tag<'a>>,
@@ -405,70 +405,47 @@ trait TxSigner {
     fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError>;
 }
 
-impl TxSigner for Wallet<RsaPrivateKey<4096>> {
-    fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError> {
-        sign_rsa::<4096>(self, data)
-    }
-}
-
-impl TxSigner for Wallet<RsaPrivateKey<2048>> {
-    fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError> {
-        sign_rsa::<2048>(self, data)
-    }
-}
-
-fn sign_rsa<const BIT: usize>(
-    wallet: &Wallet<RsaPrivateKey<BIT>>,
-    data: &TxDraft,
-) -> Result<V2SignatureData, TxError>
+impl<const BIT: usize> TxSigner for WalletSk<RsaPrivateKey<BIT>>
 where
     Rsa<BIT>: SupportedRsaKeySize,
 {
-    let pk = wallet.public_key().clone();
-    let pk_blob = pk.as_blob();
-    let mut tx_hash_builder = TxHashBuilder::from(data);
-    tx_hash_builder.owner = Some(&pk_blob);
-    let tx_hash = tx_hash_builder.tx_hash();
+    fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError> {
+        let pk = self.public_key().clone();
+        let pk_blob = pk.as_blob();
+        let mut tx_hash_builder = TxHashBuilder::from(data);
+        tx_hash_builder.owner = Some(&pk_blob);
+        let tx_hash = tx_hash_builder.tx_hash();
 
-    let sig = wallet
-        .sign_tx_hash(&tx_hash)
-        .map_err(|s| TxError::Other(anyhow!("tx signing failed: {}", s)))?;
+        let sig = self
+            .sign_tx_hash(&tx_hash)
+            .map_err(|s| TxError::Other(anyhow!("tx signing failed: {}", s)))?;
 
-    Ok(V2SignatureData::Pss(
-        PssSignatureData::from_rsa(pk, sig)
-            .map_err(|e| signature::Error::SigningError(SigningError::Other(e.to_string())))?,
-    ))
+        Ok(V2SignatureData::Pss(
+            PssSignatureData::from_rsa(pk, sig)
+                .map_err(|e| signature::Error::SigningError(SigningError::Other(e.to_string())))?,
+        ))
+    }
 }
 
-impl<C: Curve> TxSigner for Wallet<EcSecretKey<C>>
+impl<C: Curve> TxSigner for WalletSk<EcSecretKey<C>>
 where
     (WalletPk<EcPublicKey<C>>, TxSignature<Ecdsa<C>>): Into<EcdsaSignatureData>,
 {
     fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError> {
-        sign_ec(self, data)
+        let tx_hash = TxHashBuilder::from(data).tx_hash();
+
+        let sig = self
+            .sign_tx_hash(&tx_hash)
+            .map_err(|e| TxError::Other(anyhow!("tx signing failed: {}", e)))?;
+
+        Ok(V2SignatureData::Ecdsa(EcdsaSignatureData::from_ecdsa(
+            self.public_key().clone(),
+            sig,
+        )))
     }
 }
 
-fn sign_ec<C: Curve>(
-    wallet: &Wallet<EcSecretKey<C>>,
-    data: &TxDraft,
-) -> Result<V2SignatureData, TxError>
-where
-    (WalletPk<EcPublicKey<C>>, TxSignature<Ecdsa<C>>): Into<EcdsaSignatureData>,
-{
-    let tx_hash = TxHashBuilder::from(data).tx_hash();
-
-    let sig = wallet
-        .sign_tx_hash(&tx_hash)
-        .map_err(|e| TxError::Other(anyhow!("tx signing failed: {}", e)))?;
-
-    Ok(V2SignatureData::Ecdsa(EcdsaSignatureData::from_ecdsa(
-        wallet.public_key().clone(),
-        sig,
-    )))
-}
-
-#[derive(Builder)]
+#[derive(Builder, Clone, Debug, PartialEq)]
 #[builder(
     builder_type(
       name = V2TxBuilder,
@@ -491,7 +468,7 @@ pub struct TxDraft<'a> {
     data_upload: Option<DataUpload<'a>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DataUpload<'a> {
     data_size: u64,
     data_root: Blob<'a>, // todo
@@ -533,7 +510,7 @@ impl<'a> From<&'a TxDraft<'a>> for TxHashBuilder<'a> {
 }
 
 impl<'a> TxDraft<'a> {
-    pub fn sign<T: TxSigner>(self, signer: &T) -> Result<ValidatedV2Tx<'a>, TxError> {
+    pub(crate) fn sign<T: TxSigner>(self, signer: &T) -> Result<ValidatedV2Tx<'a>, TxError> {
         let signature_data = signer.sign(&self)?;
         let (target, quantity) = match self.transfer {
             Some(transfer) => (Some(transfer.target), Some(transfer.quantity)),

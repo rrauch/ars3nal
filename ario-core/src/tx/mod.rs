@@ -1,8 +1,8 @@
 mod ecdsa;
 mod pss;
 mod raw;
-mod v1;
-mod v2;
+pub mod v1;
+pub mod v2;
 
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob, TypedBlob};
@@ -779,7 +779,7 @@ pub enum RewardError {
     InvalidReward(#[from] MoneyError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Transfer {
     target: WalletAddress,
     quantity: Quantity,
@@ -812,7 +812,7 @@ mod tests {
         UnvalidatedTx,
     };
     use crate::typed::FromInner;
-    use crate::wallet::{Wallet, WalletAddress};
+    use crate::wallet::{WalletAddress, WalletSk};
     use bytes::Bytes;
     use std::str::FromStr;
 
@@ -918,7 +918,9 @@ mod tests {
     #[test]
     fn builder_pss() -> anyhow::Result<()> {
         let wallet = match SupportedSecretKey::try_from(&Jwk::from_json(WALLET_RSA_JWK)?)? {
-            SupportedSecretKey::Rsa(SupportedRsaPrivateKey::Rsa4096(sk)) => Wallet::from_inner(sk),
+            SupportedSecretKey::Rsa(SupportedRsaPrivateKey::Rsa4096(sk)) => {
+                WalletSk::from_inner(sk)
+            }
             _ => panic!("wrong key"),
         };
 
@@ -969,7 +971,7 @@ mod tests {
     #[test]
     fn builder_ecdsa() -> anyhow::Result<()> {
         let wallet = match SupportedSecretKey::try_from(&Jwk::from_json(WALLET_EC_JWK)?)? {
-            SupportedSecretKey::Ec(SupportedEcSecretKey::Secp256k1(sk)) => Wallet::from_inner(sk),
+            SupportedSecretKey::Ec(SupportedEcSecretKey::Secp256k1(sk)) => WalletSk::from_inner(sk),
             _ => panic!("wrong key"),
         };
 
