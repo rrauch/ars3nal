@@ -1,4 +1,6 @@
 use crate::blob::AsBlob;
+use crate::crypto::ec::KeyError as EcKeyError;
+use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
 use crate::crypto::hash::Hashable;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::rsa::KeyError as RsaKeyError;
@@ -15,6 +17,7 @@ pub type TypedSecretKey<T, SK: SecretKey> = Typed<T, SK>;
 
 pub enum SupportedSecretKey {
     Rsa(SupportedRsaPrivateKey),
+    Ec(SupportedEcSecretKey),
 }
 
 impl TryFrom<&Jwk> for SupportedSecretKey {
@@ -23,6 +26,7 @@ impl TryFrom<&Jwk> for SupportedSecretKey {
     fn try_from(jwk: &Jwk) -> Result<Self, Self::Error> {
         match jwk.kty {
             KeyType::Rsa => Ok(Self::Rsa(SupportedRsaPrivateKey::try_from(jwk)?)),
+            KeyType::Ec => Ok(Self::Ec(SupportedEcSecretKey::try_from(jwk)?)),
             unsupported => Err(KeyError::UnsupportedKeyType(unsupported)),
         }
     }
@@ -39,8 +43,8 @@ pub trait AsymmetricScheme {
     type PublicKey: PublicKey;
 }
 
-pub trait KeyLen: ArraySize + Send + Sync {}
-impl<T> KeyLen for T where T: ArraySize + Send + Sync {}
+pub trait KeySize: ArraySize + Send + Sync {}
+impl<T> KeySize for T where T: ArraySize + Send + Sync {}
 
 pub(crate) trait SecretKey {
     type Scheme: AsymmetricScheme;
@@ -94,11 +98,14 @@ pub enum KeyError {
     #[error(transparent)]
     RsaError(#[from] RsaKeyError),
     #[error(transparent)]
+    EcError(#[from] EcKeyError),
+    #[error(transparent)]
     Other(anyhow::Error),
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
     use crate::crypto::keys::SupportedSecretKey;
     use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
     use crate::jwk::Jwk;
@@ -106,10 +113,22 @@ mod tests {
     static JWK_RSA_SK: &'static [u8] =
         include_bytes!("../../testdata/ar_wallet_tests_PS256_65537_fixture.json");
 
+    static JWK_EC_SK: &'static [u8] =
+        include_bytes!("../../testdata/ar_wallet_tests_ES256K_fixture.json");
+
     #[test]
     fn jwk_rsa_sk() -> anyhow::Result<()> {
         match SupportedSecretKey::try_from(&(Jwk::from_json(JWK_RSA_SK)?))? {
             SupportedSecretKey::Rsa(SupportedRsaPrivateKey::Rsa4096(_)) => {}
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn jwk_ec_sk() -> anyhow::Result<()> {
+        match SupportedSecretKey::try_from(&(Jwk::from_json(JWK_EC_SK)?))? {
+            SupportedSecretKey::Ec(SupportedEcSecretKey::Secp256k1(_)) => {}
             _ => unreachable!(),
         }
         Ok(())

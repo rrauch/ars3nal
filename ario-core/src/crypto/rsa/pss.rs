@@ -1,312 +1,19 @@
-use crate::base64::{Base64Error, FromBase64};
 use crate::blob::{AsBlob, Blob};
-use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha256Hash};
-use crate::crypto::keys::{AsymmetricScheme, KeyLen, PublicKey, SecretKey};
-use crate::crypto::signature::{
-    Scheme, Signature, SigningError, SupportsSignatures, VerificationError,
-};
+use crate::crypto::hash::{Sha256, Sha256Hash};
+use crate::crypto::rsa::{Rsa, RsaPrivateKey, RsaPublicKey, SupportedRsaKeySize};
+use crate::crypto::signature::{Scheme, Signature, SigningError, VerificationError};
 use crate::crypto::{Output, OutputLen};
-use crate::jwk::{Jwk, KeyType};
-use crate::{BigUint, RsaError};
-use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
-use digest::consts::{U256, U512};
+use ecdsa::signature;
 use hybrid_array::typenum::Unsigned;
 use rsa::pss::Signature as ExternalPssSignature;
 use rsa::pss::{SigningKey as PssSigningKey, VerifyingKey as PssVerifyingKey};
 use rsa::signature::SignatureEncoding;
 use rsa::signature::hazmat::{PrehashVerifier, RandomizedPrehashSigner};
-use rsa::traits::PublicKeyParts;
-use rsa::{
-    RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey, signature,
-};
 use std::marker::PhantomData;
-use std::ops::Deref;
-use std::sync::LazyLock;
 use thiserror::Error;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
-static RSA_EXPONENT: LazyLock<BigUint> =
-    LazyLock::new(|| BigUint::from_be_slice_vartime(&[0x01, 0x00, 0x01])); // 65537
-
-pub struct Rsa<const BIT: usize>;
-
-pub trait SupportedRsaScheme {
-    type KeyLen: KeyLen;
-}
-
-impl SupportedRsaScheme for Rsa<4096> {
-    type KeyLen = U512;
-}
-
-impl SupportedRsaScheme for Rsa<2048> {
-    type KeyLen = U256;
-}
-
-impl<const BIT: usize> AsymmetricScheme for Rsa<BIT>
-where
-    Self: SupportedRsaScheme,
-{
-    type SecretKey = RsaPrivateKey<BIT>;
-    type PublicKey = RsaPublicKey<BIT>;
-}
-
-pub enum SupportedPrivateKey {
-    Rsa4096(RsaPrivateKey<4096>),
-    Rsa2048(RsaPrivateKey<2048>),
-}
-
-#[derive(Clone, TransparentWrapper)]
-#[transparent(ExternalRsaPrivateKey)]
-#[repr(transparent)]
-pub struct RsaPrivateKey<const BIT: usize>(ExternalRsaPrivateKey);
-
-#[derive(Error, Debug)]
-pub enum KeyError {
-    #[error("the key does not use the expected Arweave RSA exponent")]
-    IncorrectExponent,
-    #[error("expected key length: '{expected}' but found '{actual}'")]
-    UnexpectedKeyLength { expected: usize, actual: usize },
-    #[error("unsupported key length: '{0}'")]
-    UnsupportedKeyLength(usize),
-    #[error(transparent)]
-    RsaError(#[from] RsaError),
-    #[error(transparent)]
-    JwkError(#[from] JwkError),
-}
-
-impl<const BIT: usize> RsaPrivateKey<BIT> {
-    const EXPECTED_BYTES: usize = (BIT + 7) / 8;
-
-    pub(crate) fn try_from_inner(inner: ExternalRsaPrivateKey) -> Result<Self, KeyError> {
-        if inner.size() != Self::EXPECTED_BYTES {
-            return Err(KeyError::UnexpectedKeyLength {
-                expected: Self::EXPECTED_BYTES,
-                actual: inner.size(),
-            });
-        }
-        if inner.e() != RSA_EXPONENT.deref() {
-            return Err(KeyError::IncorrectExponent);
-        }
-        Ok(Self(inner))
-    }
-    pub(crate) fn as_inner(&self) -> &ExternalRsaPrivateKey {
-        &self.0
-    }
-}
-
-impl<const BIT: usize> SecretKey for RsaPrivateKey<BIT>
-where
-    Rsa<BIT>: SupportedRsaScheme,
-{
-    type Scheme = Rsa<BIT>;
-
-    fn public_key_impl(&self) -> &<Self::Scheme as AsymmetricScheme>::PublicKey {
-        RsaPublicKey::wrap_ref(self.0.as_ref())
-    }
-}
-
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub struct RsaPrivateKeyComponents {
-    n: BigUint,
-    e: BigUint,
-    d: BigUint,
-    primes: Vec<BigUint>,
-}
-
-impl TryFrom<&Jwk> for SupportedPrivateKey {
-    type Error = KeyError;
-
-    fn try_from(value: &Jwk) -> Result<Self, Self::Error> {
-        Ok(RsaPrivateKeyComponents::from_jwk(value)?.try_into()?)
-    }
-}
-
-impl TryFrom<RsaPrivateKeyComponents> for SupportedPrivateKey {
-    type Error = KeyError;
-
-    fn try_from(value: RsaPrivateKeyComponents) -> Result<Self, Self::Error> {
-        // Note: ExternalRsaPrivateKey::from_components does NOT zeroize the provided key material on error
-        // a PR might be warranted
-        // might be related to https://github.com/RustCrypto/RSA/issues/507
-        ExternalRsaPrivateKey::from_components(
-            value.n.clone(),
-            value.e.clone(),
-            value.d.clone(),
-            value.primes.clone(),
-        )?
-        .try_into()
-    }
-}
-
-impl TryFrom<ExternalRsaPrivateKey> for SupportedPrivateKey {
-    type Error = KeyError;
-
-    fn try_from(sk: ExternalRsaPrivateKey) -> Result<Self, Self::Error> {
-        Ok(match sk.size() {
-            512 => SupportedPrivateKey::Rsa4096(RsaPrivateKey::try_from_inner(sk)?),
-            256 => SupportedPrivateKey::Rsa2048(RsaPrivateKey::try_from_inner(sk)?),
-            unsupported => return Err(KeyError::UnsupportedKeyLength(unsupported)),
-        })
-    }
-}
-
-#[derive(Error, Debug)]
-pub enum JwkError {
-    #[error(transparent)]
-    InvalidFieldValue(#[from] JwkFieldValueError),
-    #[error("expected kty 'RSA' but found '{0}'")]
-    NonRsaKeyType(String),
-}
-
-#[derive(Error, Debug)]
-pub enum JwkFieldValueError {
-    #[error("field value length '{found}' exceeds allowed maximum of '{max}'")]
-    MaxLengthExceeded { max: usize, found: usize },
-    #[error(transparent)]
-    Base64Error(#[from] Base64Error),
-}
-
-impl RsaPrivateKeyComponents {
-    pub fn new(n: BigUint, e: BigUint, d: BigUint, p_q: Option<(BigUint, BigUint)>) -> Self {
-        Self {
-            n,
-            e,
-            d,
-            primes: p_q.map(|(p, q)| vec![p, q]).unwrap_or_default(),
-        }
-    }
-
-    pub(crate) fn from_jwk(jwk: &Jwk) -> Result<Self, JwkError> {
-        if jwk.kty != KeyType::Rsa {
-            return Err(JwkError::NonRsaKeyType(jwk.kty.to_string()));
-        }
-
-        fn try_to_big_uint<S: AsRef<str>>(value: Option<S>) -> Result<Option<BigUint>, JwkError> {
-            Ok(value
-                .map(|s| s.as_ref().try_from_base64())
-                .transpose()
-                .map_err(JwkFieldValueError::from)?
-                .map(|b| BigUint::from_be_slice_vartime(b.bytes())))
-        }
-
-        let p_q = if jwk.fields.contains_key("p") && jwk.fields.contains_key("q") {
-            Some((
-                try_to_big_uint(jwk.fields.get("p"))?.unwrap(),
-                try_to_big_uint(jwk.fields.get("q"))?.unwrap(),
-            ))
-        } else {
-            None
-        };
-
-        Ok(Self::new(
-            try_to_big_uint(jwk.fields.get("n"))?.unwrap(),
-            try_to_big_uint(jwk.fields.get("e"))?.unwrap(),
-            try_to_big_uint(jwk.fields.get("d"))?.unwrap(),
-            p_q,
-        ))
-    }
-}
-
-impl<const BIT: usize> SupportsSignatures for Rsa<BIT>
-where
-    Self: SupportedRsaScheme,
-{
-    type Signer = RsaPrivateKey<BIT>;
-    type Verifier = RsaPublicKey<BIT>;
-    type Scheme = RsaPss<BIT>;
-}
-
-pub enum SupportedPublicKey {
-    Rsa4096(RsaPublicKey<4096>),
-    Rsa2048(RsaPublicKey<2048>),
-}
-
-#[derive(Clone, Debug, PartialEq, TransparentWrapper)]
-#[transparent(ExternalRsaPublicKey)]
-#[repr(transparent)]
-pub struct RsaPublicKey<const KEY_LEN: usize>(ExternalRsaPublicKey);
-
-impl TryFrom<Blob<'_>> for SupportedPublicKey {
-    type Error = KeyError;
-
-    fn try_from(value: Blob<'_>) -> Result<Self, Self::Error> {
-        Ok(match value.len() {
-            512 => SupportedPublicKey::Rsa4096(RsaPublicKey::<4096>::try_from(value)?),
-            256 => SupportedPublicKey::Rsa2048(RsaPublicKey::<2048>::try_from(value)?),
-            unsupported => return Err(KeyError::UnsupportedKeyLength(unsupported)),
-        })
-    }
-}
-
-impl<const BIT: usize> RsaPublicKey<BIT> {
-    const EXPECTED_BYTES: usize = (BIT + 7) / 8;
-
-    pub(crate) fn try_from_inner(inner: ExternalRsaPublicKey) -> Result<Self, KeyError> {
-        if inner.size() != Self::EXPECTED_BYTES {
-            return Err(KeyError::UnexpectedKeyLength {
-                expected: Self::EXPECTED_BYTES,
-                actual: inner.size(),
-            });
-        }
-        Ok(Self(inner))
-    }
-
-    pub(crate) fn from_modulus(n: impl Into<BigUint>) -> Result<Self, KeyError> {
-        let n = n.into();
-        let inner = ExternalRsaPublicKey::new(n, RSA_EXPONENT.clone())?;
-        Self::try_from_inner(inner)
-    }
-
-    pub(crate) fn as_inner(&self) -> &ExternalRsaPublicKey {
-        &self.0
-    }
-}
-
-impl<const BIT: usize> PublicKey for RsaPublicKey<BIT>
-where
-    Rsa<BIT>: SupportedRsaScheme,
-{
-    type Scheme = Rsa<BIT>;
-}
-
-impl<const BIT: usize> Hashable for RsaPublicKey<BIT> {
-    fn feed<H: Hasher>(&self, hasher: &mut H) {
-        hasher.update(self.0.n_bytes().as_ref());
-    }
-}
-
-impl<const BIT: usize> DeepHashable for RsaPublicKey<BIT> {
-    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
-        Self::blob(self.0.n_bytes().as_ref())
-    }
-}
-
-impl<const BIT: usize> AsBlob for RsaPublicKey<BIT> {
-    fn as_blob(&self) -> Blob<'_> {
-        Blob::from(self.0.n_bytes())
-    }
-}
-
-impl<'a, const BIT: usize> TryFrom<Blob<'a>> for RsaPublicKey<BIT> {
-    type Error = KeyError;
-
-    fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
-        let expected: usize = (BIT + 7) / 8;
-        let len = value.len();
-
-        if len != expected {
-            return Err(Self::Error::UnexpectedKeyLength {
-                expected,
-                actual: len,
-            });
-        }
-        Ok(RsaPublicKey::from_modulus(BigUint::from_be_slice_vartime(
-            value.as_ref(),
-        ))?)
-    }
-}
+pub struct RsaPss<const BIT: usize>;
 
 #[derive_where(Clone, Debug, PartialEq)]
 #[repr(transparent)]
@@ -323,7 +30,7 @@ impl<L: OutputLen> AsBlob for PssSignature<L> {
 }
 
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum PssError {
     #[error("Invalid input length, expected '{expected}' but go '{actual}'")]
     InvalidInputLength { expected: usize, actual: usize },
     #[error(transparent)]
@@ -331,11 +38,11 @@ pub enum Error {
 }
 
 impl<'a, L: OutputLen> TryFrom<Blob<'a>> for PssSignature<L> {
-    type Error = Error;
+    type Error = PssError;
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
         if value.len() != L::to_usize() {
-            return Err(Error::InvalidInputLength {
+            return Err(PssError::InvalidInputLength {
                 expected: L::to_usize(),
                 actual: value.len(),
             });
@@ -347,13 +54,11 @@ impl<'a, L: OutputLen> TryFrom<Blob<'a>> for PssSignature<L> {
     }
 }
 
-pub struct RsaPss<const BIT: usize>;
-
 impl<const BIT: usize> Scheme for RsaPss<BIT>
 where
-    Rsa<BIT>: SupportedRsaScheme,
+    Rsa<BIT>: SupportedRsaKeySize,
 {
-    type Output = PssSignature<<Rsa<BIT> as SupportedRsaScheme>::KeyLen>;
+    type Output = PssSignature<<Rsa<BIT> as SupportedRsaKeySize>::KeySize>;
     type Signer = RsaPrivateKey<BIT>;
     type SigningError = SigningError;
     type Verifier = RsaPublicKey<BIT>;
@@ -370,7 +75,7 @@ where
         let signing_key = PssSigningKey::<Sha256>::new_with_salt_len(
             signer.as_inner().clone(),
             calculate_rsa_pss_max_salt_len::<Sha256>(
-                <<Rsa<BIT> as SupportedRsaScheme>::KeyLen>::to_usize(),
+                <<Rsa<BIT> as SupportedRsaKeySize>::KeySize>::to_usize(),
             ),
         );
 

@@ -1,26 +1,30 @@
 use crate::blob::{AsBlob, Blob};
+use crate::crypto::ec::ecdsa::Ecdsa;
+use crate::crypto::ec::{Curve, EcPublicKey, EcSecretKey};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384};
-use crate::crypto::rsa::{Rsa, RsaPrivateKey, SupportedRsaScheme};
+use crate::crypto::rsa::{Rsa, RsaPrivateKey, SupportedRsaKeySize};
 use crate::crypto::signature;
 use crate::crypto::signature::SigningError;
 use crate::json::JsonSource;
 use crate::money::{Money, MoneyError, Winston};
 use crate::tx::CommonTxDataError::MissingOwner;
 use crate::tx::Format::V2;
+use crate::tx::ecdsa::EcdsaSignatureData;
+use crate::tx::pss::PssSignatureData;
 use crate::tx::raw::{RawTx, RawTxData, UnvalidatedRawTx, ValidatedRawTx};
-use crate::tx::rsa::RsaSignatureData;
 use crate::tx::{
     CommonData, CommonTxDataError, Format, Owner, Quantity, Reward, Signature, SignatureType, Tag,
-    TxAnchor, TxDeepHash, TxError, TxHash, TxId,
+    TxAnchor, TxDeepHash, TxError, TxHash, TxId, TxSignature,
 };
 use crate::tx::{RewardError, Transfer};
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
-use crate::wallet::{Wallet, WalletAddress};
+use crate::wallet::{Wallet, WalletAddress, WalletPk};
 use crate::{JsonError, JsonValue};
 use anyhow::anyhow;
 use bon::Builder;
+use mown::Mown;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -116,86 +120,63 @@ impl<'a> SupportsValidation for UnvalidatedV2Tx<'a> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum V2SignatureData {
-    Rsa(RsaSignatureData),
+    Pss(PssSignatureData),
+    Ecdsa(EcdsaSignatureData),
 }
 
 impl V2SignatureData {
-    fn from_raw<'a>(
-        signature_type: SignatureType,
-        raw_owner: Option<Blob<'a>>,
-        raw_signature: Blob<'a>,
-    ) -> Result<Self, V2TxDataError> {
-        match signature_type {
-            SignatureType::RsaPss => {
-                let raw_owner = raw_owner.ok_or(MissingOwner)?;
-                Ok(Self::Rsa(RsaSignatureData::from_raw(
-                    raw_owner,
-                    raw_signature,
-                )?))
-            }
-            SignatureType::EcdsaSecp256k1 => {
-                todo!("ecdsa")
-            }
-        }
-    }
-
     pub(super) fn owner(&self) -> Owner {
         match self {
-            Self::Rsa(rsa) => rsa.owner(),
+            Self::Pss(pss) => pss.owner(),
+            Self::Ecdsa(ecdsa) => ecdsa.owner(),
         }
     }
 
     pub(super) fn tx_owner(&self) -> Option<Owner> {
         match self {
-            Self::Rsa(rsa) => Some(rsa.owner()),
+            Self::Pss(pss) => Some(pss.owner()),
+            Self::Ecdsa(_) => None,
         }
     }
 
     pub(super) fn signature(&self) -> Signature {
         match self {
-            Self::Rsa(rsa) => rsa.signature(),
+            Self::Pss(pss) => pss.signature(),
+            Self::Ecdsa(ecdsa) => ecdsa.signature(),
         }
     }
 
     fn verify_sig(&self, tx_hash: &TxHash) -> Result<(), V2TxDataError> {
         match self {
-            Self::Rsa(rsa) => Ok(rsa.verify_sig(tx_hash)?),
+            Self::Pss(pss) => Ok(pss.verify_sig(tx_hash)?),
+            Self::Ecdsa(ecdsa) => Ok(ecdsa.verify_sig(tx_hash)?),
         }
     }
 
     fn signature_type(&self) -> SignatureType {
         match self {
-            Self::Rsa(_) => SignatureType::RsaPss,
+            Self::Pss(_) => SignatureType::RsaPss,
+            Self::Ecdsa(EcdsaSignatureData::Secp256k1 { .. }) => SignatureType::EcdsaSecp256k1,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct V2TxData<'a> {
-    pub id: TxId,
-    pub last_tx: TxAnchor,
-    pub tags: Vec<Tag<'a>>,
-    pub target: Option<WalletAddress>,
-    pub quantity: Option<Quantity>,
-    pub data_size: u64,
-    pub data_root: Option<Blob<'a>>, //todo
-    pub reward: Reward,
-    pub signature_data: V2SignatureData,
-    pub denomination: Option<u32>,
+    id: TxId,
+    last_tx: TxAnchor,
+    tags: Vec<Tag<'a>>,
+    target: Option<WalletAddress>,
+    quantity: Option<Quantity>,
+    data_size: u64,
+    data_root: Option<Blob<'a>>, //todo
+    reward: Reward,
+    signature_data: V2SignatureData,
+    denomination: Option<u32>,
+    tx_hash: Option<TxHash>,
 }
 
 impl<'a> V2TxData<'a> {
-    pub fn tx_hash(&self) -> TxHash {
-        let owner = self
-            .signature_data
-            .tx_owner()
-            .map(|o| o.as_blob().into_owned());
-
-        let mut tx_hash_builder = TxHashBuilder::from(self);
-        tx_hash_builder.owner = owner.as_ref();
-        tx_hash_builder.tx_hash()
-    }
-
     fn into_owned(self) -> V2TxData<'static> {
         V2TxData {
             id: self.id,
@@ -208,6 +189,58 @@ impl<'a> V2TxData<'a> {
             reward: self.reward,
             signature_data: self.signature_data,
             denomination: self.denomination,
+            tx_hash: self.tx_hash,
+        }
+    }
+
+    pub fn id(&self) -> &TxId {
+        &self.id
+    }
+
+    pub fn last_tx(&self) -> &TxAnchor {
+        &self.last_tx
+    }
+
+    pub fn tags(&self) -> &Vec<Tag<'a>> {
+        &self.tags
+    }
+
+    pub fn target(&self) -> Option<&WalletAddress> {
+        self.target.as_ref()
+    }
+
+    pub fn quantity(&self) -> Option<&Quantity> {
+        self.quantity.as_ref()
+    }
+
+    pub fn data_root(&self) -> Option<&Blob<'a>> {
+        self.data_root.as_ref()
+    }
+
+    pub fn data_size(&self) -> u64 {
+        self.data_size
+    }
+
+    pub fn reward(&self) -> &Reward {
+        &self.reward
+    }
+
+    pub fn signature_data(&self) -> &V2SignatureData {
+        &self.signature_data
+    }
+
+    pub fn tx_hash(&self) -> Mown<TxHash> {
+        if let Some(tx_hash) = self.tx_hash.as_ref() {
+            Mown::Borrowed(tx_hash)
+        } else {
+            let owner = self
+                .signature_data
+                .tx_owner()
+                .map(|o| o.as_blob().into_owned());
+
+            let mut tx_hash_builder = TxHashBuilder::from(self);
+            tx_hash_builder.owner = owner.as_ref();
+            Mown::Owned(tx_hash_builder.tx_hash())
         }
     }
 }
@@ -220,11 +253,6 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
         if raw.format != Format::V2 {
             return Err(V2TxDataError::IncorrectFormat(raw.format));
         }
-        let signature_data = V2SignatureData::from_raw(
-            raw.signature_type.unwrap_or_default(),
-            raw.owner,
-            raw.signature,
-        )?;
 
         let common_data = CommonData::try_from_raw(
             raw.id,
@@ -248,6 +276,35 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
 
         //todo: data_root
 
+        let (signature_data, tx_hash) = match raw.signature_type.unwrap_or_default() {
+            SignatureType::RsaPss => {
+                let raw_owner = raw.owner.ok_or(MissingOwner)?;
+                (
+                    V2SignatureData::Pss(PssSignatureData::from_raw(raw_owner, raw.signature)?),
+                    None,
+                )
+            }
+            SignatureType::EcdsaSecp256k1 => {
+                // ecdsa txs require the tx_hash to recover the owner
+                let tx_hash = TxHashBuilder {
+                    owner: None,
+                    target: common_data.target.as_ref(),
+                    quantity: common_data.quantity.as_ref(),
+                    reward: &common_data.reward,
+                    last_tx: &last_tx,
+                    tags: &common_data.tags,
+                    data_size: raw.data_size,
+                    data_root: raw.data_root.as_ref(),
+                    denomination: common_data.denomination,
+                }
+                .tx_hash();
+                (
+                    V2SignatureData::Ecdsa(EcdsaSignatureData::from_raw(raw.signature, &tx_hash)?),
+                    Some(tx_hash),
+                )
+            }
+        };
+
         Ok(Self {
             id: common_data.id,
             last_tx,
@@ -259,6 +316,7 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
             reward: common_data.reward,
             signature_data,
             denomination: common_data.denomination,
+            tx_hash,
         })
     }
 }
@@ -364,7 +422,7 @@ fn sign_rsa<const BIT: usize>(
     data: &TxDraft,
 ) -> Result<V2SignatureData, TxError>
 where
-    Rsa<BIT>: SupportedRsaScheme,
+    Rsa<BIT>: SupportedRsaKeySize,
 {
     let pk = wallet.public_key().clone();
     let pk_blob = pk.as_blob();
@@ -376,10 +434,38 @@ where
         .sign_tx_hash(&tx_hash)
         .map_err(|s| TxError::Other(anyhow!("tx signing failed: {}", s)))?;
 
-    Ok(V2SignatureData::Rsa(
-        RsaSignatureData::from_rsa(pk, sig)
+    Ok(V2SignatureData::Pss(
+        PssSignatureData::from_rsa(pk, sig)
             .map_err(|e| signature::Error::SigningError(SigningError::Other(e.to_string())))?,
     ))
+}
+
+impl<C: Curve> TxSigner for Wallet<EcSecretKey<C>>
+where
+    (WalletPk<EcPublicKey<C>>, TxSignature<Ecdsa<C>>): Into<EcdsaSignatureData>,
+{
+    fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError> {
+        sign_ec(self, data)
+    }
+}
+
+fn sign_ec<C: Curve>(
+    wallet: &Wallet<EcSecretKey<C>>,
+    data: &TxDraft,
+) -> Result<V2SignatureData, TxError>
+where
+    (WalletPk<EcPublicKey<C>>, TxSignature<Ecdsa<C>>): Into<EcdsaSignatureData>,
+{
+    let tx_hash = TxHashBuilder::from(data).tx_hash();
+
+    let sig = wallet
+        .sign_tx_hash(&tx_hash)
+        .map_err(|e| TxError::Other(anyhow!("tx signing failed: {}", e)))?;
+
+    Ok(V2SignatureData::Ecdsa(EcdsaSignatureData::from_ecdsa(
+        wallet.public_key().clone(),
+        sig,
+    )))
 }
 
 #[derive(Builder)]
@@ -470,6 +556,7 @@ impl<'a> TxDraft<'a> {
             reward: self.reward,
             signature_data,
             denomination: None,
+            tx_hash: None,
         };
         V2Tx::try_from_raw(RawTx::from(V2Tx(tx_data)).validate().map_err(|(_, e)| e)?)?
             .validate()

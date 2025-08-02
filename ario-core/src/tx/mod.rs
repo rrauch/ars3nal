@@ -1,15 +1,21 @@
+mod ecdsa;
+mod pss;
 mod raw;
-mod rsa;
 mod v1;
 mod v2;
 
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob, TypedBlob};
+use crate::crypto::ec::EcPublicKey;
+use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hashable, Hasher, HasherExt, TypedDigest};
+use crate::crypto::hash::{
+    Digest, Hashable, HashableExt, Hasher, HasherExt, Sha256Hash, TypedDigest,
+};
 use crate::crypto::hash::{Sha256, Sha384};
 use crate::crypto::keys::{PublicKey, SecretKey};
-use crate::crypto::rsa::{RsaPss, RsaPublicKey};
+use crate::crypto::rsa::RsaPublicKey;
+use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature::TypedSignature;
 use crate::crypto::{keys, signature};
 use crate::json::JsonSource;
@@ -22,6 +28,7 @@ use crate::validation::ValidateExt;
 use crate::wallet::{WalletAddress, WalletKind, WalletPk};
 use crate::{JsonError, JsonValue};
 use bigdecimal::BigDecimal;
+use k256::Secp256k1;
 use mown::Mown;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Debug, Display, Formatter};
@@ -107,42 +114,42 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
     pub fn id(&self) -> &TxId {
         match &self.0 {
             TxInner::V1(tx) => &tx.as_inner().id,
-            TxInner::V2(tx) => &tx.as_inner().id,
+            TxInner::V2(tx) => tx.as_inner().id(),
         }
     }
 
     pub fn last_tx(&self) -> LastTx<'_> {
         match &self.0 {
             TxInner::V1(tx) => (&tx.as_inner().last_tx).into(),
-            TxInner::V2(tx) => LastTx::TxAnchor(Mown::Borrowed(&tx.as_inner().last_tx)),
+            TxInner::V2(tx) => LastTx::TxAnchor(Mown::Borrowed(tx.as_inner().last_tx())),
         }
     }
 
     pub fn owner(&self) -> Owner<'_> {
         match &self.0 {
             TxInner::V1(tx) => tx.as_inner().signature_data.owner(),
-            TxInner::V2(tx) => tx.as_inner().signature_data.owner(),
+            TxInner::V2(tx) => tx.as_inner().signature_data().owner(),
         }
     }
 
     pub fn tags(&self) -> &Vec<Tag<'a>> {
         match &self.0 {
             TxInner::V1(tx) => tx.as_inner().tags.as_ref(),
-            TxInner::V2(tx) => tx.as_inner().tags.as_ref(),
+            TxInner::V2(tx) => tx.as_inner().tags(),
         }
     }
 
     pub fn target(&self) -> Option<&WalletAddress> {
         match &self.0 {
             TxInner::V1(tx) => tx.as_inner().target.as_ref(),
-            TxInner::V2(tx) => tx.as_inner().target.as_ref(),
+            TxInner::V2(tx) => tx.as_inner().target(),
         }
     }
 
     pub fn quantity(&self) -> Option<&Quantity> {
         match &self.0 {
             TxInner::V1(tx) => tx.as_inner().quantity.as_ref(),
-            TxInner::V2(tx) => tx.as_inner().quantity.as_ref(),
+            TxInner::V2(tx) => tx.as_inner().quantity(),
         }
     }
 
@@ -154,9 +161,9 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
                 .as_ref()
                 .map(|d| Data::Embedded(Mown::Borrowed(d))),
 
-            TxInner::V2(tx) => tx.as_inner().data_root.as_ref().map(|dr| {
+            TxInner::V2(tx) => tx.as_inner().data_root().map(|dr| {
                 Data::External(Mown::Owned(ExternalData {
-                    size: tx.as_inner().data_size,
+                    size: tx.as_inner().data_size(),
                     root: dr.clone(),
                 }))
             }),
@@ -166,14 +173,14 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
     pub fn reward(&self) -> &Reward {
         match &self.0 {
             TxInner::V1(tx) => &tx.as_inner().reward,
-            TxInner::V2(tx) => &tx.as_inner().reward,
+            TxInner::V2(tx) => tx.as_inner().reward(),
         }
     }
 
     pub fn signature(&'a self) -> Signature<'a> {
         match &self.0 {
             TxInner::V1(tx) => tx.as_inner().signature_data.signature(),
-            TxInner::V2(tx) => tx.as_inner().signature_data.signature(),
+            TxInner::V2(tx) => tx.as_inner().signature_data().signature(),
         }
     }
 
@@ -289,6 +296,7 @@ impl Display for TxId {
 pub enum Owner<'a> {
     Rsa4096(Mown<'a, WalletPk<RsaPublicKey<4096>>>),
     Rsa2048(Mown<'a, WalletPk<RsaPublicKey<2048>>>),
+    Secp256k1(Mown<'a, WalletPk<EcPublicKey<Secp256k1>>>),
 }
 
 impl<'a> Owner<'a> {
@@ -296,6 +304,7 @@ impl<'a> Owner<'a> {
         match self {
             Self::Rsa4096(inner) => inner.derive_address(),
             Self::Rsa2048(inner) => inner.derive_address(),
+            Self::Secp256k1(inner) => inner.derive_address(),
         }
     }
 }
@@ -305,6 +314,7 @@ impl AsBlob for Owner<'_> {
         match self {
             Self::Rsa4096(rsa) => rsa.as_blob(),
             Self::Rsa2048(rsa) => rsa.as_blob(),
+            Self::Secp256k1(ec) => ec.as_blob(),
         }
     }
 }
@@ -312,6 +322,7 @@ impl AsBlob for Owner<'_> {
 pub enum Signature<'a> {
     Rsa4096(Mown<'a, TxSignature<RsaPss<4096>>>),
     Rsa2048(Mown<'a, TxSignature<RsaPss<2048>>>),
+    Secp256k1(Mown<'a, TxSignature<Ecdsa<Secp256k1>>>),
 }
 
 impl<'a> Signature<'a> {
@@ -319,13 +330,15 @@ impl<'a> Signature<'a> {
         match self {
             Self::Rsa4096(_) => SignatureType::RsaPss,
             Self::Rsa2048(_) => SignatureType::RsaPss,
+            Self::Secp256k1(_) => SignatureType::EcdsaSecp256k1,
         }
     }
 
     pub fn digest(&self) -> TxId {
         match self {
-            Self::Rsa4096(rsa) => rsa.digest(),
-            Self::Rsa2048(rsa) => rsa.digest(),
+            Self::Rsa4096(pss) => pss.digest(),
+            Self::Rsa2048(pss) => pss.digest(),
+            Self::Secp256k1(ecdsa) => ecdsa.digest(),
         }
     }
 }
@@ -333,8 +346,9 @@ impl<'a> Signature<'a> {
 impl AsBlob for Signature<'_> {
     fn as_blob(&self) -> Blob<'_> {
         match self {
-            Self::Rsa4096(rsa) => rsa.as_blob(),
-            Self::Rsa2048(rsa) => rsa.as_blob(),
+            Self::Rsa4096(pss) => pss.as_blob(),
+            Self::Rsa2048(pss) => pss.as_blob(),
+            Self::Secp256k1(ecdsa) => ecdsa.as_blob(),
         }
     }
 }
@@ -347,6 +361,8 @@ pub trait TxSignatureScheme: signature::Scheme {
 pub type TxSignature<S: TxSignatureScheme> = TypedSignature<TxHash, WalletKind, S>;
 pub type TxDeepHash = TypedDigest<TxKind, Sha384>;
 pub type TxShallowHash = TypedDigest<TxKind, Sha256>;
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum TxHash {
     DeepHash(TxDeepHash),
     Shallow(TxShallowHash),
@@ -357,6 +373,13 @@ impl TxHash {
         match self {
             Self::DeepHash(h) => h.as_slice(),
             Self::Shallow(h) => h.as_slice(),
+        }
+    }
+
+    pub(crate) fn to_sign_prehash(&self) -> Mown<Sha256Hash> {
+        match self {
+            TxHash::DeepHash(deep_hash) => Mown::Owned(deep_hash.digest()),
+            TxHash::Shallow(shallow) => Mown::Borrowed(shallow),
         }
     }
 }
@@ -778,8 +801,9 @@ impl Transfer {
 mod tests {
     use crate::base64::ToBase64;
     use crate::blob::Blob;
+    use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
     use crate::crypto::keys::SupportedSecretKey;
-    use crate::crypto::rsa::SupportedPrivateKey;
+    use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
     use crate::jwk::Jwk;
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::v2::DataUpload;
@@ -798,6 +822,8 @@ mod tests {
     static TX_V2_2: &'static [u8] = include_bytes!("../../testdata/tx_v2_2.json");
     static WALLET_RSA_JWK: &'static [u8] =
         include_bytes!("../../testdata/ar_wallet_tests_PS256_65537_fixture.json");
+    static WALLET_EC_JWK: &'static [u8] =
+        include_bytes!("../../testdata/ar_wallet_tests_ES256K_fixture.json");
 
     #[test]
     fn v1() -> anyhow::Result<()> {
@@ -890,9 +916,9 @@ mod tests {
     }
 
     #[test]
-    fn builder() -> anyhow::Result<()> {
+    fn builder_pss() -> anyhow::Result<()> {
         let wallet = match SupportedSecretKey::try_from(&Jwk::from_json(WALLET_RSA_JWK)?)? {
-            SupportedSecretKey::Rsa(SupportedPrivateKey::Rsa4096(sk)) => Wallet::from_inner(sk),
+            SupportedSecretKey::Rsa(SupportedRsaPrivateKey::Rsa4096(sk)) => Wallet::from_inner(sk),
             _ => panic!("wrong key"),
         };
 
@@ -911,6 +937,8 @@ mod tests {
         let valid_tx = draft.sign(&wallet)?;
         let json = valid_tx.to_json_string()?;
         let valid_tx = Tx::from_json(&json)?.validate().map_err(|(_, err)| err)?;
+
+        assert_eq!(valid_tx.signature().signature_type(), SignatureType::RsaPss);
 
         assert_eq!(
             valid_tx.reward(),
@@ -934,6 +962,53 @@ mod tests {
 
         assert_eq!(data.size, data_size);
         assert_eq!(data.root, data_root);
+
+        Ok(())
+    }
+
+    #[test]
+    fn builder_ecdsa() -> anyhow::Result<()> {
+        let wallet = match SupportedSecretKey::try_from(&Jwk::from_json(WALLET_EC_JWK)?)? {
+            SupportedSecretKey::Ec(SupportedEcSecretKey::Secp256k1(sk)) => Wallet::from_inner(sk),
+            _ => panic!("wrong key"),
+        };
+
+        let target_str = "OK_m2Tk41N94KZLl5WQSx_-iNWbvcp8EMfrYsel_QeQ";
+
+        let draft = TxBuilder::v2()
+            .reward(21234)?
+            .last_tx(TxAnchor::from_inner([0u8; 48]))
+            .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 2101)?)
+            .draft();
+
+        let valid_tx = draft.sign(&wallet)?;
+        let json = valid_tx.to_json_string()?;
+        let valid_tx = Tx::from_json(&json)?.validate().map_err(|(_, err)| err)?;
+
+        let owner = valid_tx.owner();
+        let owner_address = owner.address().to_base64();
+
+        assert_eq!(
+            valid_tx.signature().signature_type(),
+            SignatureType::EcdsaSecp256k1
+        );
+
+        assert_eq!(
+            valid_tx.reward(),
+            &Reward::try_from(Winston::from_str("21234")?)?,
+        );
+
+        assert_eq!(
+            valid_tx.target(),
+            Some(WalletAddress::from_str(target_str)?).as_ref()
+        );
+
+        assert_eq!(
+            valid_tx.quantity(),
+            Some(Quantity::try_from(Winston::from_str("2101")?)?).as_ref()
+        );
+
+        assert!(valid_tx.data().is_none());
 
         Ok(())
     }

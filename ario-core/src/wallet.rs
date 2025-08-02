@@ -1,9 +1,11 @@
 use crate::base64::{TryFromBase64, TryFromBase64Error};
 use crate::blob::Blob;
-use crate::crypto::hash::{Digest, HashableExt, Sha256};
+use crate::crypto::ec::Curve as EcdsaCurve;
+use crate::crypto::ec::ecdsa::Ecdsa;
+use crate::crypto::hash::{Digest, HashableExt, Sha256, Sha256Hash};
 use crate::crypto::keys;
 use crate::crypto::keys::{KeyError, PublicKey, SecretKey, TypedPublicKey, TypedSecretKey};
-use crate::crypto::rsa::RsaPss;
+use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature::SignSigExt;
 use crate::crypto::signature::VerifySigExt;
 use crate::crypto::signature::{Scheme as SignatureScheme, SupportsSignatures};
@@ -21,7 +23,8 @@ pub type WalletPk<PK: WalletPublicKey> = TypedPublicKey<WalletKind, PK>;
 
 pub trait SupportedSignatureScheme: SignatureScheme {}
 
-impl<const BIT: usize> SupportedSignatureScheme for RsaPss<BIT> where RsaPss<BIT>: SignatureScheme {}
+impl<const BIT: usize> SupportedSignatureScheme for RsaPss<BIT> where Self: SignatureScheme {}
+impl<C: EcdsaCurve> SupportedSignatureScheme for Ecdsa<C> where Self: SignatureScheme {}
 
 pub(crate) trait WalletSecretKey: SecretKey + SignSigExt<Self::SigScheme> {
     type SigScheme: SupportedSignatureScheme;
@@ -41,14 +44,8 @@ where
     for<'a> S: SignatureScheme<Message<'a> = &'a Digest<Sha256>>,
 {
     pub(crate) fn sign_tx_hash(&self, tx_hash: &TxHash) -> Result<TxSignature<S>, String> {
-        let sig = match tx_hash {
-            TxHash::DeepHash(deep_hash) => {
-                let tx_hash = deep_hash.digest();
-                self.sign_sig(&tx_hash)
-            }
-            TxHash::Shallow(shallow) => self.sign_sig(shallow),
-        }
-        .map_err(|e| e.into().to_string())?;
+        let prehash = tx_hash.to_sign_prehash();
+        let sig = self.sign_sig(&prehash).map_err(|e| e.into().to_string())?;
         Ok(TxSignature::from_inner(sig))
     }
 }
@@ -105,20 +102,15 @@ impl<PK: WalletPublicKey> WalletPk<PK> {
 
 impl<S: SignatureScheme, PK: WalletPublicKey<SigScheme = S>> WalletPk<PK>
 where
-    for<'a> S: SignatureScheme<Message<'a> = &'a Digest<Sha256>>,
+    for<'a> S: SignatureScheme<Message<'a> = &'a Sha256Hash>,
 {
     pub(crate) fn verify_tx_hash(
         &self,
         tx_hash: &TxHash,
         sig: &TxSignature<S>,
     ) -> Result<(), String> {
-        match tx_hash {
-            TxHash::DeepHash(deep_hash) => {
-                let tx_hash = deep_hash.digest();
-                self.verify_sig(&tx_hash, sig)
-            }
-            TxHash::Shallow(shallow) => self.verify_sig(shallow, sig),
-        }
-        .map_err(|e| e.into().to_string())
+        let prehash = tx_hash.to_sign_prehash();
+        self.verify_sig(&prehash, sig)
+            .map_err(|e| e.into().to_string())
     }
 }

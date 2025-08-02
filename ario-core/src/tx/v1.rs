@@ -4,7 +4,7 @@ use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha384};
 use crate::json::JsonSource;
 use crate::tx::CommonTxDataError::MissingOwner;
 use crate::tx::raw::{RawTxData, UnvalidatedRawTx, ValidatedRawTx};
-use crate::tx::rsa::RsaSignatureData;
+use crate::tx::pss::PssSignatureData;
 use crate::tx::{
     CommonData, CommonTxDataError, EmbeddedData, Format, LastTx, Quantity, Reward, SignatureType,
     Tag, TxDeepHash, TxError, TxHash, TxId, TxShallowHash,
@@ -103,7 +103,7 @@ impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
     }
 }
 
-pub(super) type V1SignatureData = RsaSignatureData;
+pub(super) type V1SignatureData = PssSignatureData;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct V1TxData<'a> {

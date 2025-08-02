@@ -251,7 +251,11 @@ impl Validator<RawTxData<'_>> for RawTxDataValidator {
         const MAX_TAGS_TOTAL_LEN: usize = 2048;
         const VALID_TARGET_LENGTHS: &[usize] = &[32];
         const MAX_EMBEDDED_DATA_LEN: usize = 1024 * 1024 * 12;
-        const VALID_SIG_LENGTHS: &[usize] = &[256, 512];
+        const VALID_SIG_LENGTHS: &[usize] = &[
+            65,  // Secp256k1
+            256, // Rsa<2048>
+            512, // Rsa<4096>
+        ];
         const VALID_DATA_ROOT_LENGTHS: &[usize] = &[32];
 
         validate_byte_len(data.id.bytes(), VALID_ID_LENGTHS, "id")?;

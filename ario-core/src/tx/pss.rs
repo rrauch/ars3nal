@@ -1,7 +1,8 @@
 use crate::blob::Blob;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
-use crate::crypto::rsa::{Rsa, RsaPss, RsaPublicKey, SupportedRsaScheme};
+use crate::crypto::rsa::pss::RsaPss;
+use crate::crypto::rsa::{Rsa, RsaPublicKey, SupportedRsaKeySize};
 use crate::crypto::{keys, signature};
 use crate::tx::{CommonTxDataError, Owner, Signature, TxHash, TxSignature, TxSignatureScheme};
 use crate::typed::FromInner;
@@ -19,13 +20,13 @@ impl TxSignatureScheme for RsaPss<2048> {
 }
 
 #[derive(Error, Debug)]
-pub(crate) enum RsaSignatureError {
-    #[error("unsupported rsa bit length: '{0}'")]
-    UnsupportedBitLength(usize),
+pub(crate) enum PssSignatureError {
+    #[error("unsupported rsa key size: '{0}'")]
+    UnsupportedKeySize(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum RsaSignatureData {
+pub(crate) enum PssSignatureData {
     Rsa4096 {
         owner: WalletPk<RsaPublicKey<4096>>,
         signature: TxSignature<RsaPss<4096>>,
@@ -36,13 +37,13 @@ pub(crate) enum RsaSignatureData {
     },
 }
 
-impl RsaSignatureData {
+impl PssSignatureData {
     pub(super) fn from_rsa<const BIT: usize>(
         owner: WalletPk<RsaPublicKey<BIT>>,
         signature: TxSignature<RsaPss<BIT>>,
-    ) -> Result<Self, RsaSignatureError>
+    ) -> Result<Self, PssSignatureError>
     where
-        Rsa<BIT>: SupportedRsaScheme,
+        Rsa<BIT>: SupportedRsaKeySize,
     {
         match BIT {
             4096 => {
@@ -63,7 +64,7 @@ impl RsaSignatureData {
                     })
                 }
             }
-            unsupported => Err(RsaSignatureError::UnsupportedBitLength(unsupported)),
+            unsupported => Err(PssSignatureError::UnsupportedKeySize(unsupported)),
         }
     }
 
@@ -126,7 +127,7 @@ impl RsaSignatureData {
     }
 }
 
-impl DeepHashable for RsaSignatureData {
+impl DeepHashable for PssSignatureData {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
         match self {
             Self::Rsa4096 { owner, .. } => owner.deep_hash(),
@@ -135,7 +136,7 @@ impl DeepHashable for RsaSignatureData {
     }
 }
 
-impl Hashable for RsaSignatureData {
+impl Hashable for PssSignatureData {
     fn feed<H: Hasher>(&self, hasher: &mut H) {
         match self {
             Self::Rsa4096 { owner, .. } => owner.feed(hasher),
