@@ -6,6 +6,7 @@ pub mod hash;
 pub mod keys;
 pub mod rsa;
 pub mod signature;
+mod merkle;
 
 pub trait OutputLen: ArraySize + Send + Sync {}
 impl<T> OutputLen for T where T: ArraySize + Send + Sync {}
