@@ -18,6 +18,7 @@ pub mod typed;
 mod validation;
 pub mod wallet;
 mod jwk;
+mod chunking;
 //pub struct DriveKind;
 //pub type DriveId = id::TypedUuid<DriveKind>;
 
