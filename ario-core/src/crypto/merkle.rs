@@ -35,6 +35,14 @@ impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_C
     pub fn root(&self) -> &MerkleRoot<H> {
         MerkleRoot::wrap_ref(self.root.id())
     }
+
+    pub fn num_chunks(&self) -> usize {
+        self.root.num_chunks()
+    }
+
+    pub fn max_offset(&self) -> u64 {
+        self.root.max_offset()
+    }
 }
 
 #[derive_where(Clone, Debug, PartialEq)]
@@ -64,6 +72,16 @@ impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_C
             Node::Branch(branch) => branch.max,
         }
     }
+
+    fn num_chunks(&self) -> usize {
+        match self {
+            Node::Leaf(leaf) => match leaf.is_empty() {
+                true => 0,
+                false => 1,
+            },
+            Node::Branch(branch) => branch.num_chunks(),
+        }
+    }
 }
 
 #[derive_where(Clone, Debug, PartialEq)]
@@ -89,6 +107,19 @@ impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_C
             id: NodeId::from_inner(id),
             chunk,
         }
+    }
+
+    fn empty() -> Self {
+        let empty_chunk = Chunk {
+            data_hash: H::new().finalize(),
+            offset: 0..0,
+        };
+
+        Self::from_chunk(empty_chunk)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.chunk.offset.is_empty()
     }
 }
 
@@ -137,7 +168,7 @@ impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_C
         let note = left_max;
         let max = right_max;
 
-        // Compute branch ID: hash(left_id || right_id || note_hash)
+        // Compute branch ID: hash(hash(left_id) || hash(right_id) || hash(note))
         let mut id_hasher = H::new();
         left_id.digest::<H>().feed(&mut id_hasher);
         right_id.digest::<H>().feed(&mut id_hasher);
@@ -151,6 +182,10 @@ impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_C
             note,
             max,
         }
+    }
+
+    fn num_chunks(&self) -> usize {
+        self.left.num_chunks() + self.right.num_chunks()
     }
 }
 
@@ -177,7 +212,7 @@ impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_C
             MIN_CHUNK_SIZE <= MAX_CHUNK_SIZE,
             "MIN_CHUNK_SIZE must be <= MAX_CHUNK_SIZE."
         );
-        let buf = LocalRb::new(MAX_CHUNK_SIZE + MIN_CHUNK_SIZE + 1);
+        let buf = LocalRb::new(MAX_CHUNK_SIZE + MIN_CHUNK_SIZE);
         Self {
             hasher: H::new(),
             current_chunk_start_offset: 0,
@@ -274,7 +309,9 @@ impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_C
             .collect::<Vec<_>>();
 
         if nodes.is_empty() {
-            todo!()
+            let empty = Leaf::empty();
+            nodes.push(Node::Leaf(empty.clone()));
+            nodes.push(Node::Leaf(empty));
         }
 
         // Build tree bottom-up
@@ -308,9 +345,14 @@ impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_C
 
 #[cfg(test)]
 mod tests {
+    use crate::base64::ToBase64;
     use crate::crypto::merkle::DefaultMerkleTreeBuilder;
 
     static ONE_MB: &'static [u8] = include_bytes!("../../testdata/1mb.bin");
+    static TX_EVEN_DATA: &'static [u8] =
+        include_bytes!("../../testdata/OX63odH91fXS4hN506rYC_WUo8mWC5M3xuBymLhSKSw.data");
+    static TX_ODD_DATA: &'static [u8] =
+        include_bytes!("../../testdata/trtu91u1kRVDrZI6WvWVxU3uvEjJRZcls2WSZvYJyBc.data");
 
     #[test]
     fn merkle_tree_builder() -> anyhow::Result<()> {
@@ -324,6 +366,73 @@ mod tests {
         ];
 
         assert_eq!(tree.root().as_slice(), expected_root_id);
+        assert_eq!(tree.num_chunks(), 8);
+        assert_eq!(tree.max_offset(), 1901762);
+
+        Ok(())
+    }
+
+    #[test]
+    fn merkle_tree_builder_even() -> anyhow::Result<()> {
+        let mut tree_builder = DefaultMerkleTreeBuilder::new();
+        tree_builder.update(TX_EVEN_DATA);
+        let tree = tree_builder.finalize();
+
+        assert_eq!(
+            tree.root().to_base64(),
+            "Q7ug4JF3yjKW4COQ7Aqyr6zJW0seFn4ue5XRMxygsSU"
+        );
+
+        assert_eq!(tree.max_offset(), 330871);
+        assert_eq!(tree.num_chunks(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn merkle_tree_builder_odd() -> anyhow::Result<()> {
+        let mut tree_builder = DefaultMerkleTreeBuilder::new();
+        tree_builder.update(TX_ODD_DATA);
+        let tree = tree_builder.finalize();
+
+        assert_eq!(
+            tree.root().to_base64(),
+            "ikHHDmOhqnZ5qsNZ7SOoofuaG66A5yRLsTvacad2NMg"
+        );
+
+        assert_eq!(tree.max_offset(), 683821);
+        assert_eq!(tree.num_chunks(), 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn small_final_chunk() -> anyhow::Result<()> {
+        let data = vec![0; 256 * 1024 + 1];
+        let expected = "br1Vtl3TS_NGWdHmYqBh3-MxrlckoluHCZGmUZk-dJc";
+
+        let mut tree_builder = DefaultMerkleTreeBuilder::new();
+        tree_builder.update(&data);
+        let tree = tree_builder.finalize();
+
+        assert_eq!(tree.root().to_base64(), expected);
+        assert_eq!(tree.num_chunks(), 2);
+        assert_eq!(tree.max_offset(), data.len() as u64);
+
+        Ok(())
+    }
+
+    #[test]
+    fn empty_tree() -> anyhow::Result<()> {
+        let mut tree_builder = DefaultMerkleTreeBuilder::new();
+        let empty_tree = tree_builder.finalize();
+        assert_eq!(empty_tree.max_offset(), 0);
+        assert_eq!(empty_tree.num_chunks(), 0);
+
+        // todo: check against reference implementation
+        let expected = "U6L6PiJ70MHXS7ZQ-ctkdhVoZFBsdbFCyqZDfdW6k-s";
+
+        assert_eq!(empty_tree.root().to_base64(), expected);
 
         Ok(())
     }
