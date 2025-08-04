@@ -999,7 +999,7 @@ mod tests {
         let valid_tx = Tx::from_json(&json)?.validate().map_err(|(_, err)| err)?;
 
         let owner = valid_tx.owner();
-        let owner_address = owner.address().to_base64();
+        let _owner_address = owner.address().to_base64();
 
         assert_eq!(
             valid_tx.signature().signature_type(),

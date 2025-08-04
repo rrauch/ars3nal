@@ -1,31 +1,175 @@
-use crate::blob::Blob;
-use crate::chunking::Chunk;
-use crate::crypto::hash::{Hashable, HashableExt, Hasher, Sha256, TypedDigest};
+use crate::blob::{AsBlob, Blob};
+use crate::chunking::{Chunk, ChunkInfo, Chunker, DefaultChunker, MaybeOwnedChunk};
+use crate::crypto::Output;
+use crate::crypto::hash::{Digest, Hashable, HashableExt, Hasher, Sha256};
 use crate::typed::{FromInner, Typed};
 use bytemuck::TransparentWrapper;
 use bytes::{Bytes, BytesMut};
 use derive_where::derive_where;
+use hybrid_array::typenum::Unsigned;
 use rangemap::RangeMap;
+use std::marker::PhantomData;
 use std::ops::Range;
+use thiserror::Error;
 
-pub type DefaultMerkleRoot = MerkleRoot<Sha256, 32>;
-pub type DefaultMerkleTree = MerkleTree<Sha256, 32>;
+pub type DefaultMerkleRoot = MerkleRoot<Sha256, DefaultChunker, 32>;
+pub type DefaultMerkleTree<'a> = MerkleTree<'a, Sha256, DefaultChunker, 32>;
 
-pub struct MerkleNodeIdKind;
-pub type NodeId<H: Hasher, const NOTE_SIZE: usize> = TypedDigest<MerkleNodeIdKind, H>;
+struct MerkleNodeIdKind;
+type NodeId<H: Hasher, C: Chunker, const NOTE_SIZE: usize, T = MerkleNodeIdKind> =
+    Typed<(T, C, PhantomData<[(); NOTE_SIZE]>), Digest<H>>;
 
 pub struct MerkleRootKind;
-pub type MerkleRoot<H: Hasher, const NOTE_SIZE: usize> =
-    Typed<MerkleRootKind, NodeId<H, NOTE_SIZE>>;
+pub type MerkleRoot<H: Hasher, C: Chunker, const NOTE_SIZE: usize> =
+    NodeId<H, C, NOTE_SIZE, MerkleRootKind>;
 
-#[derive_where(Clone, Debug, PartialEq)]
-pub struct MerkleTree<H: Hasher, const NOTE_SIZE: usize> {
-    root: Node<H, NOTE_SIZE>,
-    proofs: RangeMap<u64, Proof<'static>>,
+impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleRoot<H, C, NOTE_SIZE> {
+    const HASH_SIZE: usize = <<H::Output as Output>::Len>::USIZE;
+    const CHUNK_OUTPUT_SIZE: usize = <<C::Output as ChunkInfo>::Len>::USIZE;
+    const LEAF_PROOF_LEN: usize = { Self::HASH_SIZE + NOTE_SIZE };
+    const BRANCH_PROOF_LEN: usize = { Self::HASH_SIZE * 2 + NOTE_SIZE };
+
+    pub fn verify_chunk(
+        &self,
+        chunk: &Chunk<C>,
+        proof: &Proof<H, C, NOTE_SIZE>,
+    ) -> Result<(), ProofError> {
+        if &proof.offset != chunk.offset() {
+            return Err(ProofError::IncorrectOffset {
+                expected: proof.offset.clone(),
+                actual: chunk.offset().clone(),
+            });
+        }
+
+        let (branches, leaf) = proof
+            .proof
+            .split_at(proof.proof.len() - Self::LEAF_PROOF_LEN);
+
+        let branch_proofs = branches
+            .chunks(Self::BRANCH_PROOF_LEN)
+            .map(|b| BranchProof::try_from(b, Self::HASH_SIZE, NOTE_SIZE))
+            .collect::<Result<Vec<_>, ProofError>>()?;
+
+        let mut expected_id = self.0.as_slice();
+
+        // path validation
+        for proof in &branch_proofs {
+            let mut hasher = H::new();
+            proof.left_id.digest::<H>().feed(&mut hasher);
+            proof.right_id.digest::<H>().feed(&mut hasher);
+            proof.note.digest::<H>().feed(&mut hasher);
+            let id = hasher.finalize();
+
+            if id.as_slice() != expected_id {
+                return Err(ProofError::VerificationFailed);
+            }
+
+            expected_id = if proof.offset() >= chunk.offset().end {
+                proof.left_id
+            } else {
+                proof.right_id
+            };
+        }
+
+        // leaf validation
+        let proof = LeafProof::try_from(leaf, Self::CHUNK_OUTPUT_SIZE, NOTE_SIZE)?;
+
+        let mut hasher = H::new();
+        chunk.output().digest::<H>().feed(&mut hasher);
+        let note = to_note::<NOTE_SIZE>(chunk.offset().end);
+        note.digest::<H>().feed(&mut hasher);
+        let id = hasher.finalize();
+
+        if id.as_slice() != expected_id {
+            return Err(ProofError::VerificationFailed);
+        }
+
+        if chunk.output().as_blob().bytes() != proof.chunk_output {
+            return Err(ProofError::VerificationFailed);
+        }
+
+        if note.as_slice() != proof.note {
+            return Err(ProofError::VerificationFailed);
+        }
+
+        Ok(())
+    }
 }
 
-impl<H: Hasher, const NOTE_SIZE: usize> MerkleTree<H, NOTE_SIZE> {
-    pub fn root(&self) -> &MerkleRoot<H, NOTE_SIZE> {
+struct BranchProof<'a> {
+    left_id: &'a [u8],
+    right_id: &'a [u8],
+    note: &'a [u8],
+}
+
+impl<'a> BranchProof<'a> {
+    fn try_from(data: &'a [u8], id_len: usize, note_len: usize) -> Result<Self, ProofError> {
+        let expected = (id_len * 2) + note_len;
+        let actual = data.len();
+        if actual != expected {
+            return Err(ProofError::InvalidProofLength { expected, actual });
+        }
+        Ok(Self {
+            left_id: &data[..id_len],
+            right_id: &data[id_len..(id_len * 2)],
+            note: &data[(id_len * 2)..],
+        })
+    }
+
+    fn offset(&self) -> u64 {
+        let u64_be_bytes = &self.note[self.note.len() - 8..];
+        u64::from_be_bytes(
+            u64_be_bytes
+                .try_into()
+                .expect("u64 be conversion should never fail"),
+        )
+    }
+}
+
+struct LeafProof<'a> {
+    chunk_output: &'a [u8],
+    note: &'a [u8],
+}
+
+impl<'a> LeafProof<'a> {
+    fn try_from(
+        data: &'a [u8],
+        chunk_output_len: usize,
+        note_len: usize,
+    ) -> Result<Self, ProofError> {
+        let expected = chunk_output_len + note_len;
+        let actual = data.len();
+        if actual != expected {
+            return Err(ProofError::InvalidProofLength { expected, actual });
+        }
+        Ok(Self {
+            chunk_output: &data[..chunk_output_len],
+            note: &data[chunk_output_len..],
+        })
+    }
+}
+
+#[derive(Error, Debug, Clone)]
+pub enum ProofError {
+    #[error("invalid proof length: expected '{expected}' but found '{actual}'")]
+    InvalidProofLength { expected: usize, actual: usize },
+    #[error("incorrect offset: expected '{expected:?}' but found '{actual:?}'")]
+    IncorrectOffset {
+        expected: Range<u64>,
+        actual: Range<u64>,
+    },
+    #[error("verification failed")]
+    VerificationFailed,
+}
+
+#[derive_where(Clone, Debug, PartialEq)]
+pub struct MerkleTree<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
+    root: Node<'a, H, C, NOTE_SIZE>,
+    proofs: RangeMap<u64, Proof<'static, H, C, NOTE_SIZE>>,
+}
+
+impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleTree<'_, H, C, NOTE_SIZE> {
+    pub fn root(&self) -> &MerkleRoot<H, C, NOTE_SIZE> {
         MerkleRoot::wrap_ref(self.root.id())
     }
 
@@ -37,16 +181,18 @@ impl<H: Hasher, const NOTE_SIZE: usize> MerkleTree<H, NOTE_SIZE> {
         self.root.offset()
     }
 
-    pub fn proof(&self, offset: u64) -> Option<&Proof> {
+    pub fn proof(&self, offset: u64) -> Option<&Proof<H, C, NOTE_SIZE>> {
         self.proofs.get(&offset)
     }
 }
 
-impl<H: Hasher, const NOTE_SIZE: usize> FromIterator<Chunk<H>> for MerkleTree<H, NOTE_SIZE> {
-    fn from_iter<T: IntoIterator<Item = Chunk<H>>>(iter: T) -> Self {
+impl<'a, H: Hasher, C: Chunker, I: Into<MaybeOwnedChunk<'a, C>>, const NOTE_SIZE: usize>
+    FromIterator<I> for MerkleTree<'a, H, C, NOTE_SIZE>
+{
+    fn from_iter<T: IntoIterator<Item = I>>(iter: T) -> Self {
         let mut nodes = iter
             .into_iter()
-            .map(|c| Node::Leaf(Leaf::<H, NOTE_SIZE>::from_chunk(c)))
+            .map(|c| Node::Leaf(Leaf::<H, C, NOTE_SIZE>::from_chunk(c)))
             .collect::<Vec<_>>();
 
         if nodes.is_empty() {
@@ -83,7 +229,7 @@ impl<H: Hasher, const NOTE_SIZE: usize> FromIterator<Chunk<H>> for MerkleTree<H,
         let proofs = if root.is_empty() {
             RangeMap::default()
         } else {
-            generate_proofs::<H, NOTE_SIZE>(&root)
+            generate_proofs::<H, C, NOTE_SIZE>(&root)
                 .into_iter()
                 .map(|p| (p.offset.clone(), p))
                 .collect()
@@ -94,13 +240,13 @@ impl<H: Hasher, const NOTE_SIZE: usize> FromIterator<Chunk<H>> for MerkleTree<H,
 }
 
 #[derive_where(Clone, Debug, PartialEq)]
-pub enum Node<H: Hasher, const NOTE_SIZE: usize> {
-    Leaf(Leaf<H, NOTE_SIZE>),
-    Branch(Branch<H, NOTE_SIZE>),
+enum Node<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
+    Leaf(Leaf<'a, H, C, NOTE_SIZE>),
+    Branch(Branch<'a, H, C, NOTE_SIZE>),
 }
 
-impl<H: Hasher, const NOTE_SIZE: usize> Node<H, NOTE_SIZE> {
-    fn id(&self) -> &NodeId<H, NOTE_SIZE> {
+impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> Node<'_, H, C, NOTE_SIZE> {
+    fn id(&self) -> &NodeId<H, C, NOTE_SIZE> {
         match self {
             Node::Leaf(leaf) => &leaf.id,
             Node::Branch(branch) => &branch.id,
@@ -130,17 +276,18 @@ impl<H: Hasher, const NOTE_SIZE: usize> Node<H, NOTE_SIZE> {
 }
 
 #[derive_where(Clone, Debug, PartialEq)]
-pub struct Leaf<H: Hasher, const NOTE_SIZE: usize> {
-    id: NodeId<H, NOTE_SIZE>,
+struct Leaf<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
+    id: NodeId<H, C, NOTE_SIZE>,
     note: [u8; NOTE_SIZE],
-    chunk: Chunk<H>,
+    chunk: MaybeOwnedChunk<'a, C>,
 }
 
-impl<H: Hasher, const NOTE_SIZE: usize> Leaf<H, NOTE_SIZE> {
-    fn from_chunk(chunk: Chunk<H>) -> Self {
+impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> Leaf<'a, H, C, NOTE_SIZE> {
+    fn from_chunk<I: Into<MaybeOwnedChunk<'a, C>>>(chunk: I) -> Self {
+        let chunk = chunk.into();
         let note = to_note::<NOTE_SIZE>(chunk.offset().end);
         let mut id_hasher = H::new();
-        chunk.data_hash().digest::<H>().feed(&mut id_hasher);
+        chunk.output().digest::<H>().feed(&mut id_hasher);
         note.digest::<H>().feed(&mut id_hasher);
         let id = id_hasher.finalize();
         Self {
@@ -151,7 +298,7 @@ impl<H: Hasher, const NOTE_SIZE: usize> Leaf<H, NOTE_SIZE> {
     }
 
     fn empty() -> Self {
-        let empty_chunk = Chunk::new(H::new().finalize(), 0, 0);
+        let empty_chunk = Chunk::new(C::empty(), 0, 0);
 
         Self::from_chunk(empty_chunk)
     }
@@ -169,16 +316,16 @@ fn to_note<const NOTE_SIZE: usize>(value: u64) -> [u8; NOTE_SIZE] {
 }
 
 #[derive_where(Clone, Debug, PartialEq)]
-pub struct Branch<H: Hasher, const NOTE_SIZE: usize> {
-    id: NodeId<H, NOTE_SIZE>,
-    left: Box<Node<H, NOTE_SIZE>>,
-    right: Box<Node<H, NOTE_SIZE>>,
+struct Branch<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
+    id: NodeId<H, C, NOTE_SIZE>,
+    left: Box<Node<'a, H, C, NOTE_SIZE>>,
+    right: Box<Node<'a, H, C, NOTE_SIZE>>,
     offset: Range<u64>, // Left child's min offset - Right child's max offset
     note: [u8; NOTE_SIZE],
 }
 
-impl<H: Hasher, const NOTE_SIZE: usize> Branch<H, NOTE_SIZE> {
-    fn new(left: Node<H, NOTE_SIZE>, right: Node<H, NOTE_SIZE>) -> Self {
+impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> Branch<'a, H, C, NOTE_SIZE> {
+    fn new(left: Node<'a, H, C, NOTE_SIZE>, right: Node<'a, H, C, NOTE_SIZE>) -> Self {
         // Compute branch ID: hash(hash(left_id) || hash(right_id) || hash(note))
         let mut id_hasher = H::new();
         left.id().digest::<H>().feed(&mut id_hasher);
@@ -204,9 +351,9 @@ impl<H: Hasher, const NOTE_SIZE: usize> Branch<H, NOTE_SIZE> {
     }
 }
 
-fn generate_proofs<H: Hasher, const NOTE_SIZE: usize>(
-    root: &Node<H, NOTE_SIZE>,
-) -> impl IntoIterator<Item = Proof<'static>> {
+fn generate_proofs<H: Hasher, C: Chunker, const NOTE_SIZE: usize>(
+    root: &Node<H, C, NOTE_SIZE>,
+) -> impl IntoIterator<Item = Proof<'static, H, C, NOTE_SIZE>> {
     let mut proofs = Vec::new();
     let mut stack = Vec::new();
     stack.push((root, Bytes::new()));
@@ -215,11 +362,12 @@ fn generate_proofs<H: Hasher, const NOTE_SIZE: usize>(
         match node {
             Node::Leaf(leaf) => {
                 let mut proof = BytesMut::from(partial_proof);
-                proof.extend_from_slice(leaf.chunk.data_hash().as_slice());
+                proof.extend_from_slice(leaf.chunk.output().as_blob().bytes());
                 proof.extend_from_slice(&leaf.note);
                 proofs.push(Proof {
                     offset: leaf.chunk.offset().clone(),
                     proof: proof.freeze().into(),
+                    _phantom: PhantomData,
                 })
             }
             Node::Branch(branch) => {
@@ -238,16 +386,17 @@ fn generate_proofs<H: Hasher, const NOTE_SIZE: usize>(
     proofs
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof<'a> {
+#[derive_where(Clone, Debug, PartialEq, Eq)]
+pub struct Proof<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
     offset: Range<u64>,
     proof: Blob<'a>,
+    _phantom: PhantomData<(H, C)>,
 }
 
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::chunking::DefaultChunker;
+    use crate::chunking::{Chunker, DefaultChunker};
     use crate::crypto::merkle::DefaultMerkleTree;
     use std::io::Cursor;
 
@@ -376,6 +525,22 @@ mod tests {
             tree.proof(0).unwrap().proof.to_base64(),
             "7EAC9FsACQRwe4oIzu7Mza9KjgWKT4toYxDYGjWrCdp0QgsrYS6AueMJ_rM6ZEGslGqjUekzD3WSe7B5_fwipgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAnH6dASdQCigcL43lp0QclqBaSncF4TspuvxoFbn2L18EXpQrP1wkbwdIjSSWQQRt_F31yNvxtc09KkPFtzMKAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAIHiHU9QwOImFzjqSlfxkJJCtSbAox6TbbFhQvlEapSgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAA"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn verify_chunks() -> anyhow::Result<()> {
+        let mut chunker = DefaultChunker::new();
+        chunker.update(&mut Cursor::new(ONE_MB));
+        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
+        let tree = DefaultMerkleTree::from_iter(chunks.iter());
+        let root = tree.root();
+
+        for chunk in &chunks {
+            let proof = tree.proof(chunk.offset().start).unwrap();
+            root.verify_chunk(chunk, proof)?;
+        }
 
         Ok(())
     }

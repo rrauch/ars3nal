@@ -1,26 +1,35 @@
-use crate::crypto::hash::{Digest, Hasher, Sha256};
+use crate::blob::{AsBlob, Blob};
+use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
+use crate::crypto::{Output, OutputLen};
+use crate::typed::Typed;
 use bytes::Buf;
 use derive_where::derive_where;
+use maybe_owned::MaybeOwned;
 use ringbuf::LocalRb;
 use ringbuf::consumer::Consumer;
 use ringbuf::producer::Producer;
 use ringbuf::storage::Heap;
 use ringbuf::traits::Observer;
 use std::cmp::min;
+use std::fmt::Debug;
 use std::ops::Range;
 
-pub type DefaultChunker = Chunker<Sha256, { 256 * 1024 }, { 32 * 1024 }>;
+pub type DefaultChunker = MostlyFixedChunker<Sha256, { 256 * 1024 }, { 32 * 1024 }>;
+
+pub type TypedChunk<T, C: Chunker> = Typed<T, Chunk<C>>;
 
 #[derive_where(Clone, Debug, PartialEq)]
-pub struct Chunk<H: Hasher> {
-    data_hash: Digest<H>,
+pub struct Chunk<C: Chunker> {
+    output: C::Output,
     offset: Range<u64>,
 }
 
-impl<H: Hasher> Chunk<H> {
-    pub(crate) fn new(data_hash: Digest<H>, offset: u64, len: usize) -> Self {
+pub type MaybeOwnedChunk<'a, C: Chunker> = MaybeOwned<'a, Chunk<C>>;
+
+impl<C: Chunker> Chunk<C> {
+    pub(crate) fn new(output: C::Output, offset: u64, len: usize) -> Self {
         Self {
-            data_hash,
+            output,
             offset: offset..(offset + len as u64),
         }
     }
@@ -37,21 +46,70 @@ impl<H: Hasher> Chunk<H> {
         self.offset.is_empty()
     }
 
-    pub fn data_hash(&self) -> &Digest<H> {
-        &self.data_hash
+    pub fn output(&self) -> &C::Output {
+        &self.output
     }
 }
 
-pub struct Chunker<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> {
+pub trait ChunkInfo:
+    Hashable + AsBlob + for<'a> TryFrom<Blob<'a>> + Send + Sync + Debug + Clone + PartialEq
+{
+    type Len: OutputLen;
+}
+
+impl<H: Hasher> ChunkInfo for Digest<H> {
+    type Len = <H::Output as Output>::Len;
+}
+
+pub trait Chunker: Sized + Send {
+    type Output: ChunkInfo;
+    fn empty() -> Self::Output;
+    fn update(&mut self, input: &mut impl Buf);
+    fn finalize(self) -> impl IntoIterator<Item = Chunk<Self>>;
+}
+
+pub struct MostlyFixedChunker<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> {
     hasher: H,
     current_chunk_start_offset: u64,
     total_bytes_processed: u64,
     buf: LocalRb<Heap<u8>>,
-    chunks: Vec<Chunk<H>>,
+    chunks: Vec<Chunk<Self>>,
+}
+
+impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunker
+    for MostlyFixedChunker<H, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>
+{
+    type Output = Digest<H>;
+
+    fn empty() -> Self::Output {
+        H::new().finalize()
+    }
+
+    fn update(&mut self, input: &mut impl Buf) {
+        while input.has_remaining() {
+            if self.buf.is_full() {
+                self.process_chunk(false);
+                continue;
+            }
+
+            let chunk = input.chunk();
+            let to_copy = chunk.len().min(self.buf.vacant_len());
+            let num_bytes = self.buf.push_slice(&chunk[..to_copy]);
+            input.advance(num_bytes);
+        }
+    }
+
+    fn finalize(mut self) -> impl IntoIterator<Item = Chunk<Self>> {
+        // Process any remaining data
+        while self.buf.occupied_len() > 0 {
+            self.process_chunk(true);
+        }
+        self.chunks
+    }
 }
 
 impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
-    Chunker<H, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>
+    MostlyFixedChunker<H, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>
 {
     pub fn new() -> Self {
         assert!(MAX_CHUNK_SIZE > 0, "MAX_CHUNK_SIZE must be greater than 0.");
@@ -67,20 +125,6 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
             total_bytes_processed: 0,
             buf,
             chunks: Vec::new(),
-        }
-    }
-
-    pub fn update(&mut self, input: &mut impl Buf) {
-        while input.has_remaining() {
-            if self.buf.is_full() {
-                self.process_chunk(false);
-                continue;
-            }
-
-            let chunk = input.chunk();
-            let to_copy = chunk.len().min(self.buf.vacant_len());
-            let num_bytes = self.buf.push_slice(&chunk[..to_copy]);
-            input.advance(num_bytes);
         }
     }
 
@@ -130,7 +174,7 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
         let offset_end = self.current_chunk_start_offset + processed as u64;
 
         self.chunks.push(Chunk {
-            data_hash,
+            output: data_hash,
             offset: self.current_chunk_start_offset..offset_end,
         });
 
@@ -141,19 +185,12 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
         self.current_chunk_start_offset = offset_end;
         self.total_bytes_processed += processed as u64;
     }
-
-    pub fn finalize(mut self) -> Vec<Chunk<H>> {
-        // Process any remaining data
-        while self.buf.occupied_len() > 0 {
-            self.process_chunk(true);
-        }
-        self.chunks
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
+    use crate::chunking::Chunker;
     use crate::chunking::DefaultChunker;
     use std::io::Cursor;
 
@@ -167,20 +204,20 @@ mod tests {
     fn test_chunking() -> anyhow::Result<()> {
         let mut chunker = DefaultChunker::new();
         chunker.update(&mut Cursor::new(ONE_MB));
-        let chunks = chunker.finalize();
+        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
         assert_eq!(chunks.len(), 8);
 
         assert_eq!(chunks[0].offset.start, 0);
         assert_eq!(chunks[0].len(), 262144);
         assert_eq!(
-            chunks[0].data_hash.to_base64(),
+            chunks[0].output.to_base64(),
             "R9tpW9gwYRmLjsYUCZvGJynV1OCHjfIgjbSUek-qIe4"
         );
 
         assert_eq!(chunks[7].offset.start, 1835008);
         assert_eq!(chunks[7].len(), 66754);
         assert_eq!(
-            chunks[7].data_hash.to_base64(),
+            chunks[7].output.to_base64(),
             "C_xIgfY5ZGpsNHEpUBiFxSZ-nlnuDhoT1-fCnuLke68"
         );
 
@@ -191,20 +228,20 @@ mod tests {
     fn test_chunking_even() -> anyhow::Result<()> {
         let mut chunker = DefaultChunker::new();
         chunker.update(&mut Cursor::new(TX_EVEN_DATA));
-        let chunks = chunker.finalize();
+        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
         assert_eq!(chunks.len(), 2);
 
         assert_eq!(chunks[0].offset.start, 0);
         assert_eq!(chunks[0].len(), 262144);
         assert_eq!(
-            chunks[0].data_hash.to_base64(),
+            chunks[0].output.to_base64(),
             "BOLZqkj-lt7NKlGkHbo1uZNEPQuaulpfMk_Wyfs9cyI"
         );
 
         assert_eq!(chunks[1].offset.start, 262144);
         assert_eq!(chunks[1].len(), 68727);
         assert_eq!(
-            chunks[1].data_hash.to_base64(),
+            chunks[1].output.to_base64(),
             "x0Nx2EbydmSLLXkz2ftJw83kmQinPOg57P6P2o4n1ew"
         );
 
@@ -215,20 +252,20 @@ mod tests {
     fn test_chunking_odd() -> anyhow::Result<()> {
         let mut chunker = DefaultChunker::new();
         chunker.update(&mut Cursor::new(TX_ODD_DATA));
-        let chunks = chunker.finalize();
+        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
         assert_eq!(chunks.len(), 3);
 
         assert_eq!(chunks[0].offset.start, 0);
         assert_eq!(chunks[0].len(), 262144);
         assert_eq!(
-            chunks[0].data_hash.to_base64(),
+            chunks[0].output.to_base64(),
             "KeHLQhG8YcahPHQOcTZ3VTnyOvZSCbwEuBx8rMmilEU"
         );
 
         assert_eq!(chunks[2].offset.start, 524288);
         assert_eq!(chunks[2].len(), 159533);
         assert_eq!(
-            chunks[2].data_hash.to_base64(),
+            chunks[2].output.to_base64(),
             "5fKXk1Squ8hy13_EakA-97Ih5-HFvSPssHZzW4E_EMk"
         );
 
@@ -241,21 +278,21 @@ mod tests {
 
         let mut chunker = DefaultChunker::new();
         chunker.update(&mut Cursor::new(data.as_slice()));
-        let chunks = chunker.finalize();
+        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
 
         assert_eq!(chunks.len(), 2);
 
         assert_eq!(chunks[0].offset.start, 0);
         assert_eq!(chunks[0].len(), 131073);
         assert_eq!(
-            chunks[0].data_hash.to_base64(),
+            chunks[0].output.to_base64(),
             "0oEgnMctR7CQF1siYhhA2euCZ9CcwF3BIr-qdZqCgw8"
         );
 
         assert_eq!(chunks[1].offset.start, 131073);
         assert_eq!(chunks[1].len(), 131072);
         assert_eq!(
-            chunks[1].data_hash.to_base64(),
+            chunks[1].output.to_base64(),
             "-kMjm87nuXymLwB8xoSHVgo54Z90893nSG2z-Y345HE"
         );
 
@@ -268,13 +305,13 @@ mod tests {
 
         let mut chunker = DefaultChunker::new();
         chunker.update(&mut Cursor::new(data.as_slice()));
-        let chunks = chunker.finalize();
+        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].offset.start, 0);
         assert_eq!(chunks[0].len(), 16 * 1024);
         assert_eq!(
-            chunks[0].data_hash.to_base64(),
+            chunks[0].output.to_base64(),
             "T-e1mvbeO2ZbZ3iMwvmYkquCfvrjpGc0Kzu047yOW_4"
         );
 
@@ -286,7 +323,7 @@ mod tests {
         let data = vec![];
         let mut chunker = DefaultChunker::new();
         chunker.update(&mut Cursor::new(data.as_slice()));
-        let chunks = chunker.finalize();
+        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
         assert!(chunks.is_empty());
         Ok(())
     }

@@ -16,6 +16,7 @@ elliptic-curve = { workspace = true, features = ["jwk"] }
 digest = "0.11.0-rc.0"
 hybrid-array = { version = "0.3", features = ["serde", "zeroize", "bytemuck"] }
 k256 = { version = "0.14.0-pre.9", features = ["jwk"] }
+maybe-owned = "0.3"
 mown = "1.0"
 rand = { version = "0.9", features = ["thread_rng"] }
 rangemap = "1.6"

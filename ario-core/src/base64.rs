@@ -25,7 +25,7 @@ pub trait ToBase64 {
     }
 }*/
 
-impl<T: AsBlob> ToBase64 for T {
+impl<T: ?Sized + AsBlob> ToBase64 for T {
     fn to_base64(&self) -> String {
         Base64UrlSafeNoPadding::encode_to_string(self.as_blob().bytes())
             .expect("base64 encoding should not fail")
