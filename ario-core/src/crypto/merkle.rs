@@ -11,13 +11,23 @@ use std::cmp::min;
 use std::ops::Range;
 
 pub type DefaultMerkleTreeBuilder = MerkleTreeBuilder<Sha256, 32, { 256 * 1024 }, { 32 * 1024 }>;
-pub type DefaultMerkleRoot = MerkleRoot<Sha256>;
+pub type DefaultMerkleRoot = MerkleRoot<Sha256, 32, { 256 * 1024 }, { 32 * 1024 }>;
 
 pub struct MerkleNodeIdKind;
-pub type NodeId<H: Hasher> = TypedDigest<MerkleNodeIdKind, H>;
+pub type NodeId<
+    H: Hasher,
+    const NOTE_SIZE: usize,
+    const MAX_CHUNK_SIZE: usize,
+    const MIN_CHUNK_SIZE: usize,
+> = TypedDigest<MerkleNodeIdKind, H>;
 
 pub struct MerkleRootKind;
-pub type MerkleRoot<H: Hasher> = Typed<MerkleRootKind, NodeId<H>>;
+pub type MerkleRoot<
+    H: Hasher,
+    const NOTE_SIZE: usize,
+    const MAX_CHUNK_SIZE: usize,
+    const MIN_CHUNK_SIZE: usize,
+> = Typed<MerkleRootKind, NodeId<H, NOTE_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>>;
 
 #[derive_where(Clone, Debug, PartialEq)]
 pub struct MerkleTree<
@@ -32,7 +42,7 @@ pub struct MerkleTree<
 impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
     MerkleTree<H, NOTE_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>
 {
-    pub fn root(&self) -> &MerkleRoot<H> {
+    pub fn root(&self) -> &MerkleRoot<H, NOTE_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE> {
         MerkleRoot::wrap_ref(self.root.id())
     }
 
@@ -59,7 +69,7 @@ pub enum Node<
 impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
     Node<H, NOTE_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>
 {
-    fn id(&self) -> &NodeId<H> {
+    fn id(&self) -> &NodeId<H, NOTE_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE> {
         match self {
             Node::Leaf(leaf) => &leaf.id,
             Node::Branch(branch) => &branch.id,
@@ -91,7 +101,7 @@ pub struct Leaf<
     const MAX_CHUNK_SIZE: usize,
     const MIN_CHUNK_SIZE: usize,
 > {
-    id: NodeId<H>,
+    id: NodeId<H, NOTE_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>,
     chunk: Chunk<H, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>,
 }
 
@@ -145,7 +155,7 @@ pub struct Branch<
     const MAX_CHUNK_SIZE: usize,
     const MIN_CHUNK_SIZE: usize,
 > {
-    id: NodeId<H>,
+    id: NodeId<H, NOTE_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>,
     left: Box<Node<H, NOTE_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>>,
     right: Box<Node<H, NOTE_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>>,
     note: u64, // Split point (left child's max offset)
@@ -424,7 +434,7 @@ mod tests {
 
     #[test]
     fn empty_tree() -> anyhow::Result<()> {
-        let mut tree_builder = DefaultMerkleTreeBuilder::new();
+        let tree_builder = DefaultMerkleTreeBuilder::new();
         let empty_tree = tree_builder.finalize();
         assert_eq!(empty_tree.max_offset(), 0);
         assert_eq!(empty_tree.num_chunks(), 0);

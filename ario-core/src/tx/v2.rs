@@ -3,6 +3,7 @@ use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::ec::{Curve, EcPublicKey, EcSecretKey};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384};
+use crate::crypto::merkle::DefaultMerkleRoot;
 use crate::crypto::rsa::{Rsa, RsaPrivateKey, SupportedRsaKeySize};
 use crate::crypto::signature;
 use crate::crypto::signature::SigningError;
@@ -13,10 +14,7 @@ use crate::tx::Format::V2;
 use crate::tx::ecdsa::EcdsaSignatureData;
 use crate::tx::pss::PssSignatureData;
 use crate::tx::raw::{RawTx, RawTxData, UnvalidatedRawTx, ValidatedRawTx};
-use crate::tx::{
-    CommonData, CommonTxDataError, Format, Owner, Quantity, Reward, Signature, SignatureType, Tag,
-    TxAnchor, TxDeepHash, TxError, TxHash, TxId, TxSignature,
-};
+use crate::tx::{CommonData, CommonTxDataError, ExternalData, Format, Owner, Quantity, Reward, Signature, SignatureType, Tag, TxAnchor, TxDeepHash, TxError, TxHash, TxId, TxSignature};
 use crate::tx::{RewardError, Transfer};
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
@@ -33,6 +31,8 @@ pub(crate) struct V2Tx<'a, const VALIDATED: bool = false>(V2TxData<'a>);
 
 pub(crate) type UnvalidatedV2Tx<'a> = V2Tx<'a, false>;
 pub(crate) type ValidatedV2Tx<'a> = V2Tx<'a, true>;
+
+pub(crate) type DataRoot = DefaultMerkleRoot;
 
 impl<'a, const VALIDATED: bool> V2Tx<'a, VALIDATED> {
     pub(super) fn as_inner(&self) -> &V2TxData<'a> {
@@ -60,7 +60,7 @@ impl<'a, const VALIDATED: bool> From<V2Tx<'a, VALIDATED>> for RawTx<'a, VALIDATE
             target: v2.target.map(|w| w.as_blob().into_owned()),
             quantity: v2.quantity.map(|q| q.into_inner().into()),
             data_tree: vec![],
-            data_root: v2.data_root,
+            data_root: v2.data_root.map(|dr| dr.as_blob().into_owned()),
             data_size: v2.data_size,
             data: None,
             reward: v2.reward.into_inner().into(),
@@ -104,7 +104,7 @@ impl<'a> UnvalidatedV2Tx<'a> {
 impl<'a> SupportsValidation for UnvalidatedV2Tx<'a> {
     type Unvalidated = V2TxData<'a>;
     type Validated = ValidatedV2Tx<'a>;
-    type Validator = V2TxDataValidator;
+    type Validator = V2TxValidator;
 
     fn into_valid(self, _token: Valid<Self>) -> Self::Validated
     where
@@ -169,7 +169,7 @@ pub(crate) struct V2TxData<'a> {
     target: Option<WalletAddress>,
     quantity: Option<Quantity>,
     data_size: u64,
-    data_root: Option<Blob<'a>>, //todo
+    data_root: Option<DataRoot>,
     reward: Reward,
     signature_data: V2SignatureData,
     denomination: Option<u32>,
@@ -185,7 +185,7 @@ impl<'a> V2TxData<'a> {
             target: self.target,
             quantity: self.quantity,
             data_size: self.data_size,
-            data_root: self.data_root.map(|d| d.into_owned()),
+            data_root: self.data_root,
             reward: self.reward,
             signature_data: self.signature_data,
             denomination: self.denomination,
@@ -213,7 +213,7 @@ impl<'a> V2TxData<'a> {
         self.quantity.as_ref()
     }
 
-    pub fn data_root(&self) -> Option<&Blob<'a>> {
+    pub fn data_root(&self) -> Option<&DataRoot> {
         self.data_root.as_ref()
     }
 
@@ -274,7 +274,11 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
             return Err(V2TxDataError::DataSizeWithoutDataRoot(raw.data_size));
         }
 
-        //todo: data_root
+        let data_root = raw
+            .data_root
+            .map(|b| DataRoot::try_from(b))
+            .transpose()
+            .map_err(|e| V2TxDataError::InvalidDataRoot(e.to_string()))?;
 
         let (signature_data, tx_hash) = match raw.signature_type.unwrap_or_default() {
             SignatureType::RsaPss => {
@@ -294,7 +298,7 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
                     last_tx: &last_tx,
                     tags: &common_data.tags,
                     data_size: raw.data_size,
-                    data_root: raw.data_root.as_ref(),
+                    data_root: data_root.as_ref(),
                     denomination: common_data.denomination,
                 }
                 .tx_hash();
@@ -312,7 +316,7 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
             target: common_data.target,
             quantity: common_data.quantity,
             data_size: raw.data_size,
-            data_root: raw.data_root,
+            data_root,
             reward: common_data.reward,
             signature_data,
             denomination: common_data.denomination,
@@ -329,7 +333,7 @@ struct TxHashBuilder<'a> {
     last_tx: &'a TxAnchor,
     tags: &'a Vec<Tag<'a>>,
     data_size: u64,
-    data_root: Option<&'a Blob<'a>>, //todo
+    data_root: Option<&'a DataRoot>,
     denomination: Option<u32>,
 }
 
@@ -389,11 +393,13 @@ pub enum V2TxDataError {
     DataSizeWithoutDataRoot(u64),
     #[error("data root is set but data size is '0'")]
     DataRootWithoutDataSize,
+    #[error("provided data root is invalid: {0}")]
+    InvalidDataRoot(String),
 }
 
-pub struct V2TxDataValidator;
+pub struct V2TxValidator;
 
-impl Validator<V2TxData<'_>> for V2TxDataValidator {
+impl Validator<V2TxData<'_>> for V2TxValidator {
     type Error = V2TxDataError;
 
     fn validate(data: &V2TxData) -> Result<(), Self::Error> {
@@ -465,22 +471,7 @@ pub struct TxDraft<'a> {
     tags: Vec<Tag<'a>>,
     last_tx: TxAnchor,
     transfer: Option<Transfer>,
-    data_upload: Option<DataUpload<'a>>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct DataUpload<'a> {
-    data_size: u64,
-    data_root: Blob<'a>, // todo
-}
-
-impl<'a> DataUpload<'a> {
-    pub fn new(data_root: Blob<'a>, data_size: u64) -> Self {
-        Self {
-            data_root,
-            data_size,
-        }
-    }
+    data_upload: Option<ExternalData>,
 }
 
 impl<'a> From<&'a TxDraft<'a>> for TxHashBuilder<'a> {

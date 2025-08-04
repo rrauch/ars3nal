@@ -89,7 +89,7 @@ impl<'a> UnvalidatedV1Tx<'a> {
 impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
     type Unvalidated = V1TxData<'a>;
     type Validated = ValidatedV1Tx<'a>;
-    type Validator = V1TxDataValidator;
+    type Validator = V1TxValidator;
 
     fn into_valid(self, _token: Valid<Self>) -> Self::Validated
     where
@@ -245,9 +245,9 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
     }
 }
 
-pub struct V1TxDataValidator;
+pub struct V1TxValidator;
 
-impl Validator<V1TxData<'_>> for V1TxDataValidator {
+impl Validator<V1TxData<'_>> for V1TxValidator {
     type Error = V1TxDataError;
 
     fn validate(data: &V1TxData) -> Result<(), Self::Error> {
