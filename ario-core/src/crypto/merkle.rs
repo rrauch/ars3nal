@@ -1,7 +1,6 @@
 use crate::crypto::hash::{Digest, Hashable, HashableExt, Hasher, Sha256, TypedDigest};
 use crate::typed::{FromInner, Typed};
 use bytemuck::TransparentWrapper;
-use bytes::{Bytes, BytesMut};
 use derive_where::derive_where;
 use ringbuf::LocalRb;
 use ringbuf::consumer::Consumer;
@@ -9,20 +8,16 @@ use ringbuf::producer::Producer;
 use ringbuf::storage::Heap;
 use ringbuf::traits::Observer;
 use std::cmp::min;
-use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{LazyLock, Mutex};
 
-static ZERO_BYTES: LazyLock<ZeroBytes> = LazyLock::new(|| ZeroBytes::new());
-
-pub type ArweaveMerkleTreeBuilder = MerkleTreeBuilder<Sha256, 32, { 256 * 1024 }, { 32 * 1024 }>;
-pub type ArweaveMerkleRootId = MerkleRootId<Sha256>;
+pub type DefaultMerkleTreeBuilder = MerkleTreeBuilder<Sha256, 32, { 256 * 1024 }, { 32 * 1024 }>;
+pub type DefaultMerkleRoot = MerkleRoot<Sha256>;
 
 pub struct MerkleNodeIdKind;
 pub type NodeId<H: Hasher> = TypedDigest<MerkleNodeIdKind, H>;
 
 pub struct MerkleRootKind;
-pub type MerkleRootId<H: Hasher> = Typed<MerkleRootKind, NodeId<H>>;
+pub type MerkleRoot<H: Hasher> = Typed<MerkleRootKind, NodeId<H>>;
 
 #[derive_where(Clone, Debug, PartialEq)]
 pub struct MerkleTree<
@@ -37,8 +32,8 @@ pub struct MerkleTree<
 impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
     MerkleTree<H, NOTE_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>
 {
-    pub fn root_id(&self) -> &MerkleRootId<H> {
-        MerkleRootId::wrap_ref(self.root.id())
+    pub fn root(&self) -> &MerkleRoot<H> {
+        MerkleRoot::wrap_ref(self.root.id())
     }
 }
 
@@ -99,8 +94,8 @@ impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_C
 
 fn to_note_hash<H: Hasher, const NOTE_SIZE: usize>(value: u64) -> Digest<H> {
     let mut hasher = H::new();
-    let zeros = ZERO_BYTES.get(NOTE_SIZE - 8);
-    hasher.update(zeros.as_ref());
+    let zeros = [0u8; NOTE_SIZE];
+    hasher.update(&zeros[..NOTE_SIZE - 8]);
     let be_u64 = value.to_be_bytes();
     hasher.update(&be_u64);
     hasher.finalize()
@@ -311,35 +306,15 @@ impl<H: Hasher, const NOTE_SIZE: usize, const MAX_CHUNK_SIZE: usize, const MIN_C
     }
 }
 
-struct ZeroBytes {
-    map: Mutex<HashMap<usize, Bytes>>,
-}
-
-impl ZeroBytes {
-    fn new() -> Self {
-        Self {
-            map: Mutex::new(HashMap::default()),
-        }
-    }
-
-    fn get(&self, len: usize) -> Bytes {
-        let mut lock = self.map.lock().expect("lock not to be poisoned");
-        if !lock.contains_key(&len) {
-            lock.insert(len, BytesMut::zeroed(len).freeze());
-        }
-        lock.get(&len).unwrap().clone()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::crypto::merkle::ArweaveMerkleTreeBuilder;
+    use crate::crypto::merkle::DefaultMerkleTreeBuilder;
 
     static ONE_MB: &'static [u8] = include_bytes!("../../testdata/1mb.bin");
 
     #[test]
     fn merkle_tree_builder() -> anyhow::Result<()> {
-        let mut tree_builder = ArweaveMerkleTreeBuilder::new();
+        let mut tree_builder = DefaultMerkleTreeBuilder::new();
         tree_builder.update(ONE_MB);
         let tree = tree_builder.finalize();
 
@@ -348,7 +323,7 @@ mod tests {
             100, 200, 2, 138, 245, 233, 31, 171, 188, 172, 188, 68, 16,
         ];
 
-        assert_eq!(tree.root_id().as_slice(), expected_root_id);
+        assert_eq!(tree.root().as_slice(), expected_root_id);
 
         Ok(())
     }
