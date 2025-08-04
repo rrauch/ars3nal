@@ -14,7 +14,7 @@ impl<'a, T> TypedBlob<'a, T> {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Blob<'a> {
     Bytes(Bytes),
     Slice(&'a [u8]),

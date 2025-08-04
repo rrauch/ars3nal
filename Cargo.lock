@@ -49,6 +49,7 @@ dependencies = [
  "k256",
  "mown",
  "rand",
+ "rangemap",
  "ringbuf",
  "rsa",
  "serde",
@@ -787,6 +788,12 @@ checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
 dependencies = [
  "getrandom",
 ]
+
+[[package]]
+name = "rangemap"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f93e7e49bb0bf967717f7bd674458b3d6b0c5f48ec7e3038166026a69fc22223"
 
 [[package]]
 name = "ref-cast"
