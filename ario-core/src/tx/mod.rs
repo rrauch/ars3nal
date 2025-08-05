@@ -18,11 +18,12 @@ use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature::TypedSignature;
 use crate::crypto::{keys, signature};
+use crate::data::{Data, EmbeddedData, ExternalData};
 use crate::json::JsonSource;
 use crate::money::{CurrencyExt, Money, MoneyError, TypedMoney, Winston};
 use crate::tx::raw::{RawTag, RawTx, RawTxDataError, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::v1::{UnvalidatedV1Tx, V1Tx, V1TxDataError};
-use crate::tx::v2::{DataRoot, TxDraft, UnvalidatedV2Tx, V2Tx, V2TxBuilder, V2TxDataError};
+use crate::tx::v2::{TxDraft, UnvalidatedV2Tx, V2Tx, V2TxBuilder, V2TxDataError};
 use crate::typed::{FromInner, Typed};
 use crate::validation::ValidateExt;
 use crate::wallet::{WalletAddress, WalletKind, WalletPk};
@@ -159,13 +160,10 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
                 .as_inner()
                 .data
                 .as_ref()
-                .map(|d| Data::Embedded(Mown::Borrowed(d))),
+                .map(|d| Data::Embedded(d.into())),
 
             TxInner::V2(tx) => tx.as_inner().data_root().map(|dr| {
-                Data::External(Mown::Owned(ExternalData {
-                    data_size: tx.as_inner().data_size(),
-                    data_root: dr.clone(),
-                }))
+                Data::External(ExternalData::new(dr.clone(), tx.as_inner().data_size()).into())
             }),
         }
     }
@@ -190,34 +188,6 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
 
     pub fn into_owned(self) -> Tx<'static, VALIDATED> {
         Tx(self.0.into_owned())
-    }
-}
-
-pub enum Data<'a> {
-    Embedded(Mown<'a, EmbeddedData<'a>>),
-    External(Mown<'a, ExternalData>),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExternalData {
-    data_size: u64,
-    data_root: DataRoot,
-}
-
-impl ExternalData {
-    pub fn new(data_root: DataRoot, data_size: u64) -> Self {
-        Self {
-            data_root,
-            data_size,
-        }
-    }
-
-    pub fn size(&self) -> u64 {
-        self.data_size
-    }
-
-    pub fn root(&self) -> &DataRoot {
-        &self.data_root
     }
 }
 
@@ -738,9 +708,6 @@ impl Hashable for Tag<'_> {
     }
 }
 
-pub struct EmbeddedDataKind;
-pub type EmbeddedData<'a> = TypedBlob<'a, EmbeddedDataKind>;
-
 pub struct TxQuantityKind;
 pub type Quantity = TypedMoney<TxQuantityKind, Winston>;
 
@@ -824,7 +791,7 @@ mod tests {
         TxBuilder, UnvalidatedTx,
     };
     use crate::typed::FromInner;
-    use crate::wallet::{WalletAddress, WalletSk};
+    use crate::wallet::{Wallet, WalletAddress, WalletSk};
     use std::str::FromStr;
 
     static TX_V1: &'static [u8] = include_bytes!("../../testdata/tx_v1.json");
@@ -835,6 +802,8 @@ mod tests {
         include_bytes!("../../testdata/ar_wallet_tests_PS256_65537_fixture.json");
     static WALLET_EC_JWK: &'static [u8] =
         include_bytes!("../../testdata/ar_wallet_tests_ES256K_fixture.json");
+    static UPLOAD_DATA: &'static [u8] =
+        include_bytes!("../../testdata/trtu91u1kRVDrZI6WvWVxU3uvEjJRZcls2WSZvYJyBc.data");
 
     #[test]
     fn v1() -> anyhow::Result<()> {
@@ -866,6 +835,8 @@ mod tests {
             }
             _ => panic!("invalid data"),
         }
+
+        assert_eq!(validated.data().unwrap().size(), 1033478);
 
         Ok(())
     }
@@ -942,7 +913,7 @@ mod tests {
 
         let draft = TxBuilder::v2()
             .reward(1234)?
-            .last_tx(TxAnchor::from_inner([0u8; 48]))
+            .tx_anchor(TxAnchor::from_inner([0u8; 48]))
             .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 101)?)
             .data_upload(ExternalData::new(data_root.clone(), data_size))
             .draft();
@@ -973,8 +944,8 @@ mod tests {
             _ => panic!("invalid data"),
         };
 
-        assert_eq!(data.data_size, data_size);
-        assert_eq!(data.data_root, data_root);
+        assert_eq!(data.size(), data_size);
+        assert_eq!(data.root(), &data_root);
 
         Ok(())
     }
@@ -990,7 +961,7 @@ mod tests {
 
         let draft = TxBuilder::v2()
             .reward(21234)?
-            .last_tx(TxAnchor::from_inner([0u8; 48]))
+            .tx_anchor(TxAnchor::from_inner([0u8; 48]))
             .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 2101)?)
             .draft();
 
@@ -1022,6 +993,36 @@ mod tests {
         );
 
         assert!(valid_tx.data().is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn upload_pss() -> anyhow::Result<()> {
+        let wallet = Wallet::from_jwk(&Jwk::from_json(WALLET_RSA_JWK)?)?;
+
+        let draft = TxBuilder::v2()
+            .reward(12345)?
+            .tx_anchor(TxAnchor::from_inner([0u8; 48]))
+            .data_upload(UPLOAD_DATA.into())
+            .draft();
+
+        let valid_tx = wallet.sign_tx_draft(draft)?;
+
+        assert_eq!(valid_tx.data().unwrap().size(), 683821);
+        assert_eq!(
+            valid_tx.data().unwrap().data_root().unwrap().to_base64(),
+            "ikHHDmOhqnZ5qsNZ7SOoofuaG66A5yRLsTvacad2NMg"
+        );
+
+        let json = valid_tx.to_json_string()?;
+        let valid_tx = Tx::from_json(&json)?.validate().map_err(|(_, err)| err)?;
+
+        assert_eq!(valid_tx.data().unwrap().size(), 683821);
+        assert_eq!(
+            valid_tx.data().unwrap().data_root().unwrap().to_base64(),
+            "ikHHDmOhqnZ5qsNZ7SOoofuaG66A5yRLsTvacad2NMg"
+        );
 
         Ok(())
     }

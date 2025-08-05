@@ -4,6 +4,8 @@ use crate::crypto::{Output, OutputLen};
 use crate::typed::Typed;
 use bytes::Buf;
 use derive_where::derive_where;
+use futures_lite::AsyncRead;
+use futures_lite::AsyncReadExt;
 use maybe_owned::MaybeOwned;
 use ringbuf::LocalRb;
 use ringbuf::consumer::Consumer;
@@ -12,6 +14,8 @@ use ringbuf::storage::Heap;
 use ringbuf::traits::Observer;
 use std::cmp::min;
 use std::fmt::Debug;
+use std::io::Cursor;
+use std::io::Read;
 use std::ops::Range;
 
 pub type DefaultChunker = MostlyFixedChunker<Sha256, { 256 * 1024 }, { 32 * 1024 }>;
@@ -73,6 +77,26 @@ where
     Self: Chunker,
 {
     fn single_input(self, input: &mut impl Buf) -> Vec<Chunk<Self>>;
+    fn try_from_reader(self, reader: &mut impl Read) -> std::io::Result<Vec<Chunk<Self>>> {
+        self.try_from_reader_with_buf_size::<{ 64 * 1024 }>(reader)
+    }
+
+    fn try_from_reader_with_buf_size<const BUF_SIZE: usize>(
+        self,
+        reader: &mut impl Read,
+    ) -> std::io::Result<Vec<Chunk<Self>>>;
+
+    fn try_from_async_reader(
+        self,
+        reader: &mut (impl AsyncRead + Send + Unpin),
+    ) -> impl Future<Output = std::io::Result<Vec<Chunk<Self>>>> + Send {
+        self.try_from_async_reader_with_buf_size::<{ 64 * 1024 }>(reader)
+    }
+
+    fn try_from_async_reader_with_buf_size<const BUF_SIZE: usize>(
+        self,
+        reader: &mut (impl AsyncRead + Send + Unpin),
+    ) -> impl Future<Output = std::io::Result<Vec<Chunk<Self>>>> + Send;
 }
 
 impl<T: Chunker> ChunkerExt for T {
@@ -81,6 +105,42 @@ impl<T: Chunker> ChunkerExt for T {
         chunks.extend(self.update(input));
         chunks.extend(self.finalize());
         chunks
+    }
+
+    fn try_from_reader_with_buf_size<const BUF_SIZE: usize>(
+        mut self,
+        reader: &mut impl Read,
+    ) -> std::io::Result<Vec<Chunk<Self>>> {
+        let mut chunks = vec![];
+        let mut buf = vec![0; BUF_SIZE];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n > 0 {
+                chunks.extend(self.update(&mut Cursor::new(&buf[..n])));
+                continue;
+            }
+            break;
+        }
+        chunks.extend(self.finalize());
+        Ok(chunks)
+    }
+
+    async fn try_from_async_reader_with_buf_size<const BUF_SIZE: usize>(
+        mut self,
+        reader: &mut (impl AsyncRead + Send + Unpin),
+    ) -> std::io::Result<Vec<Chunk<Self>>> {
+        let mut chunks = vec![];
+        let mut buf = vec![0; BUF_SIZE];
+        loop {
+            let n = reader.read(&mut buf).await?;
+            if n > 0 {
+                chunks.extend(self.update(&mut Cursor::new(&buf[..n])));
+                continue;
+            }
+            break;
+        }
+        chunks.extend(self.finalize());
+        Ok(chunks)
     }
 }
 
@@ -212,9 +272,12 @@ mod tests {
     use crate::base64::ToBase64;
     use crate::chunking::ChunkerExt;
     use crate::chunking::DefaultChunker;
+    use std::fs::File;
     use std::io::Cursor;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
 
     static ONE_MB: &'static [u8] = include_bytes!("../testdata/1mb.bin");
+    static ONE_MB_PATH: &'static str = "./testdata/1mb.bin";
     static TX_EVEN_DATA: &'static [u8] =
         include_bytes!("../testdata/OX63odH91fXS4hN506rYC_WUo8mWC5M3xuBymLhSKSw.data");
     static TX_ODD_DATA: &'static [u8] =
@@ -337,5 +400,34 @@ mod tests {
         let chunks = DefaultChunker::new().single_input(&mut Cursor::new(data.as_slice()));
         assert!(chunks.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn reader() -> anyhow::Result<()> {
+        let reference = DefaultChunker::new().single_input(&mut Cursor::new(ONE_MB));
+
+        let mut file = File::open(ONE_MB_PATH)?;
+        let chunks = DefaultChunker::new().try_from_reader(&mut file)?;
+
+        assert_eq!(&chunks, &reference);
+
+        Ok(())
+    }
+
+    #[test]
+    fn async_reader() -> anyhow::Result<()> {
+        let reference = DefaultChunker::new().single_input(&mut Cursor::new(ONE_MB));
+
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async {
+            let file = tokio::fs::File::open(ONE_MB_PATH).await?;
+            let chunks = DefaultChunker::new()
+                .try_from_async_reader(&mut file.compat())
+                .await?;
+
+            assert_eq!(&chunks, &reference);
+
+            Ok(())
+        })
     }
 }

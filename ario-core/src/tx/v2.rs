@@ -14,7 +14,10 @@ use crate::tx::Format::V2;
 use crate::tx::ecdsa::EcdsaSignatureData;
 use crate::tx::pss::PssSignatureData;
 use crate::tx::raw::{RawTx, RawTxData, UnvalidatedRawTx, ValidatedRawTx};
-use crate::tx::{CommonData, CommonTxDataError, ExternalData, Format, Owner, Quantity, Reward, Signature, SignatureType, Tag, TxAnchor, TxDeepHash, TxError, TxHash, TxId, TxSignature};
+use crate::tx::{
+    CommonData, CommonTxDataError, ExternalData, Format, Owner, Quantity, Reward, Signature,
+    SignatureType, Tag, TxAnchor, TxDeepHash, TxError, TxHash, TxId, TxSignature,
+};
 use crate::tx::{RewardError, Transfer};
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
@@ -469,7 +472,7 @@ pub struct TxDraft<'a> {
     reward: Reward,
     #[builder(default)]
     tags: Vec<Tag<'a>>,
-    last_tx: TxAnchor,
+    tx_anchor: TxAnchor,
     transfer: Option<Transfer>,
     data_upload: Option<ExternalData>,
 }
@@ -482,7 +485,7 @@ impl<'a> From<&'a TxDraft<'a>> for TxHashBuilder<'a> {
         };
 
         let (data_size, data_root) = match &value.data_upload {
-            Some(upload) => (upload.data_size, Some(&upload.data_root)),
+            Some(upload) => (upload.size(), Some(upload.root())),
             None => (0, None),
         };
 
@@ -491,7 +494,7 @@ impl<'a> From<&'a TxDraft<'a>> for TxHashBuilder<'a> {
             target,
             quantity,
             reward: &value.reward,
-            last_tx: &value.last_tx,
+            last_tx: &value.tx_anchor,
             tags: &value.tags,
             data_size,
             data_root,
@@ -509,13 +512,13 @@ impl<'a> TxDraft<'a> {
         };
 
         let (data_size, data_root) = match self.data_upload {
-            Some(upload) => (upload.data_size, Some(upload.data_root)),
+            Some(upload) => (upload.size(), Some(upload.into_inner())),
             None => (0, None),
         };
 
         let tx_data = V2TxData {
             id: signature_data.signature().digest(),
-            last_tx: self.last_tx,
+            last_tx: self.tx_anchor,
             tags: self.tags,
             target,
             quantity,

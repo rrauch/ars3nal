@@ -192,7 +192,7 @@ mod tests {
 
         let draft = TxBuilder::v2()
             .reward(12345)?
-            .last_tx(TxAnchor::from_inner([0u8; 48]))
+            .tx_anchor(TxAnchor::from_inner([0u8; 48]))
             .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 999999)?)
             .draft();
 
@@ -215,7 +215,7 @@ mod tests {
 
         let draft = TxBuilder::v2()
             .reward(22345)?
-            .last_tx(TxAnchor::from_inner([0u8; 48]))
+            .tx_anchor(TxAnchor::from_inner([0u8; 48]))
             .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 99999)?)
             .draft();
 

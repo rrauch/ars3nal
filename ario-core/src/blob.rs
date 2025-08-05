@@ -1,8 +1,9 @@
 use crate::typed::{FromInner, Typed};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use hybrid_array::{Array, ArraySize};
 use std::array::TryFromSliceError;
 use std::fmt::{Debug, Formatter};
+use std::io::Cursor;
 use std::ops::Deref;
 use thiserror::Error;
 
@@ -63,6 +64,13 @@ impl<'a> Blob<'a> {
         match self {
             Self::Bytes(b) => b.deref(),
             Self::Slice(b) => *b,
+        }
+    }
+
+    pub fn buf(&self) -> impl Buf {
+        match self {
+            Self::Bytes(b) => Cursor::new(b.deref()),
+            Self::Slice(b) => Cursor::new(*b),
         }
     }
 
