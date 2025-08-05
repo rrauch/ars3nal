@@ -1,4 +1,5 @@
 extern crate core;
+
 use crate::crypto::hash::Sha256;
 use crate::crypto::hash::TypedDigest;
 pub use rsa::BoxedUint as BigUint;
@@ -11,15 +12,16 @@ pub mod tx;
 
 pub(crate) mod base64;
 pub mod blob;
+mod chunking;
+pub(crate) mod confidential;
 pub mod crypto;
+mod data;
 mod json;
+mod jwk;
 pub mod money;
 pub mod typed;
 mod validation;
 pub mod wallet;
-mod jwk;
-mod chunking;
-mod data;
 //pub struct DriveKind;
 //pub type DriveId = id::TypedUuid<DriveKind>;
 

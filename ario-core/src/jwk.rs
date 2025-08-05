@@ -1,9 +1,10 @@
 use crate::JsonError;
+use crate::confidential::{Confidential, SecretExt};
 use crate::json::JsonSource;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Debug, Copy, Clone, PartialEq, Hash, Serialize, Deserialize, Zeroize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -28,18 +29,33 @@ impl Display for KeyType {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Jwk {
-    pub kty: KeyType,
+    kty: KeyType,
     #[serde(flatten)]
-    pub fields: HashMap<String, Zeroizing<String>>,
+    fields: HashMap<String, Confidential<String>>,
 }
 
 impl Jwk {
+    pub fn key_type(&self) -> KeyType {
+        self.kty
+    }
+
+    pub fn contains(&self, field: impl AsRef<str>) -> bool {
+        self.fields.contains_key(field.as_ref())
+    }
+
+    pub fn get(&self, field: impl AsRef<str>) -> Option<&Confidential<String>> {
+        self.fields.get(field.as_ref())
+    }
+    /*pub fn get(&self, field: impl AsRef<str>) -> Option<&str> {
+        self.fields.get(field.as_ref()).map(|s| s.reveal().as_str())
+    }*/
+
     pub fn from_json<J: JsonSource>(json: J) -> Result<Self, JsonError> {
         serde_json::from_value(json.try_into_json()?)
     }
 
-    pub(crate) fn to_json_str(&self) -> Result<String, JsonError> {
-        serde_json::to_string_pretty(self)
+    pub(crate) fn to_json_str(&self) -> Result<Confidential<String>, JsonError> {
+        serde_json::to_string_pretty(self).map(|s| s.confidential())
     }
 }
 

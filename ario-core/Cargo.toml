@@ -32,5 +32,5 @@ uuid = { version = "1", features = ["v4"] }
 zeroize = { workspace = true, features = ["derive", "serde"] }
 
 [dev-dependencies]
-tokio = { version = "1.47", features = ["full"] }
-tokio-util = { version = "0.7", features = ["compat"] }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["compat"] }

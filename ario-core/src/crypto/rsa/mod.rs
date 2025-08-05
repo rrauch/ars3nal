@@ -2,6 +2,7 @@ pub mod pss;
 
 use crate::base64::{Base64Error, FromBase64};
 use crate::blob::{AsBlob, Blob};
+use crate::confidential::{Confidential, SecretExt, SecretOptExt};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
 use crate::crypto::keys::{AsymmetricScheme, KeySize, PublicKey, SecretKey};
@@ -49,7 +50,6 @@ pub enum SupportedPrivateKey {
 }
 
 #[derive(Clone, TransparentWrapper)]
-#[transparent(ExternalRsaPrivateKey)]
 #[repr(transparent)]
 pub struct RsaPrivateKey<const BIT: usize>(ExternalRsaPrivateKey);
 
@@ -99,7 +99,11 @@ where
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct RsaPrivateKeyComponents {
+#[repr(transparent)]
+pub struct RsaPrivateKeyComponents(Confidential<RsaPrivateKeyComponentsInner>);
+
+#[derive(Zeroize)]
+struct RsaPrivateKeyComponentsInner {
     n: BigUint,
     e: BigUint,
     d: BigUint,
@@ -118,6 +122,7 @@ impl TryFrom<RsaPrivateKeyComponents> for SupportedPrivateKey {
     type Error = KeyError;
 
     fn try_from(value: RsaPrivateKeyComponents) -> Result<Self, Self::Error> {
+        let value = value.0.reveal();
         // Note: ExternalRsaPrivateKey::from_components does NOT zeroize the provided key material on error
         // a PR might be warranted
         // might be related to https://github.com/RustCrypto/RSA/issues/507
@@ -161,17 +166,20 @@ pub enum JwkFieldValueError {
 
 impl RsaPrivateKeyComponents {
     pub fn new(n: BigUint, e: BigUint, d: BigUint, p_q: Option<(BigUint, BigUint)>) -> Self {
-        Self {
-            n,
-            e,
-            d,
-            primes: p_q.map(|(p, q)| vec![p, q]).unwrap_or_default(),
-        }
+        Self(
+            RsaPrivateKeyComponentsInner {
+                n,
+                e,
+                d,
+                primes: p_q.map(|(p, q)| vec![p, q]).unwrap_or_default(),
+            }
+            .confidential(),
+        )
     }
 
     pub(crate) fn from_jwk(jwk: &Jwk) -> Result<Self, JwkError> {
-        if jwk.kty != KeyType::Rsa {
-            return Err(JwkError::NonRsaKeyType(jwk.kty.to_string()));
+        if jwk.key_type() != KeyType::Rsa {
+            return Err(JwkError::NonRsaKeyType(jwk.key_type().to_string()));
         }
 
         fn try_to_big_uint<S: AsRef<str>>(value: Option<S>) -> Result<Option<BigUint>, JwkError> {
@@ -182,19 +190,19 @@ impl RsaPrivateKeyComponents {
                 .map(|b| BigUint::from_be_slice_vartime(b.bytes())))
         }
 
-        let p_q = if jwk.fields.contains_key("p") && jwk.fields.contains_key("q") {
+        let p_q = if jwk.contains("p") && jwk.contains("q") {
             Some((
-                try_to_big_uint(jwk.fields.get("p"))?.unwrap(),
-                try_to_big_uint(jwk.fields.get("q"))?.unwrap(),
+                try_to_big_uint(jwk.get("p").reveal())?.unwrap(),
+                try_to_big_uint(jwk.get("q").reveal())?.unwrap(),
             ))
         } else {
             None
         };
 
         Ok(Self::new(
-            try_to_big_uint(jwk.fields.get("n"))?.unwrap(),
-            try_to_big_uint(jwk.fields.get("e"))?.unwrap(),
-            try_to_big_uint(jwk.fields.get("d"))?.unwrap(),
+            try_to_big_uint(jwk.get("n").reveal())?.unwrap(),
+            try_to_big_uint(jwk.get("e").reveal())?.unwrap(),
+            try_to_big_uint(jwk.get("d").reveal())?.unwrap(),
             p_q,
         ))
     }

@@ -24,7 +24,7 @@ impl TryFrom<&Jwk> for SupportedSecretKey {
     type Error = KeyError;
 
     fn try_from(jwk: &Jwk) -> Result<Self, Self::Error> {
-        match jwk.kty {
+        match jwk.key_type() {
             KeyType::Rsa => Ok(Self::from(SupportedRsaPrivateKey::try_from(jwk)?)),
             KeyType::Ec => Ok(Self::from(SupportedEcSecretKey::try_from(jwk)?)),
             unsupported => Err(KeyError::UnsupportedKeyType(unsupported)),

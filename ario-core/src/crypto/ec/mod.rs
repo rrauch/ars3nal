@@ -2,6 +2,7 @@ pub mod ecdsa;
 
 use crate::JsonError;
 use crate::blob::{AsBlob, Blob};
+use crate::confidential::{SecretExt, SecretOptExt, Sensitive};
 use crate::crypto::ec::ecdsa::{Ecdsa, EcdsaError};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
@@ -21,7 +22,6 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ops::Add;
 use thiserror::Error;
-use zeroize::Zeroize;
 
 pub trait Curve:
     EcdsaCurve
@@ -77,20 +77,20 @@ impl TryFrom<&Jwk> for SupportedSecretKey {
     type Error = KeyError;
 
     fn try_from(jwk: &Jwk) -> Result<Self, Self::Error> {
-        if jwk.kty != KeyType::Ec {
-            Err(JwkError::NonEcdsaKeyType(jwk.kty.to_string()))?
+        if jwk.key_type() != KeyType::Ec {
+            Err(JwkError::NonEcdsaKeyType(jwk.key_type().to_string()))?
         }
-        match jwk.fields.get("crv").map(|s| s.as_str()) {
+        match jwk.get("crv").reveal().map(|s| s.as_str()) {
             Some("secp256k1") => {
                 // there doesn't seem to be a better way than turning the jwk struct back into a json string
                 // and passing it to `from_jwk_str`. Might warrant a PR.
-                let mut jwk_str = jwk.to_json_str().map_err(JwkError::from)?;
-                let res = ExternalSecretKey::<Secp256k1>::from_jwk_str(&jwk_str);
-                jwk_str.zeroize();
-                let sk = res.map_err(EcdsaError::from)?;
+                let sk = ExternalSecretKey::<Secp256k1>::from_jwk_str(
+                    &jwk.to_json_str().map_err(JwkError::from)?.reveal(),
+                )
+                .map_err(EcdsaError::from)?;
                 let pk = sk.public_key();
                 Ok(Self::Secp256k1(EcSecretKey {
-                    inner: sk,
+                    inner: sk.sensitive(),
                     pk: EcPublicKey(pk),
                 }))
             }
@@ -102,7 +102,7 @@ impl TryFrom<&Jwk> for SupportedSecretKey {
 
 #[derive_where(Clone)]
 pub struct EcSecretKey<C: Curve> {
-    inner: ExternalSecretKey<C>,
+    inner: Sensitive<ExternalSecretKey<C>>,
     pk: EcPublicKey<C>,
 }
 

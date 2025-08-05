@@ -115,8 +115,8 @@ impl<C: Curve> Scheme for Ecdsa<C> {
     where
         Self: Sized,
     {
-        let (sig, rec_id) =
-            ecdsa::SigningKey::from(&signer.inner).sign_prehash_recoverable(msg.as_slice())?;
+        let (sig, rec_id) = ecdsa::SigningKey::from(signer.inner.reveal())
+            .sign_prehash_recoverable(msg.as_slice())?;
 
         Ok(Signature::from_inner(EcdsaSignature { inner: sig, rec_id }))
     }
