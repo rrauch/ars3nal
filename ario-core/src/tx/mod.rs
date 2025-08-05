@@ -30,7 +30,7 @@ use crate::wallet::{WalletAddress, WalletKind, WalletPk};
 use crate::{JsonError, JsonValue};
 use bigdecimal::BigDecimal;
 use k256::Secp256k1;
-use mown::Mown;
+use maybe_owned::MaybeOwned;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::Deref;
@@ -122,7 +122,7 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
     pub fn last_tx(&self) -> LastTx<'_> {
         match &self.0 {
             TxInner::V1(tx) => (&tx.as_inner().last_tx).into(),
-            TxInner::V2(tx) => LastTx::TxAnchor(Mown::Borrowed(tx.as_inner().last_tx())),
+            TxInner::V2(tx) => LastTx::TxAnchor(tx.as_inner().last_tx().into()),
         }
     }
 
@@ -276,9 +276,9 @@ impl Display for TxId {
 }
 
 pub enum Owner<'a> {
-    Rsa4096(Mown<'a, WalletPk<RsaPublicKey<4096>>>),
-    Rsa2048(Mown<'a, WalletPk<RsaPublicKey<2048>>>),
-    Secp256k1(Mown<'a, WalletPk<EcPublicKey<Secp256k1>>>),
+    Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
+    Rsa2048(MaybeOwned<'a, WalletPk<RsaPublicKey<2048>>>),
+    Secp256k1(MaybeOwned<'a, WalletPk<EcPublicKey<Secp256k1>>>),
 }
 
 impl<'a> Owner<'a> {
@@ -302,9 +302,9 @@ impl AsBlob for Owner<'_> {
 }
 
 pub enum Signature<'a> {
-    Rsa4096(Mown<'a, TxSignature<RsaPss<4096>>>),
-    Rsa2048(Mown<'a, TxSignature<RsaPss<2048>>>),
-    Secp256k1(Mown<'a, TxSignature<Ecdsa<Secp256k1>>>),
+    Rsa4096(MaybeOwned<'a, TxSignature<RsaPss<4096>>>),
+    Rsa2048(MaybeOwned<'a, TxSignature<RsaPss<2048>>>),
+    Secp256k1(MaybeOwned<'a, TxSignature<Ecdsa<Secp256k1>>>),
 }
 
 impl<'a> Signature<'a> {
@@ -358,10 +358,10 @@ impl TxHash {
         }
     }
 
-    pub(crate) fn to_sign_prehash(&self) -> Mown<Sha256Hash> {
+    pub(crate) fn to_sign_prehash(&self) -> MaybeOwned<Sha256Hash> {
         match self {
-            TxHash::DeepHash(deep_hash) => Mown::Owned(deep_hash.digest()),
-            TxHash::Shallow(shallow) => Mown::Borrowed(shallow),
+            TxHash::DeepHash(deep_hash) => deep_hash.digest().into(),
+            TxHash::Shallow(shallow) => MaybeOwned::Borrowed(shallow),
         }
     }
 }
@@ -468,28 +468,17 @@ impl Display for TxAnchor {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LastTx<'a> {
-    TxId(Mown<'a, TxId>),
-    TxAnchor(Mown<'a, TxAnchor>),
+    TxId(MaybeOwned<'a, TxId>),
+    TxAnchor(MaybeOwned<'a, TxAnchor>),
 }
 
 impl<'a> LastTx<'a> {
     pub fn into_owned(self) -> LastTx<'static> {
         match self {
-            Self::TxId(id) => LastTx::TxId(Mown::Owned(id.into_owned())),
-            Self::TxAnchor(anchor) => LastTx::TxAnchor(Mown::Owned(anchor.into_owned())),
-        }
-    }
-}
-
-impl<'a> Clone for LastTx<'a> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::TxId(Mown::Owned(id)) => Self::TxId(Mown::Owned(id.clone())),
-            Self::TxId(Mown::Borrowed(id)) => Self::TxId(Mown::Borrowed(*id)),
-            Self::TxAnchor(Mown::Owned(anchor)) => Self::TxAnchor(Mown::Owned(anchor.clone())),
-            Self::TxAnchor(Mown::Borrowed(anchor)) => Self::TxAnchor(Mown::Borrowed(*anchor)),
+            Self::TxId(id) => LastTx::TxId(id.into_owned().into()),
+            Self::TxAnchor(anchor) => LastTx::TxAnchor(anchor.into_owned().into()),
         }
     }
 }
@@ -497,10 +486,8 @@ impl<'a> Clone for LastTx<'a> {
 impl<'a> From<&'a LastTx<'a>> for LastTx<'a> {
     fn from(value: &'a LastTx<'a>) -> Self {
         match value {
-            LastTx::TxId(Mown::Owned(id)) => LastTx::TxId(Mown::Borrowed(id)),
-            LastTx::TxId(Mown::Borrowed(id)) => LastTx::TxId(Mown::Borrowed(*id)),
-            LastTx::TxAnchor(Mown::Owned(anchor)) => LastTx::TxAnchor(Mown::Borrowed(anchor)),
-            LastTx::TxAnchor(Mown::Borrowed(anchor)) => LastTx::TxAnchor(Mown::Borrowed(*anchor)),
+            LastTx::TxId(tx_id) => LastTx::TxId(tx_id.as_ref().into()),
+            LastTx::TxAnchor(tx_anchor) => LastTx::TxAnchor(tx_anchor.as_ref().into()),
         }
     }
 }
@@ -511,10 +498,10 @@ impl<'a> TryFrom<Blob<'a>> for LastTx<'a> {
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
         match value.len() {
-            32 => Ok(Self::TxId(Mown::Owned(
+            32 => Ok(Self::TxId(MaybeOwned::Owned(
                 TxId::try_from(value).map_err(LastTxError::V1Error)?,
             ))),
-            48 => Ok(Self::TxAnchor(Mown::Owned(
+            48 => Ok(Self::TxAnchor(MaybeOwned::Owned(
                 TxAnchor::try_from(value).map_err(LastTxError::V2Error)?,
             ))),
             invalid => Err(LastTxError::InvalidLength(invalid)),

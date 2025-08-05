@@ -64,7 +64,6 @@ dependencies = [
  "hybrid-array",
  "k256",
  "maybe-owned",
- "mown",
  "rand",
  "rangemap",
  "ringbuf",
@@ -744,12 +743,6 @@ dependencies = [
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys",
 ]
-
-[[package]]
-name = "mown"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1460558cee241bd687f37536f9d15403645e749db36e277a7d773505e6508db9"
 
 [[package]]
 name = "num-bigint"

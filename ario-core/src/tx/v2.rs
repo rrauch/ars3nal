@@ -25,7 +25,7 @@ use crate::wallet::{WalletAddress, WalletPk, WalletSk};
 use crate::{JsonError, JsonValue};
 use anyhow::anyhow;
 use bon::Builder;
-use mown::Mown;
+use maybe_owned::MaybeOwned;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -232,9 +232,9 @@ impl<'a> V2TxData<'a> {
         &self.signature_data
     }
 
-    pub fn tx_hash(&self) -> Mown<TxHash> {
+    pub fn tx_hash(&self) -> MaybeOwned<TxHash> {
         if let Some(tx_hash) = self.tx_hash.as_ref() {
-            Mown::Borrowed(tx_hash)
+            tx_hash.into()
         } else {
             let owner = self
                 .signature_data
@@ -243,7 +243,7 @@ impl<'a> V2TxData<'a> {
 
             let mut tx_hash_builder = TxHashBuilder::from(self);
             tx_hash_builder.owner = owner.as_ref();
-            Mown::Owned(tx_hash_builder.tx_hash())
+            tx_hash_builder.tx_hash().into()
         }
     }
 }
