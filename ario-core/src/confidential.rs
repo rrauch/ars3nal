@@ -44,7 +44,7 @@ macro_rules! impl_secret {
     ($name:ident, $zeroize:literal) => {
         #[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
         #[repr(transparent)]
-        pub(crate) struct $name<T>(Secret<$zeroize, T>)
+        pub struct $name<T>(Secret<$zeroize, T>)
         where
             Secret<$zeroize, T>: Zeroize;
 
@@ -132,7 +132,7 @@ macro_rules! impl_secret {
 impl_secret!(Confidential, true);
 impl_secret!(Sensitive, false);
 
-pub(crate) trait SecretExt {
+pub trait SecretExt {
     fn confidential(self) -> Confidential<Self>
     where
         Self: Zeroize + Sized,
@@ -162,11 +162,11 @@ impl<T> SecretExt for T {
     }
 }
 
-pub(crate) trait SecretOptExt<'a, T> {
+pub trait SecretOptExt<'a, T> {
     fn reveal(self) -> Option<&'a T>;
 }
 
-pub(crate) trait SecretOptMutExt<'a, T> {
+pub trait SecretOptMutExt<'a, T> {
     fn reveal_mut(self) -> Option<&'a mut T>;
 }
 

@@ -67,6 +67,15 @@ pub enum KeyError {
     JwkError(#[from] JwkError),
 }
 
+impl<const BIT: usize> RsaPrivateKey<BIT>
+where
+    Rsa<BIT>: SupportedRsaKeySize,
+{
+    pub(crate) fn derive_key_from_seed(seed: &Confidential<[u8; 64]>) -> Result<Self, KeyError> {
+        todo!()
+    }
+}
+
 impl<const BIT: usize> RsaPrivateKey<BIT> {
     const EXPECTED_BYTES: usize = (BIT + 7) / 8;
 

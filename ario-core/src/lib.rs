@@ -13,7 +13,7 @@ pub mod tx;
 pub(crate) mod base64;
 pub mod blob;
 mod chunking;
-pub(crate) mod confidential;
+pub mod confidential;
 pub mod crypto;
 mod data;
 mod json;

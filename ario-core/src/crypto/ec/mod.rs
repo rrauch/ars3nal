@@ -2,7 +2,7 @@ pub mod ecdsa;
 
 use crate::JsonError;
 use crate::blob::{AsBlob, Blob};
-use crate::confidential::{SecretExt, SecretOptExt, Sensitive};
+use crate::confidential::{Confidential, SecretExt, SecretOptExt, Sensitive};
 use crate::crypto::ec::ecdsa::{Ecdsa, EcdsaError};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
@@ -111,6 +111,12 @@ impl<C: Curve> SecretKey for EcSecretKey<C> {
 
     fn public_key_impl(&self) -> &<Self::Scheme as AsymmetricScheme>::PublicKey {
         &self.pk
+    }
+}
+
+impl EcSecretKey<Secp256k1> {
+    pub(crate) fn derive_key_from_seed(seed: &Confidential<[u8; 64]>) -> Result<Self, KeyError> {
+        todo!()
     }
 }
 

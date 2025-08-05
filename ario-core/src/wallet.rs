@@ -1,5 +1,6 @@
 use crate::base64::{TryFromBase64, TryFromBase64Error};
 use crate::blob::Blob;
+use crate::confidential::{Confidential, SecretExt, SecretOptExt};
 use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::ec::{Curve as EcdsaCurve, EcSecretKey};
@@ -19,6 +20,7 @@ use crate::tx::v2::TxDraft;
 use crate::tx::{TxError, TxHash, TxSignature, ValidatedTx};
 use crate::typed::FromInner;
 use crate::{Address, blob};
+use bip39::Mnemonic;
 use bytemuck::TransparentWrapper;
 use k256::Secp256k1;
 use std::convert::Infallible;
@@ -46,6 +48,37 @@ impl Wallet {
         Ok(Self(Arc::new(inner)))
     }
 
+    pub fn from_mnemonic(
+        m: &Confidential<String>,
+        passphrase: Option<&Confidential<String>>,
+        key_type: KeyType,
+    ) -> Result<Self, WalletError> {
+        let mnemonic = Mnemonic::parse_normalized(m.reveal().as_str())
+            .map_err(MnemonicError::Bip39Error)?
+            .confidential();
+
+        let word_count = mnemonic.reveal().word_count();
+        if ![12, 18, 24].contains(&word_count) {
+            return Err(MnemonicError::UnsupportedWordCount(word_count))?;
+        }
+
+        let seed = mnemonic
+            .reveal()
+            .to_seed_normalized(passphrase.reveal().map(|s| s.as_str()).unwrap_or(""))
+            .confidential();
+
+        let inner = match key_type {
+            KeyType::Rsa => WalletInner::Rsa4096(WalletSk::from_inner(
+                RsaPrivateKey::derive_key_from_seed(&seed).map_err(KeyError::RsaError)?,
+            )),
+            KeyType::Secp256k1 => WalletInner::Secp256k1(WalletSk::from_inner(
+                EcSecretKey::derive_key_from_seed(&seed).map_err(KeyError::EcError)?,
+            )),
+        };
+
+        Ok(Self(Arc::new(inner)))
+    }
+
     pub fn address(&self) -> WalletAddress {
         match &self.0.deref() {
             WalletInner::Rsa4096(rsa) => rsa.public_key().derive_address(),
@@ -64,12 +97,28 @@ impl Wallet {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum KeyType {
+    Rsa,
+    Secp256k1,
+}
+
 #[derive(Error, Debug)]
 pub enum WalletError {
     #[error(transparent)]
     KeyError(#[from] KeyError),
     #[error("key type cannot be used as a wallet key")]
     UnsupportedKey,
+    #[error(transparent)]
+    MnemonicError(#[from] MnemonicError),
+}
+
+#[derive(Error, Debug)]
+pub enum MnemonicError {
+    #[error(transparent)]
+    Bip39Error(#[from] bip39::Error),
+    #[error("mnemonic word count '{0}' not supported")]
+    UnsupportedWordCount(usize),
 }
 
 enum WalletInner {
@@ -222,7 +271,10 @@ mod tests {
         let tx = wallet.sign_tx_draft(draft)?;
 
         assert_eq!(tx.format(), Format::V2);
-        assert_eq!(tx.signature().signature_type(), SignatureType::EcdsaSecp256k1);
+        assert_eq!(
+            tx.signature().signature_type(),
+            SignatureType::EcdsaSecp256k1
+        );
         assert_eq!(tx.reward(), &Reward::try_from("22345")?);
         assert_eq!(tx.quantity(), Some(&Quantity::try_from("099999")?));
         assert_eq!(tx.target().unwrap().to_base64(), target_str);
