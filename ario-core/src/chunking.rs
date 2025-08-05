@@ -64,8 +64,24 @@ impl<H: Hasher> ChunkInfo for Digest<H> {
 pub trait Chunker: Sized + Send {
     type Output: ChunkInfo;
     fn empty() -> Self::Output;
-    fn update(&mut self, input: &mut impl Buf);
+    fn update(&mut self, input: &mut impl Buf) -> impl IntoIterator<Item = Chunk<Self>>;
     fn finalize(self) -> impl IntoIterator<Item = Chunk<Self>>;
+}
+
+pub trait ChunkerExt
+where
+    Self: Chunker,
+{
+    fn single_input(self, input: &mut impl Buf) -> Vec<Chunk<Self>>;
+}
+
+impl<T: Chunker> ChunkerExt for T {
+    fn single_input(mut self, input: &mut impl Buf) -> Vec<Chunk<Self>> {
+        let mut chunks = vec![];
+        chunks.extend(self.update(input));
+        chunks.extend(self.finalize());
+        chunks
+    }
 }
 
 pub struct MostlyFixedChunker<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> {
@@ -73,7 +89,6 @@ pub struct MostlyFixedChunker<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_
     current_chunk_start_offset: u64,
     total_bytes_processed: u64,
     buf: LocalRb<Heap<u8>>,
-    chunks: Vec<Chunk<Self>>,
 }
 
 impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunker
@@ -85,10 +100,11 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunke
         H::new().finalize()
     }
 
-    fn update(&mut self, input: &mut impl Buf) {
+    fn update(&mut self, input: &mut impl Buf) -> impl IntoIterator<Item = Chunk<Self>> {
+        let mut chunks = vec![];
         while input.has_remaining() {
             if self.buf.is_full() {
-                self.process_chunk(false);
+                chunks.extend(self.process_chunk(false));
                 continue;
             }
 
@@ -97,14 +113,16 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunke
             let num_bytes = self.buf.push_slice(&chunk[..to_copy]);
             input.advance(num_bytes);
         }
+        chunks
     }
 
     fn finalize(mut self) -> impl IntoIterator<Item = Chunk<Self>> {
+        let mut chunks = vec![];
         // Process any remaining data
         while self.buf.occupied_len() > 0 {
-            self.process_chunk(true);
+            chunks.extend(self.process_chunk(true));
         }
-        self.chunks
+        chunks
     }
 }
 
@@ -124,15 +142,15 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
             current_chunk_start_offset: 0,
             total_bytes_processed: 0,
             buf,
-            chunks: Vec::new(),
         }
     }
 
-    fn process_chunk(&mut self, is_final: bool) {
+    fn process_chunk(&mut self, is_final: bool) -> Vec<Chunk<Self>> {
+        let mut chunks = vec![];
         let buffered_len = self.buf.occupied_len();
 
         if buffered_len == 0 {
-            return;
+            return chunks;
         }
 
         let chunk_len = if is_final {
@@ -173,7 +191,7 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
         let data_hash = std::mem::replace(&mut self.hasher, H::new()).finalize();
         let offset_end = self.current_chunk_start_offset + processed as u64;
 
-        self.chunks.push(Chunk {
+        chunks.push(Chunk {
             output: data_hash,
             offset: self.current_chunk_start_offset..offset_end,
         });
@@ -184,13 +202,15 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
         }
         self.current_chunk_start_offset = offset_end;
         self.total_bytes_processed += processed as u64;
+
+        chunks
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::chunking::Chunker;
+    use crate::chunking::ChunkerExt;
     use crate::chunking::DefaultChunker;
     use std::io::Cursor;
 
@@ -202,9 +222,8 @@ mod tests {
 
     #[test]
     fn test_chunking() -> anyhow::Result<()> {
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(ONE_MB));
-        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
+        let chunks = DefaultChunker::new().single_input(&mut Cursor::new(ONE_MB));
+
         assert_eq!(chunks.len(), 8);
 
         assert_eq!(chunks[0].offset.start, 0);
@@ -226,9 +245,8 @@ mod tests {
 
     #[test]
     fn test_chunking_even() -> anyhow::Result<()> {
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(TX_EVEN_DATA));
-        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
+        let chunks = DefaultChunker::new().single_input(&mut Cursor::new(TX_EVEN_DATA));
+
         assert_eq!(chunks.len(), 2);
 
         assert_eq!(chunks[0].offset.start, 0);
@@ -250,9 +268,8 @@ mod tests {
 
     #[test]
     fn test_chunking_odd() -> anyhow::Result<()> {
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(TX_ODD_DATA));
-        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
+        let chunks = DefaultChunker::new().single_input(&mut Cursor::new(TX_ODD_DATA));
+
         assert_eq!(chunks.len(), 3);
 
         assert_eq!(chunks[0].offset.start, 0);
@@ -276,9 +293,7 @@ mod tests {
     fn small_final_chunk() -> anyhow::Result<()> {
         let data = vec![0; 256 * 1024 + 1];
 
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(data.as_slice()));
-        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
+        let chunks = DefaultChunker::new().single_input(&mut Cursor::new(data.as_slice()));
 
         assert_eq!(chunks.len(), 2);
 
@@ -303,9 +318,7 @@ mod tests {
     fn tiny_chunk() -> anyhow::Result<()> {
         let data = vec![0; 16 * 1024];
 
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(data.as_slice()));
-        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
+        let chunks = DefaultChunker::new().single_input(&mut Cursor::new(data.as_slice()));
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].offset.start, 0);
@@ -321,9 +334,7 @@ mod tests {
     #[test]
     fn empty() -> anyhow::Result<()> {
         let data = vec![];
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(data.as_slice()));
-        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
+        let chunks = DefaultChunker::new().single_input(&mut Cursor::new(data.as_slice()));
         assert!(chunks.is_empty());
         Ok(())
     }

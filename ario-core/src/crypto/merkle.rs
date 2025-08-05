@@ -396,7 +396,7 @@ pub struct Proof<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::chunking::{Chunker, DefaultChunker};
+    use crate::chunking::{ChunkerExt, DefaultChunker};
     use crate::crypto::merkle::DefaultMerkleTree;
     use std::io::Cursor;
 
@@ -409,9 +409,9 @@ mod tests {
 
     #[test]
     fn merkle_tree_builder() -> anyhow::Result<()> {
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(ONE_MB));
-        let tree = DefaultMerkleTree::from_iter(chunker.finalize());
+        let tree = DefaultMerkleTree::from_iter(
+            DefaultChunker::new().single_input(&mut Cursor::new(ONE_MB)),
+        );
 
         let expected_root_id = [
             13, 66, 76, 111, 151, 198, 191, 18, 129, 188, 244, 243, 122, 39, 159, 246, 73, 77, 231,
@@ -429,9 +429,9 @@ mod tests {
 
     #[test]
     fn merkle_tree_builder_even() -> anyhow::Result<()> {
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(TX_EVEN_DATA));
-        let tree = DefaultMerkleTree::from_iter(chunker.finalize());
+        let tree = DefaultMerkleTree::from_iter(
+            DefaultChunker::new().single_input(&mut Cursor::new(TX_EVEN_DATA)),
+        );
 
         assert_eq!(
             tree.root().to_base64(),
@@ -448,9 +448,9 @@ mod tests {
 
     #[test]
     fn merkle_tree_builder_odd() -> anyhow::Result<()> {
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(TX_ODD_DATA));
-        let tree = DefaultMerkleTree::from_iter(chunker.finalize());
+        let tree = DefaultMerkleTree::from_iter(
+            DefaultChunker::new().single_input(&mut Cursor::new(TX_ODD_DATA)),
+        );
 
         assert_eq!(
             tree.root().to_base64(),
@@ -470,9 +470,9 @@ mod tests {
         let data = vec![0; 256 * 1024 + 1];
         let expected = "br1Vtl3TS_NGWdHmYqBh3-MxrlckoluHCZGmUZk-dJc";
 
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(&data));
-        let tree = DefaultMerkleTree::from_iter(chunker.finalize());
+        let tree = DefaultMerkleTree::from_iter(
+            DefaultChunker::new().single_input(&mut Cursor::new(&data)),
+        );
 
         assert_eq!(tree.root().to_base64(), expected);
         assert_eq!(tree.num_chunks(), 2);
@@ -485,8 +485,8 @@ mod tests {
 
     #[test]
     fn empty_tree() -> anyhow::Result<()> {
-        let chunker = DefaultChunker::new();
-        let empty_tree = DefaultMerkleTree::from_iter(chunker.finalize());
+        let empty_tree =
+            DefaultMerkleTree::from_iter(DefaultChunker::new().single_input(&mut Cursor::new(&[])));
         assert_eq!(*empty_tree.offset(), 0..0);
         assert_eq!(empty_tree.num_chunks(), 0);
 
@@ -502,9 +502,9 @@ mod tests {
 
     #[test]
     fn test_valid_root() -> anyhow::Result<()> {
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(REBAR3));
-        let tree = DefaultMerkleTree::from_iter(chunker.finalize());
+        let tree = DefaultMerkleTree::from_iter(
+            DefaultChunker::new().single_input(&mut Cursor::new(REBAR3)),
+        );
 
         assert_eq!(
             tree.root().to_base64(),
@@ -515,9 +515,9 @@ mod tests {
 
     #[test]
     fn generate_proof() -> anyhow::Result<()> {
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(REBAR3));
-        let tree = DefaultMerkleTree::from_iter(chunker.finalize());
+        let tree = DefaultMerkleTree::from_iter(
+            DefaultChunker::new().single_input(&mut Cursor::new(REBAR3)),
+        );
 
         assert_eq!(tree.proofs.len(), tree.num_chunks());
         assert_eq!(tree.proofs.gaps(&tree.root.offset()).count(), 0);
@@ -531,9 +531,7 @@ mod tests {
 
     #[test]
     fn verify_chunks() -> anyhow::Result<()> {
-        let mut chunker = DefaultChunker::new();
-        chunker.update(&mut Cursor::new(ONE_MB));
-        let chunks = chunker.finalize().into_iter().collect::<Vec<_>>();
+        let chunks = DefaultChunker::new().single_input(&mut Cursor::new(ONE_MB));
         let tree = DefaultMerkleTree::from_iter(chunks.iter());
         let root = tree.root();
 
