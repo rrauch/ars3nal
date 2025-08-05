@@ -59,6 +59,8 @@ pub enum KeyError {
     JwkError(#[from] JwkError),
     #[error(transparent)]
     EcdsaError(#[from] EcdsaError),
+    #[error("key error: {0}")]
+    Other(String),
 }
 
 #[derive(Error, Debug)]
@@ -116,7 +118,23 @@ impl<C: Curve> SecretKey for EcSecretKey<C> {
 
 impl EcSecretKey<Secp256k1> {
     pub(crate) fn derive_key_from_seed(seed: &Confidential<[u8; 64]>) -> Result<Self, KeyError> {
-        todo!()
+        let path = "m/44'/60'/0'/0/0"
+            .parse::<bip32::DerivationPath>()
+            .map_err(|e| KeyError::Other(e.to_string()))?;
+
+        let xprv: bip32::ExtendedPrivateKey<bip32::secp256k1::SecretKey> =
+            bip32::ExtendedPrivateKey::derive_from_path(seed.reveal(), &path)
+                .map_err(|e| KeyError::Other(e.to_string()))?;
+
+        let sk_bytes = xprv.private_key().to_bytes().to_vec().confidential();
+        let sk = ExternalSecretKey::<Secp256k1>::from_slice(sk_bytes.reveal().as_slice())
+            .map_err(EcdsaError::from)?;
+        let pk = sk.public_key();
+
+        Ok(Self::from(EcSecretKey {
+            inner: sk.sensitive(),
+            pk: EcPublicKey(pk),
+        }))
     }
 }
 

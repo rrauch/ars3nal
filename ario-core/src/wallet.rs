@@ -222,16 +222,21 @@ where
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
+    use crate::confidential::SecretExt;
     use crate::jwk::Jwk;
     use crate::tx::{Format, Quantity, Reward, SignatureType, Transfer, TxAnchor, TxBuilder};
     use crate::typed::FromInner;
-    use crate::wallet::{Wallet, WalletAddress};
+    use crate::wallet::{KeyType, Wallet, WalletAddress};
     use std::str::FromStr;
 
     static WALLET_RSA_JWK: &'static [u8] =
         include_bytes!("../testdata/ar_wallet_tests_PS256_65537_fixture.json");
     static WALLET_EC_JWK: &'static [u8] =
         include_bytes!("../testdata/ar_wallet_tests_ES256K_fixture.json");
+
+    static SEED_PHRASE_1: &'static str =
+        "struggle swim faith addict eternal pass word shock trim west vanish together";
+    static SEED_PHRASE_2: &'static str = "never marriage knife silver space kite voice phrase castle embody always lens quantum pulp great title girl cloth honey gauge very before ice walnut";
 
     #[test]
     fn wallet_rsa_sign() -> anyhow::Result<()> {
@@ -279,6 +284,44 @@ mod tests {
         assert_eq!(tx.quantity(), Some(&Quantity::try_from("099999")?));
         assert_eq!(tx.target().unwrap().to_base64(), target_str);
 
+        Ok(())
+    }
+
+    // RSA key generation is VERY slow. Only activate if you need to test this.
+    #[ignore]
+    #[test]
+    fn mnemonic_rsa_deterministic() -> anyhow::Result<()> {
+        for mnemonic in [
+            SEED_PHRASE_1.to_string().confidential(),
+            SEED_PHRASE_2.to_string().confidential(),
+        ] {
+            let mut previous: Option<Wallet> = None;
+            for _ in 0..3 {
+                let wallet = Wallet::from_mnemonic(&mnemonic, None, KeyType::Rsa)?;
+                if let Some(prev) = previous {
+                    assert_eq!(wallet.address().to_base64(), prev.address().to_string());
+                }
+                previous = Some(wallet);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mnemonic_k256_deterministic() -> anyhow::Result<()> {
+        for mnemonic in [
+            SEED_PHRASE_1.to_string().confidential(),
+            SEED_PHRASE_2.to_string().confidential(),
+        ] {
+            let mut previous: Option<Wallet> = None;
+            for _ in 0..3 {
+                let wallet = Wallet::from_mnemonic(&mnemonic, None, KeyType::Secp256k1)?;
+                if let Some(prev) = previous {
+                    assert_eq!(wallet.address().to_base64(), prev.address().to_string());
+                }
+                previous = Some(wallet);
+            }
+        }
         Ok(())
     }
 }

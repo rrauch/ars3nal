@@ -4,7 +4,7 @@ use crate::base64::{Base64Error, FromBase64};
 use crate::blob::{AsBlob, Blob};
 use crate::confidential::{Confidential, SecretExt, SecretOptExt};
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hashable, Hasher};
+use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
 use crate::crypto::keys::{AsymmetricScheme, KeySize, PublicKey, SecretKey};
 use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature::SupportsSignatures;
@@ -12,6 +12,9 @@ use crate::jwk::{Jwk, KeyType};
 use crate::{BigUint, RsaError};
 use bytemuck::TransparentWrapper;
 use digest::consts::{U256, U512};
+use hkdf::Hkdf;
+use rand_chacha::ChaCha20Rng;
+use rsa::rand_core::SeedableRng;
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey};
 use std::ops::Deref;
@@ -65,6 +68,8 @@ pub enum KeyError {
     RsaError(#[from] RsaError),
     #[error(transparent)]
     JwkError(#[from] JwkError),
+    #[error("key error: {0}")]
+    Other(String),
 }
 
 impl<const BIT: usize> RsaPrivateKey<BIT>
@@ -72,7 +77,19 @@ where
     Rsa<BIT>: SupportedRsaKeySize,
 {
     pub(crate) fn derive_key_from_seed(seed: &Confidential<[u8; 64]>) -> Result<Self, KeyError> {
-        todo!()
+        let hk = Hkdf::<Sha256>::new(None, seed.reveal());
+        let mut rng_seed = [0u8; 32];
+        hk.expand(b"arweave-rsa-private-key-v1", &mut rng_seed)
+            .map_err(|e| KeyError::Other(e.to_string()))?;
+
+        // Create seeded RNG
+        let mut rng = ChaCha20Rng::from_seed(rng_seed).sensitive();
+
+        Self::try_from_inner(ExternalRsaPrivateKey::new_with_exp(
+            rng.reveal_mut(),
+            BIT,
+            RSA_EXPONENT.clone(),
+        )?)
     }
 }
 
