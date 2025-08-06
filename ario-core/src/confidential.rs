@@ -5,39 +5,33 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
-pub struct Confidential<T: Zeroize + ?Sized, const ALLOW_CLONING: bool = false>(Box<T>);
+pub struct Confidential<T: Zeroize + ?Sized>(Box<T>);
 
-impl<T: Zeroize + ?Sized, const ALLOW_CLONING: bool> Confidential<T, ALLOW_CLONING> {
+impl<T: Zeroize + ?Sized> Confidential<T> {
     pub fn new(data: impl Into<Box<T>>) -> Self {
         Self(data.into())
     }
 }
 
-impl<T: Zeroize + ?Sized> Confidential<T, true> {
+impl<T: Zeroize + ?Sized> Confidential<T> {
     pub fn new_cloneable(data: impl Into<Box<T>>) -> Self {
         Self::new(data)
     }
 }
 
-impl<T: Debug + Zeroize + ?Sized, const ALLOW_CLONING: bool> Debug
-    for Confidential<T, ALLOW_CLONING>
-{
+impl<T: Debug + Zeroize + ?Sized> Debug for Confidential<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.serialize_str("[redacted]")
     }
 }
 
-impl<T: Display + Zeroize + ?Sized, const ALLOW_CLONING: bool> Display
-    for Confidential<T, ALLOW_CLONING>
-{
+impl<T: Display + Zeroize + ?Sized> Display for Confidential<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.serialize_str("[redacted]")
     }
 }
 
-impl<T: Serialize + Zeroize + ?Sized, const ALLOW_CLONING: bool> Serialize
-    for Confidential<T, ALLOW_CLONING>
-{
+impl<T: Serialize + Zeroize + ?Sized> Serialize for Confidential<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -46,9 +40,7 @@ impl<T: Serialize + Zeroize + ?Sized, const ALLOW_CLONING: bool> Serialize
     }
 }
 
-impl<'de, T: Deserialize<'de> + Zeroize + ?Sized, const ALLOW_CLONING: bool> Deserialize<'de>
-    for Confidential<T, ALLOW_CLONING>
-{
+impl<'de, T: Deserialize<'de> + Zeroize + ?Sized> Deserialize<'de> for Confidential<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -57,26 +49,21 @@ impl<'de, T: Deserialize<'de> + Zeroize + ?Sized, const ALLOW_CLONING: bool> Des
     }
 }
 
-impl<T: Zeroize + ?Sized, const ALLOW_CLONING: bool> Zeroize for Confidential<T, ALLOW_CLONING> {
+impl<T: Zeroize + ?Sized> Zeroize for Confidential<T> {
     fn zeroize(&mut self) {
         self.0.zeroize()
     }
 }
 
-impl<T: Zeroize + ?Sized, const ALLOW_CLONING: bool> ZeroizeOnDrop
-    for Confidential<T, ALLOW_CLONING>
-{
-}
+impl<T: Zeroize + ?Sized> ZeroizeOnDrop for Confidential<T> {}
 
-impl<T: Zeroize + ?Sized, const ALLOW_CLONING: bool> Drop for Confidential<T, ALLOW_CLONING> {
+impl<T: Zeroize + ?Sized> Drop for Confidential<T> {
     fn drop(&mut self) {
         self.zeroize()
     }
 }
 
-impl<'a, T: Zeroize + ?Sized + 'a, const ALLOW_CLONING: bool> SecretKeeper<'a, T>
-    for Confidential<T, ALLOW_CLONING>
-{
+impl<'a, T: Zeroize + ?Sized + 'a> SecretKeeper<'a, T> for Confidential<T> {
     type Secret = &'a T;
     type SecretMut = &'a mut T;
 
@@ -88,12 +75,6 @@ impl<'a, T: Zeroize + ?Sized + 'a, const ALLOW_CLONING: bool> SecretKeeper<'a, T
     #[inline]
     fn reveal_mut(&'a mut self) -> Self::SecretMut {
         &mut self.0
-    }
-}
-
-impl<T: Zeroize + Sized + Clone> Clone for Confidential<T, true> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
     }
 }
 
@@ -178,10 +159,6 @@ pub trait SecretExt {
     where
         Self: Zeroize;
 
-    fn confidential_cloneable(self) -> Confidential<Self, true>
-    where
-        Self: Zeroize;
-
     fn sensitive(self) -> Sensitive<Self>
     where
         Self: Sized;
@@ -189,13 +166,6 @@ pub trait SecretExt {
 
 impl<T> SecretExt for T {
     fn confidential(self) -> Confidential<T>
-    where
-        Self: Zeroize,
-    {
-        Confidential::new(self)
-    }
-
-    fn confidential_cloneable(self) -> Confidential<Self, true>
     where
         Self: Zeroize,
     {

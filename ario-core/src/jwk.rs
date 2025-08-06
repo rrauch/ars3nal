@@ -27,11 +27,11 @@ impl Display for KeyType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Jwk {
     kty: KeyType,
     #[serde(flatten)]
-    fields: HashMap<String, Confidential<String, true>>,
+    fields: HashMap<String, Confidential<String>>,
 }
 
 impl Jwk {
@@ -43,7 +43,7 @@ impl Jwk {
         self.fields.contains_key(field.as_ref())
     }
 
-    pub fn get(&self, field: impl AsRef<str>) -> Option<&Confidential<String, true>> {
+    pub fn get(&self, field: impl AsRef<str>) -> Option<&Confidential<String>> {
         self.fields.get(field.as_ref())
     }
 
