@@ -1,4 +1,5 @@
 use crate::blob::{AsBlob, Blob};
+use crate::confidential::SecretKeeper;
 use crate::crypto::Output;
 use crate::crypto::ec::{Curve, EcPublicKey, EcSecretKey};
 use crate::crypto::hash::Sha256Hash;

@@ -1,6 +1,6 @@
 use crate::base64::{TryFromBase64, TryFromBase64Error};
 use crate::blob::Blob;
-use crate::confidential::{Confidential, SecretExt, SecretOptExt};
+use crate::confidential::{Confidential, SecretExt, SecretKeeper, OptionSecretExt};
 use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::ec::{Curve as EcdsaCurve, EcSecretKey};

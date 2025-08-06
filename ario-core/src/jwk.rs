@@ -31,7 +31,7 @@ impl Display for KeyType {
 pub struct Jwk {
     kty: KeyType,
     #[serde(flatten)]
-    fields: HashMap<String, Confidential<String>>,
+    fields: HashMap<String, Confidential<String, true>>,
 }
 
 impl Jwk {
@@ -43,12 +43,9 @@ impl Jwk {
         self.fields.contains_key(field.as_ref())
     }
 
-    pub fn get(&self, field: impl AsRef<str>) -> Option<&Confidential<String>> {
+    pub fn get(&self, field: impl AsRef<str>) -> Option<&Confidential<String, true>> {
         self.fields.get(field.as_ref())
     }
-    /*pub fn get(&self, field: impl AsRef<str>) -> Option<&str> {
-        self.fields.get(field.as_ref()).map(|s| s.reveal().as_str())
-    }*/
 
     pub fn from_json<J: JsonSource>(json: J) -> Result<Self, JsonError> {
         serde_json::from_value(json.try_into_json()?)
