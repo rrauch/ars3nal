@@ -2,7 +2,7 @@ pub mod pss;
 
 use crate::base64::{Base64Error, FromBase64};
 use crate::blob::{AsBlob, Blob};
-use crate::confidential::{Confidential, SecretExt, SecretKeeper, OptionSecretExt};
+use crate::confidential::{Confidential, OptionSecretExt, SecretExt, SecretKeeper};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
 use crate::crypto::keys::{AsymmetricScheme, KeySize, PublicKey, SecretKey};
@@ -180,6 +180,8 @@ pub enum JwkError {
     InvalidFieldValue(#[from] JwkFieldValueError),
     #[error("expected kty 'RSA' but found '{0}'")]
     NonRsaKeyType(String),
+    #[error("one or more mandatory fields not found")]
+    MissingMandatoryFields,
 }
 
 #[derive(Error, Debug)]
@@ -208,29 +210,36 @@ impl RsaPrivateKeyComponents {
             return Err(JwkError::NonRsaKeyType(jwk.key_type().to_string()));
         }
 
-        fn try_to_big_uint<S: AsRef<str>>(value: Option<S>) -> Result<Option<BigUint>, JwkError> {
-            Ok(value
-                .map(|s| s.as_ref().try_from_base64())
-                .transpose()
-                .map_err(JwkFieldValueError::from)?
-                .map(|b| BigUint::from_be_slice_vartime(b.bytes())))
+        fn try_to_big_uint<S: AsRef<str>>(value: S) -> Result<BigUint, JwkError> {
+            Ok(BigUint::from_be_slice_vartime(
+                value
+                    .as_ref()
+                    .try_from_base64()
+                    .map_err(JwkFieldValueError::from)?
+                    .sensitive()
+                    .reveal()
+                    .bytes(),
+            ))
         }
 
-        let p_q = if jwk.contains("p") && jwk.contains("q") {
-            Some((
-                try_to_big_uint(jwk.get("p").reveal())?.unwrap(),
-                try_to_big_uint(jwk.get("q").reveal())?.unwrap(),
-            ))
-        } else {
-            None
+        let p_q = match (jwk.get("p").reveal(), jwk.get("q").reveal()) {
+            (Some(p), Some(q)) => Some((try_to_big_uint(p)?, try_to_big_uint(q)?)),
+            _ => None,
         };
 
-        Ok(Self::new(
-            try_to_big_uint(jwk.get("n").reveal())?.unwrap(),
-            try_to_big_uint(jwk.get("e").reveal())?.unwrap(),
-            try_to_big_uint(jwk.get("d").reveal())?.unwrap(),
-            p_q,
-        ))
+        match (
+            jwk.get("n").reveal(),
+            jwk.get("e").reveal(),
+            jwk.get("d").reveal(),
+        ) {
+            (Some(n), Some(e), Some(d)) => Ok(Self::new(
+                try_to_big_uint(n)?,
+                try_to_big_uint(e)?,
+                try_to_big_uint(d)?,
+                p_q,
+            )),
+            _ => Err(JwkError::MissingMandatoryFields),
+        }
     }
 }
 
