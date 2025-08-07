@@ -2,7 +2,7 @@ pub mod pss;
 
 use crate::base64::{Base64Error, FromBase64};
 use crate::blob::{AsBlob, Blob};
-use crate::confidential::{Confidential, OptionSecretExt, SecretExt, SecretKeeper};
+use crate::confidential::{Confidential, NewSecretExt, OptionRevealExt, RevealExt, RevealMutExt};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
 use crate::crypto::keys::{AsymmetricScheme, KeySize, PublicKey, SecretKey};

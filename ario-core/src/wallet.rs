@@ -1,6 +1,6 @@
 use crate::base64::{TryFromBase64, TryFromBase64Error};
 use crate::blob::Blob;
-use crate::confidential::{Confidential, SecretExt, SecretKeeper, OptionSecretExt};
+use crate::confidential::{Confidential, NewSecretExt, OptionRevealExt, RevealExt};
 use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::ec::{Curve as EcdsaCurve, EcSecretKey};
@@ -222,7 +222,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::confidential::SecretExt;
+    use crate::confidential::NewSecretExt;
     use crate::jwk::Jwk;
     use crate::tx::{Format, Quantity, Reward, SignatureType, Transfer, TxAnchor, TxBuilder};
     use crate::typed::FromInner;

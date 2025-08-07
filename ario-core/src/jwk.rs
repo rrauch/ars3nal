@@ -1,5 +1,5 @@
 use crate::JsonError;
-use crate::confidential::{Confidential, SecretExt};
+use crate::confidential::{Confidential, Protected, NewSecretExt};
 use crate::json::JsonSource;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,11 +27,11 @@ impl Display for KeyType {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Jwk {
     kty: KeyType,
     #[serde(flatten)]
-    fields: HashMap<String, Confidential<String>>,
+    fields: HashMap<String, Protected<String>>,
 }
 
 impl Jwk {
@@ -43,7 +43,7 @@ impl Jwk {
         self.fields.contains_key(field.as_ref())
     }
 
-    pub fn get(&self, field: impl AsRef<str>) -> Option<&Confidential<String>> {
+    pub fn get(&self, field: impl AsRef<str>) -> Option<&Protected<String>> {
         self.fields.get(field.as_ref())
     }
 

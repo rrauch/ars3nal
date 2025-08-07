@@ -2,7 +2,7 @@ pub mod ecdsa;
 
 use crate::JsonError;
 use crate::blob::{AsBlob, Blob};
-use crate::confidential::{Confidential, SecretExt, SecretKeeper, OptionSecretExt, Sensitive};
+use crate::confidential::{Confidential, NewSecretExt, OptionRevealExt, RevealExt, Sensitive};
 use crate::crypto::ec::ecdsa::{Ecdsa, EcdsaError};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
