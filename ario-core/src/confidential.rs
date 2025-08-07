@@ -258,6 +258,10 @@ pub trait NewSecretExt {
     where
         Self: Zeroize + Sized;
 
+    fn protected(self) -> Protected<Self>
+    where
+        Self: Zeroize + Sized;
+
     fn sensitive(self) -> Sensitive<Self>
     where
         Self: Sized;
@@ -269,6 +273,13 @@ impl<T> NewSecretExt for T {
         Self: Zeroize + Sized,
     {
         Confidential::new(self)
+    }
+
+    fn protected(self) -> Protected<Self>
+    where
+        Self: Zeroize + Sized,
+    {
+        Protected::new(self)
     }
 
     fn sensitive(self) -> Sensitive<Self>
