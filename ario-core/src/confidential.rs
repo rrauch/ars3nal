@@ -181,7 +181,7 @@ where
 
 impl<'de, T: Deserialize<'de>, S> Deserialize<'de> for Veil<T, S>
 where
-    S: Security<SerializationPermission = Allow, SupportedType = T>,
+    S: Security<SupportedType = T>,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
