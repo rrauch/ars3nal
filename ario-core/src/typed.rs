@@ -14,6 +14,10 @@ use std::str::FromStr;
 pub struct Typed<T, I>(pub(crate) I, PhantomData<T>);
 
 impl<T, I> Typed<T, I> {
+    pub(crate) const fn new_from_inner(inner: I) -> Self {
+        Self(inner, PhantomData)
+    }
+
     pub(crate) fn into_inner(self) -> I {
         self.0
     }
@@ -94,7 +98,7 @@ impl<T, I> FromInner<I> for Typed<T, I> {
     where
         Self: Sized,
     {
-        Self(inner, PhantomData)
+        Self::new_from_inner(inner)
     }
 }
 

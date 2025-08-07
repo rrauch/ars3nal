@@ -46,7 +46,9 @@ version = "0.1.0"
 name = "ario-client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ario-core",
+ "bon",
  "reqwest",
  "tokio",
 ]

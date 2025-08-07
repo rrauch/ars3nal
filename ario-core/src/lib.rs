@@ -22,6 +22,7 @@ pub mod money;
 pub mod typed;
 mod validation;
 pub mod wallet;
+pub mod network;
 //pub struct DriveKind;
 //pub type DriveId = id::TypedUuid<DriveKind>;
 
