@@ -3,11 +3,13 @@ use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
 use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 
-#[derive_where(Debug, Clone, Default, PartialEq, PartialOrd, Hash, Zeroize; I)]
+#[derive_where(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Zeroize; I)]
 #[derive(TransparentWrapper)]
 #[transparent(I)]
 #[repr(transparent)]
@@ -58,9 +60,12 @@ where
     }
 }
 
+pub trait WithFromStr {}
+
 impl<T, I> FromStr for Typed<T, I>
 where
     I: FromStr,
+    Self: WithFromStr,
 {
     type Err = <I as FromStr>::Err;
 
@@ -110,5 +115,53 @@ where
 
     fn try_from(value: Blob<'a>) -> Result<Self, Self::Error> {
         Ok(Self::from_inner(I::try_from(value)?))
+    }
+}
+
+pub trait WithSerde {}
+
+impl<'de, I: Deserialize<'de>, T> Deserialize<'de> for Typed<T, I>
+where
+    Self: WithSerde,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        I::deserialize(deserializer).map(|d| Self::from_inner(d))
+    }
+}
+
+impl<I: Serialize, T> Serialize for Typed<T, I>
+where
+    Self: WithSerde,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        Serialize::serialize(&self.0, serializer)
+    }
+}
+
+pub trait WithDisplay {}
+
+impl<T, I: Display> Display for Typed<T, I>
+where
+    Self: WithDisplay,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0, f)
+    }
+}
+
+pub trait WithDefault {}
+
+impl<T, I: Default> Default for Typed<T, I>
+where
+    Self: WithDefault,
+{
+    fn default() -> Self {
+        Self::from_inner(I::default())
     }
 }

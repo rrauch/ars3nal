@@ -16,22 +16,23 @@ derive-where = { version = "1.5", features = ["zeroize"] }
 digest = "0.11.0-rc.0"
 ecdsa = { workspace = true }
 elliptic-curve = { workspace = true, features = ["jwk"] }
-futures-lite = { version = "2.6", features = ["futures-io"] }
+futures-lite = { workspace = true, features = ["futures-io"] }
 hkdf = "0.13.0-rc.0"
 hybrid-array = { version = "0.3", features = ["serde", "zeroize", "bytemuck"] }
 k256 = { version = "0.14.0-pre.9", features = ["jwk"] }
 maybe-owned = "0.3"
-rand = { version = "0.9", features = ["thread_rng"] }
+rand = { workspace = true, features = ["thread_rng"] }
 rand_chacha = { version = "0.9", features = ["std"] }
 rangemap = "1.6"
 ringbuf = "0.4"
 rsa = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
 serde_repr = "0.1"
-serde_with = { version = "3.14", features = ["base64"] }
+serde_with = { workspace = true, features = ["base64"] }
 sha2 = { version = "0.11.0-rc.0", features = ["oid"] }
-thiserror = "2"
+thiserror = { workspace = true }
+url = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 zeroize = { workspace = true, features = ["derive", "serde"] }
 

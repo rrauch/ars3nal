@@ -1,0 +1,810 @@
+use crate::gateway::GatewayInfo;
+use crate::{Endpoint, EndpointUrl, gateway};
+use ario_core::Gateway;
+use ario_core::network::{Custom, Local, Mainnet, Network, NetworkIdentifier, Testnet};
+use futures_concurrency::future::FutureGroup;
+use futures_lite::stream::StreamExt;
+use itertools::Itertools;
+use rand::Rng;
+use reqwest::Client as ReqwestClient;
+use std::collections::HashMap;
+use std::ops::Add;
+use std::time::{Duration, SystemTime};
+use thiserror::Error;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
+use tokio_util::future::FutureExt;
+use tokio_util::sync::{CancellationToken, DropGuard};
+
+#[derive(Debug)]
+pub struct Routemaster<N: Network> {
+    reqwest_client: ReqwestClient,
+    network: N,
+    cmd_tx: mpsc::Sender<Command>,
+    active_rx: watch::Receiver<ActiveRoutes>,
+    task_handle: JoinHandle<()>,
+    ct: CancellationToken,
+    _drop_guard: DropGuard,
+}
+
+enum Command {
+    AddGateways(Vec<Gateway>),
+    RemoveGateways(Vec<Gateway>),
+}
+
+struct BackgroundTask<N: Network> {
+    routes: HashMap<Gateway, Route>,
+    initial_gateways: Vec<Gateway>,
+    pending_checks: HashMap<Gateway, DropGuard>,
+    cmd_rx: mpsc::Receiver<Command>,
+    active_tx: watch::Sender<ActiveRoutes>,
+    ct: CancellationToken,
+    network: N,
+    reqwest_client: ReqwestClient,
+    _drop_guard: DropGuard,
+}
+
+impl<N: Network> BackgroundTask<N> {
+    fn new(
+        initial_gateways: Vec<Gateway>,
+        cmd_rx: mpsc::Receiver<Command>,
+        active_tx: watch::Sender<ActiveRoutes>,
+        ct: CancellationToken,
+        network: N,
+        reqwest_client: ReqwestClient,
+    ) -> Self {
+        let _drop_guard = ct.clone().drop_guard();
+        Self {
+            routes: HashMap::default(),
+            initial_gateways,
+            pending_checks: HashMap::default(),
+            cmd_rx,
+            active_tx,
+            ct,
+            network,
+            reqwest_client,
+            _drop_guard,
+        }
+    }
+
+    #[tracing::instrument(name = "background_run", skip(self))]
+    async fn run(mut self) {
+        tracing::info!(initial_gateways = self.initial_gateways.len(), "starting");
+        let mut cmds = Vec::with_capacity(10);
+        cmds.push(Command::AddGateways(std::mem::replace(
+            &mut self.initial_gateways,
+            vec![],
+        )));
+        let mut next_checks_due = SystemTime::now().add(Duration::from_secs(60));
+        let mut pending_futs = FutureGroup::new();
+
+        loop {
+            tracing::trace!("next loop iteration");
+            // first, process outstanding commands
+            let mut modified = false;
+            for cmd in cmds.drain(..) {
+                if self.process_cmd(cmd) {
+                    modified = true;
+                }
+            }
+            if modified || (next_checks_due <= SystemTime::now()) {
+                // time to initiate new checks
+                tracing::info!("new checks are due");
+                let (tasks, next) = self.initiate_gw_checks();
+                match next {
+                    Some(next_at) => next_checks_due = next_at,
+                    None => next_checks_due = SystemTime::now().add(Duration::from_secs(60)),
+                }
+                let mut new_checks_added = 0;
+                for (gw, jh) in tasks {
+                    let fut = async move {
+                        (
+                            gw,
+                            match jh.await {
+                                Ok(Ok(check)) => Ok(check),
+                                Ok(Err(err)) => Err(err),
+                                Err(err) => Err(CheckError::JoinError(err)),
+                            },
+                        )
+                    };
+                    pending_futs.insert(Box::pin(fut));
+                    new_checks_added += 1;
+                }
+                tracing::debug!(new_checks_added, "new checks added");
+            }
+
+            assert!(cmds.is_empty());
+            let cmds_len = cmds.len();
+
+            let next_check_in = next_checks_due
+                .duration_since(SystemTime::now())
+                .expect("next_checks_due to never be in the past");
+
+            tokio::select! {
+                _ = tokio::time::sleep(next_check_in) => {
+                    tracing::trace!("time for the next check");
+                }
+                msg = self.cmd_rx.recv() => {
+                    match msg {
+                        Some(cmd) => {
+                            cmds.push(cmd);
+                            tracing::debug!("command received");
+                        },
+                        None => {
+                            tracing::warn!("cmd sender disappeared");
+                            break;
+                        }
+                    }
+                }
+                /*n = self.cmd_rx.recv_many(&mut cmds, cmds_len) => {
+                    if n == 0 {
+                        // sender gone
+                        tracing::warn!("cmd sender disappeared");
+                        break;
+                    }
+                    // cmds received
+                    tracing::debug!(num = n, "commands received");
+                }*/
+                Some((gw, res)) = pending_futs.next() => {
+                    // gateway check completed
+                    let success = match &res {
+                        Ok(check) => check.result.is_ok(),
+                        _ => false
+                    };
+                    tracing::debug!(gateway = %gw, success, "gateway check complete");
+                    let usable = self.is_usable(&gw);
+                    self.process_gw_check_result(&gw, res);
+                    if self.is_usable(&gw) != usable {
+                        // status of route has changed
+                        // update active routes
+                        let num_active_before = self.active_tx.borrow().gateways.len();
+                        self.update_active_routes();
+                        let num_active = self.active_tx.borrow().gateways.len();
+                        tracing::info!(num_active, num_active_before, "number of active gateways changed");
+                    }
+                }
+                _ = self.ct.cancelled() => {
+                    // shutting down
+                    break;
+                },
+            }
+        }
+        tracing::debug!("end of main loop reached");
+        tracing::info!("shutting down");
+        self.ct.cancel();
+    }
+
+    fn update_active_routes(&mut self) {
+        let gateways = self
+            .routes
+            .iter()
+            .filter_map(|(gw, r)| {
+                if let Checked::Checked {
+                    status, duration, ..
+                } = &r.checked
+                {
+                    if let GatewayStatus::Ok(_) = status {
+                        Some((gw, duration))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect_vec();
+
+        // Find max duration to invert weights (higher duration = lower weight)
+        let max_duration = gateways
+            .iter()
+            .map(|(_, d)| d.as_nanos())
+            .max()
+            .unwrap_or_default();
+
+        let _ = self
+            .active_tx
+            .send(ActiveRoutes::from_iter(gateways.into_iter().map(
+                |(gateway, duration)| {
+                    (
+                        gateway.clone(),
+                        (max_duration - duration.as_nanos() + 1) as usize,
+                    )
+                },
+            )));
+    }
+
+    fn is_usable(&self, gw: &Gateway) -> bool {
+        if let Some(Route { checked, .. }) = self.routes.get(gw) {
+            if let Checked::Checked { status, .. } = checked {
+                if let GatewayStatus::Ok(_) = status {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn process_gw_check_result(&mut self, gw: &Gateway, res: Result<GatewayCheck, CheckError>) {
+        self.pending_checks.remove(gw);
+        let route = match self.routes.get_mut(gw) {
+            Some(r) => r,
+            None => return,
+        };
+        let check = match res {
+            Ok(check) => check,
+            Err(_) => {
+                // check not completed, do NOT update route
+                return;
+            }
+        };
+        let last_check = check.completion_time;
+        let duration = check
+            .completion_time
+            .duration_since(check.start_time)
+            .unwrap_or_default();
+
+        let mut retry_num = 0;
+        // check if this isn't the first error
+        if let Checked::Checked { status, .. } = &route.checked {
+            if let GatewayStatus::Error { retry_num: rn, .. } = status {
+                retry_num = *rn + 1;
+            }
+        }
+
+        let status = match check.result {
+            Ok(info) => GatewayStatus::Ok(info),
+            Err(error) => GatewayStatus::Error { error, retry_num },
+        };
+
+        match &mut route.checked {
+            Checked::Unchecked => {
+                route.checked = Checked::Checked {
+                    status,
+                    num_checks: 1,
+                    last_check,
+                    duration,
+                };
+            }
+            Checked::Checked {
+                status: st,
+                num_checks,
+                last_check: lc,
+                duration: dur,
+            } => {
+                *st = status;
+                *num_checks = *num_checks + 1;
+                *lc = last_check;
+                *dur = duration;
+            }
+        }
+    }
+
+    fn process_cmd(&mut self, cmd: Command) -> bool {
+        let mut modified = false;
+        match cmd {
+            Command::AddGateways(gws) => {
+                for gw in gws {
+                    if !self.routes.contains_key(&gw) {
+                        self.routes.insert(gw.clone(), Route::new(gw));
+                        modified = true;
+                    }
+                }
+            }
+            Command::RemoveGateways(gws) => {
+                let len = self.routes.len();
+                self.routes.retain(|gw, _| !gws.contains(gw));
+                if self.routes.len() != len {
+                    modified = true;
+                }
+                // cancel any pending checks for affected gws
+                self.pending_checks.retain(|gw, _| !gws.contains(gw));
+            }
+        }
+        modified
+    }
+
+    fn initiate_gw_checks(
+        &mut self,
+    ) -> (
+        Vec<(Gateway, JoinHandle<Result<GatewayCheck, CheckError>>)>,
+        Option<SystemTime>,
+    ) {
+        let mut handles = vec![];
+        let mut next_at = None;
+        let mut new_tasks = vec![];
+        for route in self.routes.iter().filter_map(|(gw, r)| {
+            if !self.pending_checks.contains_key(gw) {
+                let ready_at = self.next_check_at(r);
+                if ready_at <= SystemTime::now() {
+                    // ready now
+                    Some(r)
+                } else {
+                    match next_at {
+                        None => next_at = Some(ready_at),
+                        Some(prev) => {
+                            if ready_at < prev {
+                                next_at = Some(ready_at)
+                            }
+                        }
+                    }
+                    None
+                }
+            } else {
+                None
+            }
+        }) {
+            // route ready to be checked
+            // start background checker task
+            let ct = self.ct.child_token();
+            let drop_guard = ct.clone().drop_guard();
+            let task = GatewayCheckTask::new(
+                ct,
+                route.gateway.clone(),
+                self.network.id().clone(),
+                self.reqwest_client.clone(),
+            );
+            handles.push((route.gateway.clone(), tokio::task::spawn(task.run())));
+            new_tasks.push((route.gateway.clone(), drop_guard));
+        }
+        new_tasks.into_iter().for_each(|(gw, drop_guard)| {
+            self.pending_checks.insert(gw, drop_guard);
+        });
+        (handles, next_at)
+    }
+
+    /// determines when a given route is ready to be checked again
+    fn next_check_at(&self, route: &Route) -> SystemTime {
+        match &route.checked {
+            Checked::Unchecked => SystemTime::now(),
+            Checked::Checked {
+                last_check, status, ..
+            } => {
+                // todo: this is basically a stub
+                // better logic is needed here at one point
+                match &status {
+                    GatewayStatus::Ok(_) => last_check.add(Duration::from_secs(600)),
+                    GatewayStatus::Error { .. } => last_check.add(Duration::from_secs(60)),
+                }
+            }
+        }
+    }
+}
+
+struct GatewayCheckTask {
+    ct: CancellationToken,
+    gateway: Gateway,
+    required_network_id: NetworkIdentifier,
+    reqwest_client: ReqwestClient,
+}
+
+struct GatewayCheck {
+    gateway: Gateway,
+    start_time: SystemTime,
+    completion_time: SystemTime,
+    result: Result<GatewayInfo<'static>, gateway::Error>,
+}
+
+#[derive(Error, Debug)]
+enum CheckError {
+    #[error("check cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    JoinError(#[from] tokio::task::JoinError),
+}
+
+impl GatewayCheckTask {
+    fn new(
+        ct: CancellationToken,
+        gateway: Gateway,
+        required_network_id: NetworkIdentifier,
+        reqwest_client: ReqwestClient,
+    ) -> Self {
+        Self {
+            ct,
+            gateway,
+            required_network_id,
+            reqwest_client,
+        }
+    }
+
+    async fn run(mut self) -> Result<GatewayCheck, CheckError> {
+        let start_time = SystemTime::now();
+        let cancelled = self.ct.clone().cancelled_owned();
+        tokio::select! {
+            result = self.info() => {
+                let completion_time = SystemTime::now();
+                Ok(GatewayCheck {
+                    gateway: self.gateway,
+                    result,
+                    start_time,
+                    completion_time,
+                })
+            }
+            _ = cancelled => {
+                // task was cancelled
+                Err(CheckError::Cancelled)
+            }
+        }
+    }
+
+    async fn info(&mut self) -> Result<GatewayInfo<'static>, gateway::Error> {
+        let info = GatewayInfo::retrieve(&self.gateway, &self.reqwest_client).await?;
+        if info.network != self.required_network_id {
+            return Err(gateway::Error::IncorrectNetwork {
+                expected: self.required_network_id.to_string(),
+                actual: info.network.to_string(),
+            });
+        }
+        Ok(info)
+    }
+}
+
+#[bon::bon]
+impl Routemaster<Mainnet> {
+    #[builder(derive(Debug), builder_type = MainnetBuilder, start_fn = mainnet)]
+    pub fn new(
+        #[builder(default)] reqwest_client: ReqwestClient,
+        #[builder(with = |gws: impl IntoIterator<Item=Gateway>| {
+            gws.into_iter().collect::<Vec<_>>()
+        }, default)]
+        initial_gateways: Vec<Gateway>,
+    ) -> Self {
+        Self::new_internal(reqwest_client, Mainnet, initial_gateways)
+    }
+}
+
+#[bon::bon]
+impl Routemaster<Testnet> {
+    #[builder(derive(Debug), builder_type = TestnetBuilder, start_fn = testnet)]
+    pub fn new(
+        #[builder(default)] reqwest_client: ReqwestClient,
+        #[builder(with = |gws: impl IntoIterator<Item=Gateway>| {
+            gws.into_iter().collect::<Vec<_>>()
+        }, default)]
+        initial_gateways: Vec<Gateway>,
+    ) -> Self {
+        Self::new_internal(reqwest_client, Testnet, initial_gateways)
+    }
+}
+
+#[bon::bon]
+impl Routemaster<Local> {
+    #[builder(derive(Debug), builder_type = LocalBuilder, start_fn = local)]
+    pub fn new(
+        #[builder(default)] reqwest_client: ReqwestClient,
+        #[builder(with = |gws: impl IntoIterator<Item=Gateway>| {
+            gws.into_iter().collect::<Vec<_>>()
+        }, default)]
+        initial_gateways: Vec<Gateway>,
+    ) -> Self {
+        Self::new_internal(reqwest_client, Local, initial_gateways)
+    }
+}
+
+#[bon::bon]
+impl Routemaster<Custom> {
+    #[builder(derive(Debug), builder_type = CustomBuilder, start_fn = custom)]
+    pub fn new(
+        #[builder(with = |id: impl TryInto<NetworkIdentifier, Error:Into<anyhow::Error>>| -> Result<_, anyhow::Error> {
+            id.try_into().map_err(|e| e.into())
+        })]
+        id: NetworkIdentifier,
+        #[builder(default)] reqwest_client: ReqwestClient,
+        #[builder(with = |gws: impl IntoIterator<Item=Gateway>| {
+            gws.into_iter().collect::<Vec<_>>()
+        }, default)]
+        initial_gateways: Vec<Gateway>,
+    ) -> Self {
+        Self::new_internal(reqwest_client, Custom::from(id), initial_gateways)
+    }
+}
+
+impl<N: Network> Routemaster<N> {
+    fn new_internal(
+        reqwest_client: ReqwestClient,
+        network: N,
+        initial_gateways: Vec<Gateway>,
+    ) -> Self {
+        let ct = CancellationToken::new();
+        let (cmd_tx, cmd_rx) = mpsc::channel(100);
+        let (active_tx, active_rx) = watch::channel(ActiveRoutes::from_iter(vec![]));
+        let background_task = BackgroundTask::new(
+            initial_gateways,
+            cmd_rx,
+            active_tx,
+            ct.clone(),
+            network.clone(),
+            reqwest_client.clone(),
+        );
+
+        Self {
+            reqwest_client,
+            network,
+            cmd_tx,
+            active_rx,
+            task_handle: tokio::task::spawn(background_task.run()),
+            _drop_guard: ct.clone().drop_guard(),
+            ct,
+        }
+    }
+}
+
+impl<N: Network> Drop for Routemaster<N> {
+    fn drop(&mut self) {
+        self.task_handle.abort();
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("Routemaster is shutting down")]
+    ShuttingDown,
+    #[error("Operation timed out")]
+    Timeout,
+}
+
+impl<N: Network> Routemaster<N> {
+    pub async fn insert_gateways(
+        &self,
+        gws: impl IntoIterator<Item = Gateway>,
+    ) -> Result<(), Error> {
+        self.send_cmd(Command::AddGateways(gws.into_iter().collect()))
+            .await
+    }
+
+    async fn send_cmd(&self, cmd: Command) -> Result<(), Error> {
+        if self.ct.is_cancelled() {
+            return Err(Error::ShuttingDown);
+        }
+
+        self.cmd_tx
+            .send(cmd)
+            .timeout(Duration::from_secs(60))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .expect("background task to be running");
+
+        Ok(())
+    }
+
+    pub async fn remove_gateways<'a>(
+        &self,
+        gws: impl IntoIterator<Item = &'a Gateway>,
+    ) -> Result<(), Error> {
+        self.send_cmd(Command::RemoveGateways(
+            gws.into_iter()
+                .unique()
+                .map(|g| g.clone())
+                .collect::<Vec<_>>(),
+        ))
+        .await
+    }
+
+    pub fn try_endpoint(&self, endpoint: &Endpoint<'_>) -> Option<EndpointUrl> {
+        if self.ct.is_cancelled() {
+            return None;
+        };
+
+        self.active_rx.borrow().endpoint(endpoint)
+    }
+
+    pub async fn endpoint(&self, endpoint: &Endpoint<'_>) -> Result<EndpointUrl, Error> {
+        if self.ct.is_cancelled() {
+            return Err(Error::ShuttingDown);
+        }
+
+        // first, try if we can get one straight away
+        if let Some(url) = self.active_rx.borrow().endpoint(endpoint) {
+            return Ok(url);
+        }
+
+        // looks like we have to wait and see
+        let mut active_rx = self.active_rx.clone();
+        async move {
+            loop {
+                if let Some(url) = active_rx.borrow_and_update().endpoint(endpoint) {
+                    return Ok(url);
+                }
+                active_rx.changed().await.map_err(|_| Error::ShuttingDown)?;
+            }
+        }
+        .timeout(Duration::from_secs(30))
+        .await
+        .map_err(|_| Error::Timeout)?
+    }
+
+    pub fn shutdown(&mut self) {
+        self.ct.cancel();
+    }
+}
+
+#[derive(Debug)]
+struct Route {
+    gateway: Gateway,
+    checked: Checked,
+}
+
+impl Route {
+    fn new(gateway: Gateway) -> Self {
+        Self {
+            gateway,
+            checked: Checked::Unchecked,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Checked {
+    Unchecked,
+    Checked {
+        status: GatewayStatus,
+        num_checks: usize,
+        last_check: SystemTime,
+        duration: Duration,
+    },
+}
+
+#[derive(Debug)]
+enum GatewayStatus {
+    Ok(GatewayInfo<'static>),
+    Error {
+        error: gateway::Error,
+        retry_num: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ActiveRoutes {
+    gateways: Vec<(Gateway, usize)>,
+    total_weight: u128,
+}
+
+impl FromIterator<(Gateway, usize)> for ActiveRoutes {
+    fn from_iter<T: IntoIterator<Item = (Gateway, usize)>>(iter: T) -> Self {
+        let mut total_weight = 0u128;
+        let gateways = iter
+            .into_iter()
+            .map(|(gw, weight)| {
+                total_weight = total_weight.saturating_add(weight as u128);
+                (gw, weight)
+            })
+            .collect_vec();
+        Self {
+            gateways,
+            total_weight,
+        }
+    }
+}
+
+impl ActiveRoutes {
+    fn endpoint(&self, endpoint: &Endpoint) -> Option<EndpointUrl> {
+        self.pick_gateway().map(|gw| endpoint.build_url(gw))
+    }
+
+    fn pick_gateway(&self) -> Option<&Gateway> {
+        if self.gateways.is_empty() {
+            return None;
+        }
+
+        let mut rng = rand::rng();
+        let mut random_weight = rng.random_range(0..self.total_weight);
+        for (gateway, weight) in &self.gateways {
+            let weight_u128 = *weight as u128;
+            if random_weight < weight_u128 {
+                return Some(gateway);
+            }
+            random_weight -= weight_u128;
+        }
+        unreachable!("one gateway should be picked at any time")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Endpoint;
+    use crate::gateway::Error;
+    use crate::routemaster::{ActiveRoutes, GatewayCheckTask, Routemaster};
+    use ario_core::Gateway;
+    use ario_core::network::{Mainnet, Network, Testnet};
+    use reqwest::Client;
+    use std::str::FromStr;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    fn init_tracing() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    }
+
+    #[tokio::test]
+    async fn builder() -> anyhow::Result<()> {
+        let _routemaster = Routemaster::mainnet().reqwest_client(Client::new()).build();
+        let _routemaster = Routemaster::testnet().build();
+        let _local = Routemaster::custom().id("foobar123")?.build();
+        assert!(
+            Routemaster::custom()
+                .id("   430593- foobar123 ^&**** ")
+                .is_err()
+        );
+        let _local = Routemaster::local()
+            .initial_gateways(vec![Gateway::from_str("http://localhost:1984")?])
+            .build();
+        let _routemaster = Routemaster::mainnet().build();
+        Ok(())
+    }
+
+    #[test]
+    fn active_routes() -> anyhow::Result<()> {
+        let active_routes =
+            ActiveRoutes::from_iter([(Gateway::from_str("http://localhost:1984")?, 1000)]);
+        assert!(active_routes.pick_gateway().is_some());
+
+        let active_routes2 = ActiveRoutes::from_iter([
+            (Gateway::from_str("http://localhost:1984")?, 1000),
+            (Gateway::from_str("http://localhost:2984")?, 2000),
+            (Gateway::from_str("http://localhost:3984")?, 3000),
+        ]);
+        assert!(active_routes2.pick_gateway().is_some());
+
+        let active_routes3 = ActiveRoutes::from_iter([]);
+        assert!(active_routes3.pick_gateway().is_none());
+
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn gateway_check() -> anyhow::Result<()> {
+        let ct = CancellationToken::new();
+        let client = Client::new();
+        let task = GatewayCheckTask::new(
+            ct.clone(),
+            Gateway::default(),
+            Mainnet.id().clone(),
+            client.clone(),
+        );
+        let gw_check = task.run().await?;
+        assert!(gw_check.result.is_ok());
+
+        let task = GatewayCheckTask::new(
+            ct.clone(),
+            Gateway::default(),
+            Testnet.id().clone(),
+            client.clone(),
+        );
+        let gw_check2 = task.run().await?;
+        assert!(gw_check2.result.is_err());
+        match gw_check2.result {
+            Err(Error::IncorrectNetwork { .. }) => {
+                // correct
+            }
+            _ => panic!("expected incorrect network error"),
+        }
+
+        let task = GatewayCheckTask::new(
+            ct.clone(),
+            Gateway::from_str("https://google.com/")?,
+            Mainnet.id().clone(),
+            client.clone(),
+        );
+        let gw_check3 = task.run().await?;
+        assert!(gw_check3.result.is_err());
+
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn routemaster_live() -> anyhow::Result<()> {
+        init_tracing();
+        let mut routemaster = Routemaster::mainnet()
+            .initial_gateways([Gateway::default()])
+            .build();
+        let endpoint = Endpoint::Info;
+        assert!(routemaster.try_endpoint(&endpoint).is_none()); // should not be ready
+        let url = routemaster.endpoint(&endpoint).await?;
+        assert_eq!(url.to_string(), "https://arweave.net/info");
+        routemaster.shutdown();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok(())
+    }
+}

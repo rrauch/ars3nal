@@ -1,29 +1,26 @@
-mod routermaster;
+mod gateway;
+mod routemaster;
 
+use crate::routemaster::Routemaster;
+use ario_core::Gateway;
+use ario_core::network::Network;
 use ario_core::tx::{TxId, ValidatedTx};
 use ario_core::wallet::WalletAddress;
-use reqwest::{Client as ReqwestClient, StatusCode};
-use ario_core::typed::Typed;
+use derive_more::{AsRef, Deref, Display, Into};
+use url::Url;
 
-pub struct Client {
-    reqwest_client: ReqwestClient,
+pub struct Client<N: Network> {
+    routemaster: Routemaster<N>,
 }
-
-pub struct Mainnet;
-
-pub struct Testnet;
-
-
-pub struct Devnet;
-
-
-
 
 #[derive(Debug, PartialEq, Eq)]
 enum RequestMethod {
     Get,
     Post,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, AsRef, Deref, Into, Display)]
+pub struct EndpointUrl(Url);
 
 pub enum Endpoint<'a> {
     /// /info
@@ -37,6 +34,19 @@ pub enum Endpoint<'a> {
     },
     Tx(TxEndpoint<'a>),
     Wallet(WalletEndpoint<'a>),
+}
+
+impl<'a> Endpoint<'a> {
+    pub(crate) fn build_url(&self, gateway: &Gateway) -> EndpointUrl {
+        match self {
+            Self::Info => EndpointUrl(
+                gateway
+                    .join("./info")
+                    .expect("url parsing should never fail"),
+            ),
+            _ => todo!(),
+        }
+    }
 }
 
 pub enum TxEndpoint<'a> {
@@ -55,17 +65,4 @@ pub enum WalletEndpoint<'a> {
     Balance(&'a WalletAddress),
     /// /wallet/{address}/last_tx
     LastTx(&'a WalletAddress),
-}
-
-#[cfg(test)]
-mod tests {
-    use ario_core::network::{Local, Mainnet, Network, Testnet};
-
-    #[tokio::test]
-    async fn my_test() -> anyhow::Result<()> {
-        let net = Local::builder().id("foobar123").build();
-        println!("{}", net.id());
-        assert!(true);
-        Ok(())
-    }
 }
