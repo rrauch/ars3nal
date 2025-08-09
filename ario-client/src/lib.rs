@@ -1,6 +1,7 @@
 mod gateway;
 mod routemaster;
 
+use std::sync::Arc;
 use crate::routemaster::Routemaster;
 use ario_core::Gateway;
 use ario_core::tx::{TxId, ValidatedTx};
@@ -8,7 +9,11 @@ use ario_core::wallet::WalletAddress;
 use derive_more::{AsRef, Deref, Display, Into};
 use url::Url;
 
-pub struct Client {
+#[derive(Debug, Clone)]
+pub struct Client(Arc<Inner>);
+
+#[derive(Debug)]
+struct Inner {
     routemaster: Routemaster,
 }
 

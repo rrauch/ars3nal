@@ -3,12 +3,15 @@ use crate::{Endpoint, EndpointUrl, gateway};
 use ario_core::Gateway;
 use ario_core::network::{Network, NetworkIdentifier};
 use futures_concurrency::future::FutureGroup;
+use futures_lite::future;
 use futures_lite::stream::StreamExt;
 use itertools::Itertools;
 use rand::Rng;
 use reqwest::Client as ReqwestClient;
 use std::collections::HashMap;
 use std::ops::Add;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
@@ -16,8 +19,11 @@ use tokio::task::JoinHandle;
 use tokio_util::future::FutureExt;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
+#[derive(Debug, Clone)]
+pub struct Routemaster(Arc<Inner>);
+
 #[derive(Debug)]
-pub struct Routemaster {
+struct Inner {
     reqwest_client: ReqwestClient,
     network: Network,
     cmd_tx: mpsc::Sender<Command>,
@@ -76,7 +82,15 @@ impl BackgroundTask {
             vec![],
         )));
         let mut next_checks_due = SystemTime::now().add(Duration::from_secs(60));
-        let mut pending_futs = FutureGroup::new();
+
+        let mut pending_futs = FutureGroup::<
+            Pin<Box<dyn Future<Output = (Gateway, Result<GatewayCheck, CheckError>)> + Send>>,
+        >::new();
+        // add dummy future that never resolves to prevent pending_futs from reaching end of stream
+        pending_futs.insert(Box::pin(future::pending::<(
+            Gateway,
+            Result<GatewayCheck, CheckError>,
+        )>()));
 
         loop {
             tracing::trace!("next loop iteration");
@@ -114,7 +128,7 @@ impl BackgroundTask {
             }
 
             assert!(cmds.is_empty());
-            let cmds_len = cmds.len();
+            let cmds_cap = cmds.capacity();
 
             let next_check_in = next_checks_due
                 .duration_since(SystemTime::now())
@@ -124,19 +138,7 @@ impl BackgroundTask {
                 _ = tokio::time::sleep(next_check_in) => {
                     tracing::trace!("time for the next check");
                 }
-                msg = self.cmd_rx.recv() => {
-                    match msg {
-                        Some(cmd) => {
-                            cmds.push(cmd);
-                            tracing::debug!("command received");
-                        },
-                        None => {
-                            tracing::warn!("cmd sender disappeared");
-                            break;
-                        }
-                    }
-                }
-                /*n = self.cmd_rx.recv_many(&mut cmds, cmds_len) => {
+                n = self.cmd_rx.recv_many(&mut cmds, cmds_cap) => {
                     if n == 0 {
                         // sender gone
                         tracing::warn!("cmd sender disappeared");
@@ -144,7 +146,7 @@ impl BackgroundTask {
                     }
                     // cmds received
                     tracing::debug!(num = n, "commands received");
-                }*/
+                }
                 Some((gw, res)) = pending_futs.next() => {
                     // gateway check completed
                     let success = match &res {
@@ -472,7 +474,7 @@ impl Routemaster {
             reqwest_client.clone(),
         );
 
-        Self {
+        Self(Arc::new(Inner {
             reqwest_client,
             network,
             cmd_tx,
@@ -480,11 +482,11 @@ impl Routemaster {
             task_handle: tokio::task::spawn(background_task.run()),
             _drop_guard: ct.clone().drop_guard(),
             ct,
-        }
+        }))
     }
 }
 
-impl Drop for Routemaster {
+impl Drop for Inner {
     fn drop(&mut self) {
         self.task_handle.abort();
     }
@@ -508,11 +510,12 @@ impl Routemaster {
     }
 
     async fn send_cmd(&self, cmd: Command) -> Result<(), Error> {
-        if self.ct.is_cancelled() {
+        if self.0.ct.is_cancelled() {
             return Err(Error::ShuttingDown);
         }
 
-        self.cmd_tx
+        self.0
+            .cmd_tx
             .send(cmd)
             .timeout(Duration::from_secs(60))
             .await
@@ -536,25 +539,25 @@ impl Routemaster {
     }
 
     pub fn try_endpoint(&self, endpoint: &Endpoint<'_>) -> Option<EndpointUrl> {
-        if self.ct.is_cancelled() {
+        if self.0.ct.is_cancelled() {
             return None;
         };
 
-        self.active_rx.borrow().endpoint(endpoint)
+        self.0.active_rx.borrow().endpoint(endpoint)
     }
 
     pub async fn endpoint(&self, endpoint: &Endpoint<'_>) -> Result<EndpointUrl, Error> {
-        if self.ct.is_cancelled() {
+        if self.0.ct.is_cancelled() {
             return Err(Error::ShuttingDown);
         }
 
         // first, try if we can get one straight away
-        if let Some(url) = self.active_rx.borrow().endpoint(endpoint) {
+        if let Some(url) = self.0.active_rx.borrow().endpoint(endpoint) {
             return Ok(url);
         }
 
         // looks like we have to wait and see
-        let mut active_rx = self.active_rx.clone();
+        let mut active_rx = self.0.active_rx.clone();
         async move {
             loop {
                 if let Some(url) = active_rx.borrow_and_update().endpoint(endpoint) {
@@ -569,7 +572,7 @@ impl Routemaster {
     }
 
     pub fn shutdown(&mut self) {
-        self.ct.cancel();
+        self.0.ct.cancel();
     }
 }
 
@@ -667,7 +670,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn init_tracing() {
-        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_test_writer()
+            .try_init();
     }
 
     #[tokio::test]
@@ -750,11 +756,22 @@ mod tests {
             .initial_gateways([Gateway::default()])
             .build();
         let endpoint = Endpoint::Info;
-        assert!(routemaster.try_endpoint(&endpoint).is_none()); // should not be ready
         let url = routemaster.endpoint(&endpoint).await?;
         assert_eq!(url.to_string(), "https://arweave.net/info");
         routemaster.shutdown();
-        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let routemaster = Routemaster::builder().build();
+        {
+            let routemaster = routemaster.clone();
+            tokio::task::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let _ = routemaster.insert_gateways([Gateway::default()]).await;
+            });
+        }
+        assert!(routemaster.try_endpoint(&endpoint).is_none()); // should not be ready
+        let url = routemaster.endpoint(&endpoint).await?;
+        assert_eq!(url.to_string(), "https://arweave.net/info");
+
         Ok(())
     }
 }
