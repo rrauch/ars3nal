@@ -1,27 +1,48 @@
 mod gateway;
 mod routemaster;
+mod api;
 
-use std::sync::Arc;
+use std::marker::PhantomData;
 use crate::routemaster::Routemaster;
 use ario_core::Gateway;
+use ario_core::network::Network;
 use ario_core::tx::{TxId, ValidatedTx};
 use ario_core::wallet::WalletAddress;
 use derive_more::{AsRef, Deref, Display, Into};
+use reqwest::Client as ReqwestClient;
+use std::sync::Arc;
 use url::Url;
+use crate::api::ApiClient;
 
 #[derive(Debug, Clone)]
 pub struct Client(Arc<Inner>);
 
+#[bon::bon]
+impl Client {
+    #[builder(derive(Debug))]
+    pub fn new(
+        #[builder(default)] network: Network,
+        #[builder(default)] reqwest_client: ReqwestClient,
+        #[builder(with = |gws: impl IntoIterator<Item=Gateway>| {
+            gws.into_iter().collect::<Vec<_>>()
+        })]
+        gateways: Vec<Gateway>,
+    ) -> Self {
+        let api_client = ApiClient::new(reqwest_client, network);
+        let routemaster = Routemaster::new(api_client.clone(), gateways);
+        Self(Arc::new(Inner {
+            api_client,
+            routemaster,
+        }))
+    }
+}
+
 #[derive(Debug)]
 struct Inner {
+    api_client: ApiClient,
     routemaster: Routemaster,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum RequestMethod {
-    Get,
-    Post,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, AsRef, Deref, Into, Display)]
 pub struct EndpointUrl(Url);

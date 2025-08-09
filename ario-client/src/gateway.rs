@@ -1,8 +1,8 @@
 use crate::Endpoint;
+use crate::api::ApiClient;
 use ario_core::blob::Blob;
 use ario_core::network::NetworkIdentifier;
 use ario_core::{BlockNumber, Gateway};
-use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::base64::UrlSafe;
@@ -25,31 +25,6 @@ pub enum Error {
     IncorrectNetwork { expected: String, actual: String },
 }
 
-impl GatewayInfo<'static> {
-    pub(crate) async fn retrieve(
-        gw: &Gateway,
-        reqwest_client: &ReqwestClient,
-    ) -> Result<Self, Error> {
-        let url = Endpoint::Info.build_url(gw);
-        let req = reqwest_client
-            .get::<Url>(url.into())
-            .header("Accept", "application/json")
-            .build()?;
-        let resp = reqwest_client.execute(req).await?;
-        let status = resp.status();
-        if status.is_client_error() || status.is_server_error() {
-            let text = resp
-                .text_with_charset("utf-8")
-                .await
-                .ok()
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|| "".to_string());
-            return Err(Error::StatusError(text));
-        }
-        Ok(resp.json().await.map_err(|_| Error::InvalidResponse)?)
-    }
-}
-
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct GatewayInfo<'a> {
@@ -67,6 +42,8 @@ pub struct GatewayInfo<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::Endpoint;
+    use crate::api::{ApiClient, ApiRequest, ApiRequestBuilder, RequestMethod};
     use crate::gateway::{Gateway, GatewayInfo};
     use ario_core::base64::ToBase64;
     use ario_core::network::Network;
@@ -102,8 +79,13 @@ mod tests {
     #[tokio::test]
     async fn gateway_info() -> anyhow::Result<()> {
         let gw = Gateway::from_str("https://arweave.net")?;
-        let client = Client::new();
-        let gw = GatewayInfo::retrieve(&gw, &client).await?;
+        let client = ApiClient::new(Client::new(), Network::default());
+        let req = ApiRequest::builder()
+            .gateway(&gw)
+            .endpoint(&Endpoint::Info)
+            .request_type(RequestMethod::Get)
+            .build();
+        let gw: GatewayInfo = serde_json::from_value(client.send_api_request(&req).await?)?;
         assert_eq!(&gw.network, Network::Mainnet.id());
         Ok(())
     }

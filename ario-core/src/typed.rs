@@ -15,6 +15,10 @@ use std::str::FromStr;
 #[repr(transparent)]
 pub struct Typed<T, I>(pub(crate) I, PhantomData<T>);
 
+// SAFETY: Typed is a transparent wrapper around I. PhantomData<T> doesn't affect thread safety.
+unsafe impl<T, I: Send> Send for Typed<T, I> {}
+unsafe impl<T, I: Sync> Sync for Typed<T, I> {}
+
 impl<T, I> Typed<T, I> {
     pub(crate) const fn new_from_inner(inner: I) -> Self {
         Self(inner, PhantomData)

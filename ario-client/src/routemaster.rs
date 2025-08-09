@@ -1,13 +1,12 @@
+use crate::api::{ApiClient, ApiRequest, RequestMethod};
 use crate::gateway::GatewayInfo;
-use crate::{Endpoint, EndpointUrl, gateway};
+use crate::{Endpoint, api, gateway};
 use ario_core::Gateway;
-use ario_core::network::{Network, NetworkIdentifier};
 use futures_concurrency::future::FutureGroup;
 use futures_lite::future;
 use futures_lite::stream::StreamExt;
 use itertools::Itertools;
 use rand::Rng;
-use reqwest::Client as ReqwestClient;
 use std::collections::HashMap;
 use std::ops::Add;
 use std::pin::Pin;
@@ -24,8 +23,7 @@ pub struct Routemaster(Arc<Inner>);
 
 #[derive(Debug)]
 struct Inner {
-    reqwest_client: ReqwestClient,
-    network: Network,
+    api_client: ApiClient,
     cmd_tx: mpsc::Sender<Command>,
     active_rx: watch::Receiver<ActiveRoutes>,
     task_handle: JoinHandle<()>,
@@ -45,8 +43,7 @@ struct BackgroundTask {
     cmd_rx: mpsc::Receiver<Command>,
     active_tx: watch::Sender<ActiveRoutes>,
     ct: CancellationToken,
-    network: Network,
-    reqwest_client: ReqwestClient,
+    api_client: ApiClient,
     _drop_guard: DropGuard,
 }
 
@@ -56,8 +53,7 @@ impl BackgroundTask {
         cmd_rx: mpsc::Receiver<Command>,
         active_tx: watch::Sender<ActiveRoutes>,
         ct: CancellationToken,
-        network: Network,
-        reqwest_client: ReqwestClient,
+        api_client: ApiClient,
     ) -> Self {
         let _drop_guard = ct.clone().drop_guard();
         Self {
@@ -67,8 +63,7 @@ impl BackgroundTask {
             cmd_rx,
             active_tx,
             ct,
-            network,
-            reqwest_client,
+            api_client,
             _drop_guard,
         }
     }
@@ -339,12 +334,7 @@ impl BackgroundTask {
             // start background checker task
             let ct = self.ct.child_token();
             let drop_guard = ct.clone().drop_guard();
-            let task = GatewayCheckTask::new(
-                ct,
-                route.gateway.clone(),
-                self.network.id().clone(),
-                self.reqwest_client.clone(),
-            );
+            let task = GatewayCheckTask::new(ct, route.gateway.clone(), self.api_client.clone());
             handles.push((route.gateway.clone(), tokio::task::spawn(task.run())));
             new_tasks.push((route.gateway.clone(), drop_guard));
         }
@@ -375,15 +365,14 @@ impl BackgroundTask {
 struct GatewayCheckTask {
     ct: CancellationToken,
     gateway: Gateway,
-    required_network_id: NetworkIdentifier,
-    reqwest_client: ReqwestClient,
+    api_client: ApiClient,
 }
 
 struct GatewayCheck {
     gateway: Gateway,
     start_time: SystemTime,
     completion_time: SystemTime,
-    result: Result<GatewayInfo<'static>, gateway::Error>,
+    result: Result<GatewayInfo<'static>, api::Error>,
 }
 
 #[derive(Error, Debug)]
@@ -395,17 +384,11 @@ enum CheckError {
 }
 
 impl GatewayCheckTask {
-    fn new(
-        ct: CancellationToken,
-        gateway: Gateway,
-        required_network_id: NetworkIdentifier,
-        reqwest_client: ReqwestClient,
-    ) -> Self {
+    fn new(ct: CancellationToken, gateway: Gateway, api_client: ApiClient) -> Self {
         Self {
             ct,
             gateway,
-            required_network_id,
-            reqwest_client,
+            api_client,
         }
     }
 
@@ -429,39 +412,27 @@ impl GatewayCheckTask {
         }
     }
 
-    async fn info(&mut self) -> Result<GatewayInfo<'static>, gateway::Error> {
-        let info = GatewayInfo::retrieve(&self.gateway, &self.reqwest_client).await?;
-        if info.network != self.required_network_id {
-            return Err(gateway::Error::IncorrectNetwork {
-                expected: self.required_network_id.to_string(),
+    async fn info(&mut self) -> Result<GatewayInfo<'static>, api::Error> {
+        let req = ApiRequest::builder()
+            .request_type(RequestMethod::Get)
+            .gateway(&self.gateway)
+            .endpoint(&Endpoint::Info)
+            .build();
+        let info: GatewayInfo =
+            serde_json::from_value(self.api_client.send_api_request(&req).await?)
+                .map_err(|_| api::Error::GatewayError(gateway::Error::InvalidResponse))?;
+        if &info.network != self.api_client.network().id() {
+            return Err(api::Error::GatewayError(gateway::Error::IncorrectNetwork {
+                expected: self.api_client.network().id().to_string(),
                 actual: info.network.to_string(),
-            });
+            }));
         }
         Ok(info)
     }
 }
 
-#[bon::bon]
 impl Routemaster {
-    #[builder(derive(Debug))]
-    pub fn new(
-        #[builder(default)] network: Network,
-        #[builder(default)] reqwest_client: ReqwestClient,
-        #[builder(with = |gws: impl IntoIterator<Item=Gateway>| {
-            gws.into_iter().collect::<Vec<_>>()
-        }, default)]
-        initial_gateways: Vec<Gateway>,
-    ) -> Self {
-        Self::new_internal(reqwest_client, network, initial_gateways)
-    }
-}
-
-impl Routemaster {
-    fn new_internal(
-        reqwest_client: ReqwestClient,
-        network: Network,
-        initial_gateways: Vec<Gateway>,
-    ) -> Self {
+    pub(crate) fn new(api_client: ApiClient, initial_gateways: Vec<Gateway>) -> Self {
         let ct = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
         let (active_tx, active_rx) = watch::channel(ActiveRoutes::from_iter(vec![]));
@@ -470,13 +441,11 @@ impl Routemaster {
             cmd_rx,
             active_tx,
             ct.clone(),
-            network.clone(),
-            reqwest_client.clone(),
+            api_client.clone(),
         );
 
         Self(Arc::new(Inner {
-            reqwest_client,
-            network,
+            api_client,
             cmd_tx,
             active_rx,
             task_handle: tokio::task::spawn(background_task.run()),
@@ -538,30 +507,34 @@ impl Routemaster {
         .await
     }
 
-    pub fn try_endpoint(&self, endpoint: &Endpoint<'_>) -> Option<EndpointUrl> {
+    pub fn try_gateway(&self) -> Option<Gateway> {
         if self.0.ct.is_cancelled() {
             return None;
         };
 
-        self.0.active_rx.borrow().endpoint(endpoint)
+        self.0
+            .active_rx
+            .borrow()
+            .pick_gateway()
+            .map(|gw| gw.clone())
     }
 
-    pub async fn endpoint(&self, endpoint: &Endpoint<'_>) -> Result<EndpointUrl, Error> {
+    pub async fn gateway(&self) -> Result<Gateway, Error> {
         if self.0.ct.is_cancelled() {
             return Err(Error::ShuttingDown);
         }
 
         // first, try if we can get one straight away
-        if let Some(url) = self.0.active_rx.borrow().endpoint(endpoint) {
-            return Ok(url);
+        if let Some(gw) = self.0.active_rx.borrow().pick_gateway() {
+            return Ok(gw.clone());
         }
 
         // looks like we have to wait and see
         let mut active_rx = self.0.active_rx.clone();
         async move {
             loop {
-                if let Some(url) = active_rx.borrow_and_update().endpoint(endpoint) {
-                    return Ok(url);
+                if let Some(gw) = active_rx.borrow_and_update().pick_gateway() {
+                    return Ok(gw.clone());
                 }
                 active_rx.changed().await.map_err(|_| Error::ShuttingDown)?;
             }
@@ -605,10 +578,7 @@ enum Checked {
 #[derive(Debug)]
 enum GatewayStatus {
     Ok(GatewayInfo<'static>),
-    Error {
-        error: gateway::Error,
-        retry_num: usize,
-    },
+    Error { error: api::Error, retry_num: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -635,10 +605,6 @@ impl FromIterator<(Gateway, usize)> for ActiveRoutes {
 }
 
 impl ActiveRoutes {
-    fn endpoint(&self, endpoint: &Endpoint) -> Option<EndpointUrl> {
-        self.pick_gateway().map(|gw| endpoint.build_url(gw))
-    }
-
     fn pick_gateway(&self) -> Option<&Gateway> {
         if self.gateways.is_empty() {
             return None;
@@ -659,12 +625,13 @@ impl ActiveRoutes {
 
 #[cfg(test)]
 mod tests {
-    use crate::Endpoint;
+    use crate::api::ApiClient;
     use crate::gateway::Error;
     use crate::routemaster::{ActiveRoutes, GatewayCheckTask, Routemaster};
+    use crate::{Endpoint, api};
     use ario_core::Gateway;
     use ario_core::network::Network;
-    use reqwest::Client;
+    use reqwest::{Client, ClientBuilder};
     use std::str::FromStr;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
@@ -674,18 +641,6 @@ mod tests {
             .with_max_level(tracing::Level::TRACE)
             .with_test_writer()
             .try_init();
-    }
-
-    #[tokio::test]
-    async fn builder() -> anyhow::Result<()> {
-        let _routemaster = Routemaster::builder().reqwest_client(Client::new()).build();
-        let _routemaster = Routemaster::builder().network(Network::Testnet).build();
-        let _local = Routemaster::builder()
-            .network(Network::local("foobar123")?)
-            .initial_gateways(vec![Gateway::from_str("http://localhost:1984")?])
-            .build();
-        let _routemaster = Routemaster::builder().build();
-        Ok(())
     }
 
     #[test]
@@ -711,26 +666,18 @@ mod tests {
     #[tokio::test]
     async fn gateway_check() -> anyhow::Result<()> {
         let ct = CancellationToken::new();
-        let client = Client::new();
-        let task = GatewayCheckTask::new(
-            ct.clone(),
-            Gateway::default(),
-            Network::Mainnet.id().clone(),
-            client.clone(),
-        );
+        let mainnet_client = ApiClient::new(Client::new(), Network::Mainnet);
+        let task = GatewayCheckTask::new(ct.clone(), Gateway::default(), mainnet_client.clone());
         let gw_check = task.run().await?;
         assert!(gw_check.result.is_ok());
 
-        let task = GatewayCheckTask::new(
-            ct.clone(),
-            Gateway::default(),
-            Network::Testnet.id().clone(),
-            client.clone(),
-        );
+        let testnet_client = ApiClient::new(Client::new(), Network::Testnet);
+
+        let task = GatewayCheckTask::new(ct.clone(), Gateway::default(), testnet_client);
         let gw_check2 = task.run().await?;
         assert!(gw_check2.result.is_err());
         match gw_check2.result {
-            Err(Error::IncorrectNetwork { .. }) => {
+            Err(api::Error::GatewayError(Error::IncorrectNetwork { .. })) => {
                 // correct
             }
             _ => panic!("expected incorrect network error"),
@@ -739,8 +686,7 @@ mod tests {
         let task = GatewayCheckTask::new(
             ct.clone(),
             Gateway::from_str("https://google.com/")?,
-            Network::Mainnet.id().clone(),
-            client.clone(),
+            mainnet_client,
         );
         let gw_check3 = task.run().await?;
         assert!(gw_check3.result.is_err());
@@ -752,15 +698,14 @@ mod tests {
     #[tokio::test]
     async fn routemaster_live() -> anyhow::Result<()> {
         init_tracing();
-        let mut routemaster = Routemaster::builder()
-            .initial_gateways([Gateway::default()])
-            .build();
+        let client = ApiClient::new(ClientBuilder::new().build()?, Network::default());
+        let mut routemaster = Routemaster::new(client.clone(), vec![Gateway::default()]);
         let endpoint = Endpoint::Info;
-        let url = routemaster.endpoint(&endpoint).await?;
+        let url = endpoint.build_url(&routemaster.gateway().await?);
         assert_eq!(url.to_string(), "https://arweave.net/info");
         routemaster.shutdown();
 
-        let routemaster = Routemaster::builder().build();
+        let routemaster = Routemaster::new(client.clone(), vec![Gateway::default()]);
         {
             let routemaster = routemaster.clone();
             tokio::task::spawn(async move {
@@ -768,8 +713,8 @@ mod tests {
                 let _ = routemaster.insert_gateways([Gateway::default()]).await;
             });
         }
-        assert!(routemaster.try_endpoint(&endpoint).is_none()); // should not be ready
-        let url = routemaster.endpoint(&endpoint).await?;
+        assert!(routemaster.try_gateway().is_none()); // should not be ready
+        let url = endpoint.build_url(&routemaster.gateway().await?);
         assert_eq!(url.to_string(), "https://arweave.net/info");
 
         Ok(())

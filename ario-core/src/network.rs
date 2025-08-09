@@ -85,6 +85,12 @@ impl Display for NetworkIdentifier {
     }
 }
 
+impl AsRef<str> for NetworkIdentifier {
+    fn as_ref(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Network {
     Mainnet,
