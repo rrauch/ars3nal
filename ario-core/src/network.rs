@@ -85,60 +85,36 @@ impl Display for NetworkIdentifier {
     }
 }
 
-pub trait Network: Clone + Debug + Send + Sync + 'static {
-    fn id(&self) -> &NetworkIdentifier;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Network {
+    Mainnet,
+    Testnet,
+    Local(NetworkIdentifier),
+}
+
+impl Default for Network {
+    fn default() -> Self {
+        Self::Mainnet
+    }
+}
+
+impl Network {
+    pub fn local<T: TryInto<NetworkIdentifier>>(id: T) -> Result<Self, T::Error> {
+        Ok(Self::Local(id.try_into()?))
+    }
+
+    pub fn id(&self) -> &NetworkIdentifier {
+        match self {
+            Network::Mainnet => &MAINNET_ID,
+            Network::Testnet => &TESTNET_ID,
+            Network::Local(id) => id,
+        }
+    }
 }
 
 static MAINNET_ID: NetworkIdentifier = NetworkIdentifier::new_const(Cow::Borrowed("arweave.N.1"));
-
-#[derive(Clone, Debug)]
-pub struct Mainnet;
-
-impl Network for Mainnet {
-    fn id(&self) -> &NetworkIdentifier {
-        &MAINNET_ID
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Testnet;
 static TESTNET_ID: NetworkIdentifier =
     NetworkIdentifier::new_const(Cow::Borrowed("arweave.testnet.N.1"));
-
-impl Network for Testnet {
-    fn id(&self) -> &NetworkIdentifier {
-        &TESTNET_ID
-    }
-}
-
-static LOCAL_ID: NetworkIdentifier =
-    NetworkIdentifier::new_const(Cow::Borrowed("arweave.localtest"));
-
-#[derive(Clone, Debug)]
-pub struct Local;
-
-impl Network for Local {
-    fn id(&self) -> &NetworkIdentifier {
-        &LOCAL_ID
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Custom {
-    id: NetworkIdentifier,
-}
-
-impl Network for Custom {
-    fn id(&self) -> &NetworkIdentifier {
-        &self.id
-    }
-}
-
-impl From<NetworkIdentifier> for Custom {
-    fn from(id: NetworkIdentifier) -> Self {
-        Self { id }
-    }
-}
 
 #[cfg(test)]
 mod tests {

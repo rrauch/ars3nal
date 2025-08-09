@@ -69,7 +69,7 @@ pub struct GatewayInfo<'a> {
 mod tests {
     use crate::gateway::{Gateway, GatewayInfo};
     use ario_core::base64::ToBase64;
-    use ario_core::network::{Mainnet, Network};
+    use ario_core::network::Network;
     use reqwest::Client;
     use std::str::FromStr;
 
@@ -85,7 +85,7 @@ mod tests {
         assert_eq!(info.queue_length, 0);
         assert_eq!(info.peers, 880);
         assert_eq!(info.node_state_latency, 2);
-        assert_eq!(&info.network, Mainnet.id());
+        assert_eq!(&info.network, Network::Mainnet.id());
         assert_eq!(*info.height, 1727844);
         assert_eq!(info.blocks, 1727845);
 
@@ -104,7 +104,7 @@ mod tests {
         let gw = Gateway::from_str("https://arweave.net")?;
         let client = Client::new();
         let gw = GatewayInfo::retrieve(&gw, &client).await?;
-        assert_eq!(&gw.network, Mainnet.id());
+        assert_eq!(&gw.network, Network::Mainnet.id());
         Ok(())
     }
 }

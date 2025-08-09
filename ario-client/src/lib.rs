@@ -3,14 +3,13 @@ mod routemaster;
 
 use crate::routemaster::Routemaster;
 use ario_core::Gateway;
-use ario_core::network::Network;
 use ario_core::tx::{TxId, ValidatedTx};
 use ario_core::wallet::WalletAddress;
 use derive_more::{AsRef, Deref, Display, Into};
 use url::Url;
 
-pub struct Client<N: Network> {
-    routemaster: Routemaster<N>,
+pub struct Client {
+    routemaster: Routemaster,
 }
 
 #[derive(Debug, PartialEq, Eq)]

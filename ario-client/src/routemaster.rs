@@ -1,7 +1,7 @@
 use crate::gateway::GatewayInfo;
 use crate::{Endpoint, EndpointUrl, gateway};
 use ario_core::Gateway;
-use ario_core::network::{Custom, Local, Mainnet, Network, NetworkIdentifier, Testnet};
+use ario_core::network::{Network, NetworkIdentifier};
 use futures_concurrency::future::FutureGroup;
 use futures_lite::stream::StreamExt;
 use itertools::Itertools;
@@ -17,9 +17,9 @@ use tokio_util::future::FutureExt;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 #[derive(Debug)]
-pub struct Routemaster<N: Network> {
+pub struct Routemaster {
     reqwest_client: ReqwestClient,
-    network: N,
+    network: Network,
     cmd_tx: mpsc::Sender<Command>,
     active_rx: watch::Receiver<ActiveRoutes>,
     task_handle: JoinHandle<()>,
@@ -32,25 +32,25 @@ enum Command {
     RemoveGateways(Vec<Gateway>),
 }
 
-struct BackgroundTask<N: Network> {
+struct BackgroundTask {
     routes: HashMap<Gateway, Route>,
     initial_gateways: Vec<Gateway>,
     pending_checks: HashMap<Gateway, DropGuard>,
     cmd_rx: mpsc::Receiver<Command>,
     active_tx: watch::Sender<ActiveRoutes>,
     ct: CancellationToken,
-    network: N,
+    network: Network,
     reqwest_client: ReqwestClient,
     _drop_guard: DropGuard,
 }
 
-impl<N: Network> BackgroundTask<N> {
+impl BackgroundTask {
     fn new(
         initial_gateways: Vec<Gateway>,
         cmd_rx: mpsc::Receiver<Command>,
         active_tx: watch::Sender<ActiveRoutes>,
         ct: CancellationToken,
-        network: N,
+        network: Network,
         reqwest_client: ReqwestClient,
     ) -> Self {
         let _drop_guard = ct.clone().drop_guard();
@@ -440,69 +440,24 @@ impl GatewayCheckTask {
 }
 
 #[bon::bon]
-impl Routemaster<Mainnet> {
-    #[builder(derive(Debug), builder_type = MainnetBuilder, start_fn = mainnet)]
+impl Routemaster {
+    #[builder(derive(Debug))]
     pub fn new(
+        #[builder(default)] network: Network,
         #[builder(default)] reqwest_client: ReqwestClient,
         #[builder(with = |gws: impl IntoIterator<Item=Gateway>| {
             gws.into_iter().collect::<Vec<_>>()
         }, default)]
         initial_gateways: Vec<Gateway>,
     ) -> Self {
-        Self::new_internal(reqwest_client, Mainnet, initial_gateways)
+        Self::new_internal(reqwest_client, network, initial_gateways)
     }
 }
 
-#[bon::bon]
-impl Routemaster<Testnet> {
-    #[builder(derive(Debug), builder_type = TestnetBuilder, start_fn = testnet)]
-    pub fn new(
-        #[builder(default)] reqwest_client: ReqwestClient,
-        #[builder(with = |gws: impl IntoIterator<Item=Gateway>| {
-            gws.into_iter().collect::<Vec<_>>()
-        }, default)]
-        initial_gateways: Vec<Gateway>,
-    ) -> Self {
-        Self::new_internal(reqwest_client, Testnet, initial_gateways)
-    }
-}
-
-#[bon::bon]
-impl Routemaster<Local> {
-    #[builder(derive(Debug), builder_type = LocalBuilder, start_fn = local)]
-    pub fn new(
-        #[builder(default)] reqwest_client: ReqwestClient,
-        #[builder(with = |gws: impl IntoIterator<Item=Gateway>| {
-            gws.into_iter().collect::<Vec<_>>()
-        }, default)]
-        initial_gateways: Vec<Gateway>,
-    ) -> Self {
-        Self::new_internal(reqwest_client, Local, initial_gateways)
-    }
-}
-
-#[bon::bon]
-impl Routemaster<Custom> {
-    #[builder(derive(Debug), builder_type = CustomBuilder, start_fn = custom)]
-    pub fn new(
-        #[builder(with = |id: impl TryInto<NetworkIdentifier, Error:Into<anyhow::Error>>| -> Result<_, anyhow::Error> {
-            id.try_into().map_err(|e| e.into())
-        })]
-        id: NetworkIdentifier,
-        #[builder(default)] reqwest_client: ReqwestClient,
-        #[builder(with = |gws: impl IntoIterator<Item=Gateway>| {
-            gws.into_iter().collect::<Vec<_>>()
-        }, default)]
-        initial_gateways: Vec<Gateway>,
-    ) -> Self {
-        Self::new_internal(reqwest_client, Custom::from(id), initial_gateways)
-    }
-}
-
-impl<N: Network> Routemaster<N> {
+impl Routemaster {
     fn new_internal(
         reqwest_client: ReqwestClient,
-        network: N,
+        network: Network,
         initial_gateways: Vec<Gateway>,
     ) -> Self {
         let ct = CancellationToken::new();
@@ -529,7 +484,7 @@ impl<N: Network> Routemaster<N> {
     }
 }
 
-impl<N: Network> Drop for Routemaster<N> {
+impl Drop for Routemaster {
     fn drop(&mut self) {
         self.task_handle.abort();
     }
@@ -543,7 +498,7 @@ pub enum Error {
     Timeout,
 }
 
-impl<N: Network> Routemaster<N> {
+impl Routemaster {
     pub async fn insert_gateways(
         &self,
         gws: impl IntoIterator<Item = Gateway>,
@@ -705,7 +660,7 @@ mod tests {
     use crate::gateway::Error;
     use crate::routemaster::{ActiveRoutes, GatewayCheckTask, Routemaster};
     use ario_core::Gateway;
-    use ario_core::network::{Mainnet, Network, Testnet};
+    use ario_core::network::Network;
     use reqwest::Client;
     use std::str::FromStr;
     use std::time::Duration;
@@ -717,18 +672,13 @@ mod tests {
 
     #[tokio::test]
     async fn builder() -> anyhow::Result<()> {
-        let _routemaster = Routemaster::mainnet().reqwest_client(Client::new()).build();
-        let _routemaster = Routemaster::testnet().build();
-        let _local = Routemaster::custom().id("foobar123")?.build();
-        assert!(
-            Routemaster::custom()
-                .id("   430593- foobar123 ^&**** ")
-                .is_err()
-        );
-        let _local = Routemaster::local()
+        let _routemaster = Routemaster::builder().reqwest_client(Client::new()).build();
+        let _routemaster = Routemaster::builder().network(Network::Testnet).build();
+        let _local = Routemaster::builder()
+            .network(Network::local("foobar123")?)
             .initial_gateways(vec![Gateway::from_str("http://localhost:1984")?])
             .build();
-        let _routemaster = Routemaster::mainnet().build();
+        let _routemaster = Routemaster::builder().build();
         Ok(())
     }
 
@@ -759,7 +709,7 @@ mod tests {
         let task = GatewayCheckTask::new(
             ct.clone(),
             Gateway::default(),
-            Mainnet.id().clone(),
+            Network::Mainnet.id().clone(),
             client.clone(),
         );
         let gw_check = task.run().await?;
@@ -768,7 +718,7 @@ mod tests {
         let task = GatewayCheckTask::new(
             ct.clone(),
             Gateway::default(),
-            Testnet.id().clone(),
+            Network::Testnet.id().clone(),
             client.clone(),
         );
         let gw_check2 = task.run().await?;
@@ -783,7 +733,7 @@ mod tests {
         let task = GatewayCheckTask::new(
             ct.clone(),
             Gateway::from_str("https://google.com/")?,
-            Mainnet.id().clone(),
+            Network::Mainnet.id().clone(),
             client.clone(),
         );
         let gw_check3 = task.run().await?;
@@ -796,7 +746,7 @@ mod tests {
     #[tokio::test]
     async fn routemaster_live() -> anyhow::Result<()> {
         init_tracing();
-        let mut routemaster = Routemaster::mainnet()
+        let mut routemaster = Routemaster::builder()
             .initial_gateways([Gateway::default()])
             .build();
         let endpoint = Endpoint::Info;
