@@ -11,6 +11,7 @@ use ario_core::wallet::WalletAddress;
 use derive_more::{AsRef, Deref, Display, Into};
 use reqwest::Client as ReqwestClient;
 use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -27,12 +28,16 @@ impl Client {
         })]
         gateways: Vec<Gateway>,
         #[builder(default = 10)] max_simultaneous_gateway_checks: u32,
+        #[builder(default = Duration::from_secs(30))] startup_timeout: Duration,
+        #[builder(default = Duration::from_secs(5))] regular_timeout: Duration,
     ) -> Self {
         let api_client = ApiClient::new(reqwest_client, network);
         let routemaster = Routemaster::new(
             api_client.clone(),
             gateways,
             max_simultaneous_gateway_checks,
+            startup_timeout,
+            regular_timeout,
         );
         Self(Arc::new(Inner {
             api_client,

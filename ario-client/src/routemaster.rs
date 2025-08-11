@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio_util::future::FutureExt;
 use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::time::FutureExt;
 
 #[derive(Debug, Clone)]
 pub struct Routemaster(Arc<Inner>);
@@ -26,8 +26,11 @@ struct Inner {
     api_client: ApiClient,
     cmd_tx: mpsc::Sender<Command>,
     active_rx: watch::Receiver<ActiveRoutes>,
+    state_rx: watch::Receiver<State>,
     task_handle: JoinHandle<()>,
     ct: CancellationToken,
+    startup_timeout: Duration,
+    regular_timeout: Duration,
     _drop_guard: DropGuard,
 }
 
@@ -36,13 +39,29 @@ enum Command {
     RemoveGateways(Vec<Gateway>),
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum State {
+    ReStarting,
+    Running,
+    ShuttingDown,
+}
+
+impl State {
+    fn shutting_down(&self) -> bool {
+        match self {
+            Self::ShuttingDown => true,
+            _ => false,
+        }
+    }
+}
+
 struct BackgroundTask {
     routes: HashMap<Gateway, Route>,
-    initial_gateways: Vec<Gateway>,
     pending_checks: HashMap<Gateway, DropGuard>,
     cmd_rx: mpsc::Receiver<Command>,
     active_tx: watch::Sender<ActiveRoutes>,
     ct: CancellationToken,
+    state: watch::Sender<State>,
     api_client: ApiClient,
     check_permits: Arc<Semaphore>,
     _drop_guard: DropGuard,
@@ -54,32 +73,70 @@ impl BackgroundTask {
         cmd_rx: mpsc::Receiver<Command>,
         active_tx: watch::Sender<ActiveRoutes>,
         ct: CancellationToken,
+        state: watch::Sender<State>,
         api_client: ApiClient,
         check_permits: Arc<Semaphore>,
     ) -> Self {
         let _drop_guard = ct.clone().drop_guard();
         Self {
-            routes: HashMap::default(),
-            initial_gateways,
+            routes: initial_gateways
+                .into_iter()
+                .map(|gw| {
+                    let route = Route::new(gw.clone());
+                    (gw, route)
+                })
+                .collect(),
             pending_checks: HashMap::default(),
             cmd_rx,
             active_tx,
             ct,
+            state,
             api_client,
             check_permits,
             _drop_guard,
         }
     }
 
+    fn set_state(&self, state: State) {
+        let _ = self.state.send(state);
+    }
+
+    fn restart(&mut self) {
+        tracing::info!(known_gateways = self.routes.len(), "(re)starting");
+        self.set_state(State::ReStarting);
+
+        // stop all pending checks
+        let num_pending_checks = self.pending_checks.len();
+        self.pending_checks.clear();
+        tracing::debug!(
+            pending_checks = num_pending_checks,
+            "pending checks stopped"
+        );
+
+        let _ = self.active_tx.send(ActiveRoutes::from_iter([]));
+
+        // clear the command queue
+        // drop any unprocessed commands
+        loop {
+            if let Err(_) = self.cmd_rx.try_recv() {
+                break;
+            }
+        }
+
+        // re-set the state of all known gateways to unprocessed
+        self.routes
+            .values_mut()
+            .for_each(|route| route.checked = Checked::Unchecked);
+
+        tracing::debug!(state = "(re)starting", "state changed");
+    }
+
     #[tracing::instrument(name = "background_run", skip(self))]
     async fn run(mut self) {
-        tracing::info!(initial_gateways = self.initial_gateways.len(), "starting");
-        let mut cmds = Vec::with_capacity(10);
-        cmds.push(Command::AddGateways(std::mem::replace(
-            &mut self.initial_gateways,
-            vec![],
-        )));
-        let mut next_checks_due = SystemTime::now().add(Duration::from_secs(60));
+        self.restart();
+
+        let mut cmds: Vec<Command> = Vec::with_capacity(10);
+        let mut next_checks_due = SystemTime::now();
 
         let mut pending_futs = FutureGroup::<
             Pin<Box<dyn Future<Output = (Gateway, Result<GatewayCheck, CheckError>)> + Send>>,
@@ -162,6 +219,17 @@ impl BackgroundTask {
                         let num_active = self.active_tx.borrow().gateways.len();
                         tracing::info!(num_active, num_active_before, "number of active gateways changed");
                     }
+                    let state = {
+                        self.state.borrow().clone()
+                    };
+                    if let State::ReStarting = state {
+                        if self.routes.values().find(|route| route.is_unchecked()).is_none() {
+                            // all routes have been checked
+                            // transition to Running state
+                            let _ = self.state.send(State::Running);
+                            tracing::debug!(state = "running", "state changed");
+                        }
+                    }
                 }
                 _ = self.ct.cancelled() => {
                     // shutting down
@@ -171,6 +239,8 @@ impl BackgroundTask {
         }
         tracing::debug!("end of main loop reached");
         tracing::info!("shutting down");
+        let _ = self.state.send(State::ShuttingDown);
+        tracing::debug!(state = "shutdown", "state changed");
         self.ct.cancel();
     }
 
@@ -457,16 +527,20 @@ impl Routemaster {
         api_client: ApiClient,
         initial_gateways: Vec<Gateway>,
         max_simultaneous_checks: u32,
+        startup_timeout: Duration,
+        regular_timeout: Duration,
     ) -> Self {
         let ct = CancellationToken::new();
         let check_permits = Arc::new(Semaphore::new(max_simultaneous_checks as usize));
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
         let (active_tx, active_rx) = watch::channel(ActiveRoutes::from_iter(vec![]));
+        let (state_tx, state_rx) = watch::channel(State::ReStarting);
         let background_task = BackgroundTask::new(
             initial_gateways,
             cmd_rx,
             active_tx,
             ct.clone(),
+            state_tx,
             api_client.clone(),
             check_permits,
         );
@@ -475,9 +549,12 @@ impl Routemaster {
             api_client,
             cmd_tx,
             active_rx,
+            state_rx,
             task_handle: tokio::task::spawn(background_task.run()),
             _drop_guard: ct.clone().drop_guard(),
             ct,
+            startup_timeout,
+            regular_timeout,
         }))
     }
 }
@@ -505,8 +582,16 @@ impl Routemaster {
             .await
     }
 
-    async fn send_cmd(&self, cmd: Command) -> Result<(), Error> {
+    fn state(&self) -> State {
         if self.0.ct.is_cancelled() {
+            State::ShuttingDown
+        } else {
+            self.0.state_rx.borrow().clone()
+        }
+    }
+
+    async fn send_cmd(&self, cmd: Command) -> Result<(), Error> {
+        if self.state().shutting_down() {
             return Err(Error::ShuttingDown);
         }
 
@@ -535,7 +620,7 @@ impl Routemaster {
     }
 
     pub fn try_gateway(&self) -> Option<Gateway> {
-        if self.0.ct.is_cancelled() {
+        if self.state().shutting_down() {
             return None;
         };
 
@@ -547,26 +632,40 @@ impl Routemaster {
     }
 
     pub async fn gateway(&self) -> Result<Gateway, Error> {
-        if self.0.ct.is_cancelled() {
+        let state = self.state();
+        if state.shutting_down() {
             return Err(Error::ShuttingDown);
         }
 
-        // first, try if we can get one straight away
-        if let Some(gw) = self.0.active_rx.borrow().pick_gateway() {
-            return Ok(gw.clone());
+        let timeout = match state {
+            State::ReStarting => self.0.startup_timeout,
+            _ => self.0.regular_timeout,
+        };
+
+        {
+            // first, try if we can get one straight away
+            if let Some(gw) = self.0.active_rx.borrow().pick_gateway() {
+                return Ok(gw.clone());
+            }
         }
 
         // looks like we have to wait and see
         let mut active_rx = self.0.active_rx.clone();
         async move {
             loop {
-                if let Some(gw) = active_rx.borrow_and_update().pick_gateway() {
-                    return Ok(gw.clone());
+                let gateway = {
+                    let route = active_rx.borrow_and_update();
+                    route.pick_gateway().map(|gw| gw.clone())
+                };
+
+                if let Some(gw) = gateway {
+                    return Ok(gw);
                 }
+
                 active_rx.changed().await.map_err(|_| Error::ShuttingDown)?;
             }
         }
-        .timeout(Duration::from_secs(30))
+        .timeout(timeout)
         .await
         .map_err(|_| Error::Timeout)?
     }
@@ -587,6 +686,15 @@ impl Route {
         Self {
             gateway,
             checked: Checked::Unchecked,
+        }
+    }
+}
+
+impl Route {
+    fn is_unchecked(&self) -> bool {
+        match self.checked {
+            Checked::Unchecked => true,
+            _ => false,
         }
     }
 }
@@ -656,9 +764,8 @@ impl ActiveRoutes {
 #[cfg(test)]
 mod tests {
     use crate::api::ApiClient;
-    use crate::gateway::Error;
     use crate::routemaster::{ActiveRoutes, GatewayCheckTask, Routemaster};
-    use crate::{Endpoint, api, gateway};
+    use crate::{Endpoint, gateway};
     use ario_core::Gateway;
     use ario_core::network::Network;
     use reqwest::{Client, ClientBuilder};
@@ -739,17 +846,28 @@ mod tests {
     }
 
     #[ignore]
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn routemaster_live() -> anyhow::Result<()> {
         init_tracing();
         let client = ApiClient::new(ClientBuilder::new().build()?, Network::default());
-        let mut routemaster = Routemaster::new(client.clone(), vec![Gateway::default()], 10);
-        let endpoint = Endpoint::Info;
-        let url = endpoint.build_url(&routemaster.gateway().await?);
-        assert_eq!(url.to_string(), "https://arweave.net/info");
+        let mut routemaster = Routemaster::new(
+            client.clone(),
+            vec![Gateway::default()],
+            10,
+            Duration::from_secs(10),
+            Duration::from_secs(2),
+        );
+        let gw = routemaster.gateway().await?;
+        assert_eq!(gw.to_string(), "https://arweave.net/");
         routemaster.shutdown();
 
-        let routemaster = Routemaster::new(client.clone(), vec![Gateway::default()], 10);
+        let routemaster = Routemaster::new(
+            client.clone(),
+            vec![Gateway::default()],
+            10,
+            Duration::from_secs(10),
+            Duration::from_secs(2),
+        );
         {
             let routemaster = routemaster.clone();
             tokio::task::spawn(async move {
@@ -758,8 +876,8 @@ mod tests {
             });
         }
         assert!(routemaster.try_gateway().is_none()); // should not be ready
-        let url = endpoint.build_url(&routemaster.gateway().await?);
-        assert_eq!(url.to_string(), "https://arweave.net/info");
+        let gw = routemaster.gateway().await?;
+        assert_eq!(gw.to_string(), "https://arweave.net/");
 
         Ok(())
     }
