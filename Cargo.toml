@@ -7,6 +7,7 @@ bon = "3.6"
 ecdsa = "0.17.0-rc.5"
 elliptic-curve = { git = "https://github.com/RustCrypto/traits.git", rev = "d5355ef8a85577d9842505cf3241f6e1d011d0da" }
 futures-lite = "2.6"
+maybe-owned = "0.3"
 rand = "0.9"
 rsa = { git = "https://github.com/rrauch/RSA.git", rev = "941f6849ffe7cc8cd7e232699377cf70a625984f" }
 serde = "1.0"

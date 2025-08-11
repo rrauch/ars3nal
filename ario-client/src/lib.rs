@@ -1,8 +1,8 @@
+mod api;
 mod gateway;
 mod routemaster;
-mod api;
 
-use std::marker::PhantomData;
+use crate::api::ApiClient;
 use crate::routemaster::Routemaster;
 use ario_core::Gateway;
 use ario_core::network::Network;
@@ -12,7 +12,6 @@ use derive_more::{AsRef, Deref, Display, Into};
 use reqwest::Client as ReqwestClient;
 use std::sync::Arc;
 use url::Url;
-use crate::api::ApiClient;
 
 #[derive(Debug, Clone)]
 pub struct Client(Arc<Inner>);
@@ -27,9 +26,14 @@ impl Client {
             gws.into_iter().collect::<Vec<_>>()
         })]
         gateways: Vec<Gateway>,
+        #[builder(default = 10)] max_simultaneous_gateway_checks: u32,
     ) -> Self {
         let api_client = ApiClient::new(reqwest_client, network);
-        let routemaster = Routemaster::new(api_client.clone(), gateways);
+        let routemaster = Routemaster::new(
+            api_client.clone(),
+            gateways,
+            max_simultaneous_gateway_checks,
+        );
         Self(Arc::new(Inner {
             api_client,
             routemaster,
@@ -42,7 +46,6 @@ struct Inner {
     api_client: ApiClient,
     routemaster: Routemaster,
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq, AsRef, Deref, Into, Display)]
 pub struct EndpointUrl(Url);

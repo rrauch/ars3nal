@@ -62,6 +62,7 @@ dependencies = [
  "futures-concurrency",
  "futures-lite",
  "itertools",
+ "maybe-owned",
  "rand",
  "reqwest",
  "serde",

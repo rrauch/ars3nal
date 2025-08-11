@@ -20,7 +20,7 @@ futures-lite = { workspace = true, features = ["futures-io"] }
 hkdf = "0.13.0-rc.0"
 hybrid-array = { version = "0.3", features = ["serde", "zeroize", "bytemuck"] }
 k256 = { version = "0.14.0-pre.9", features = ["jwk"] }
-maybe-owned = "0.3"
+maybe-owned = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
 rand_chacha = { version = "0.9", features = ["std"] }
 rangemap = "1.6"
