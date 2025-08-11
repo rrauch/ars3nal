@@ -1,14 +1,16 @@
-use crate::api::{ApiClient, ApiRequest, RequestMethod};
+use crate::api::ApiClient;
+use crate::gateway;
 use crate::gateway::GatewayInfo;
-use crate::{Endpoint, api, gateway};
 use ario_core::Gateway;
+use derive_where::derive_where;
 use futures_concurrency::future::FutureGroup;
 use futures_lite::future;
 use futures_lite::stream::StreamExt;
 use itertools::Itertools;
 use rand::Rng;
 use std::collections::HashMap;
-use std::ops::Add;
+use std::fmt::Debug;
+use std::ops::{Add, Deref};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -37,6 +39,8 @@ struct Inner {
 enum Command {
     AddGateways(Vec<Gateway>),
     RemoveGateways(Vec<Gateway>),
+    GatewaySuccess((Gateway, Duration)),
+    GatewayError((Gateway, Duration)),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -59,6 +63,7 @@ struct BackgroundTask {
     routes: HashMap<Gateway, Route>,
     pending_checks: HashMap<Gateway, DropGuard>,
     cmd_rx: mpsc::Receiver<Command>,
+    cmd_tx: mpsc::Sender<Command>,
     active_tx: watch::Sender<ActiveRoutes>,
     ct: CancellationToken,
     state: watch::Sender<State>,
@@ -71,6 +76,7 @@ impl BackgroundTask {
     fn new(
         initial_gateways: Vec<Gateway>,
         cmd_rx: mpsc::Receiver<Command>,
+        cmd_tx: mpsc::Sender<Command>,
         active_tx: watch::Sender<ActiveRoutes>,
         ct: CancellationToken,
         state: watch::Sender<State>,
@@ -88,6 +94,7 @@ impl BackgroundTask {
                 .collect(),
             pending_checks: HashMap::default(),
             cmd_rx,
+            cmd_tx,
             active_tx,
             ct,
             state,
@@ -276,7 +283,7 @@ impl BackgroundTask {
             .send(ActiveRoutes::from_iter(gateways.into_iter().map(
                 |(gateway, duration)| {
                     (
-                        gateway.clone(),
+                        Handle::new(gateway.clone(), self.cmd_tx.clone()),
                         (max_duration - duration.as_nanos() + 1) as usize,
                     )
                 },
@@ -368,6 +375,12 @@ impl BackgroundTask {
                 }
                 // cancel any pending checks for affected gws
                 self.pending_checks.retain(|gw, _| !gws.contains(gw));
+            }
+            Command::GatewaySuccess((_gw, _duration)) => {
+                // todo
+            }
+            Command::GatewayError((_gw, _duration)) => {
+                // todo
             }
         }
         modified
@@ -538,6 +551,7 @@ impl Routemaster {
         let background_task = BackgroundTask::new(
             initial_gateways,
             cmd_rx,
+            cmd_tx.clone(),
             active_tx,
             ct.clone(),
             state_tx,
@@ -619,19 +633,15 @@ impl Routemaster {
         .await
     }
 
-    pub fn try_gateway(&self) -> Option<Gateway> {
+    pub fn try_gateway(&self) -> Option<Handle<Gateway>> {
         if self.state().shutting_down() {
             return None;
         };
 
-        self.0
-            .active_rx
-            .borrow()
-            .pick_gateway()
-            .map(|gw| gw.clone())
+        self.0.active_rx.borrow().pick_gateway()
     }
 
-    pub async fn gateway(&self) -> Result<Gateway, Error> {
+    pub async fn gateway(&self) -> Result<Handle<Gateway>, Error> {
         let state = self.state();
         if state.shutting_down() {
             return Err(Error::ShuttingDown);
@@ -645,7 +655,7 @@ impl Routemaster {
         {
             // first, try if we can get one straight away
             if let Some(gw) = self.0.active_rx.borrow().pick_gateway() {
-                return Ok(gw.clone());
+                return Ok(gw);
             }
         }
 
@@ -655,7 +665,7 @@ impl Routemaster {
             loop {
                 let gateway = {
                     let route = active_rx.borrow_and_update();
-                    route.pick_gateway().map(|gw| gw.clone())
+                    route.pick_gateway()
                 };
 
                 if let Some(gw) = gateway {
@@ -673,6 +683,46 @@ impl Routemaster {
     pub fn shutdown(&mut self) {
         self.0.ct.cancel();
     }
+}
+
+#[derive_where(Debug, Clone)]
+pub struct Handle<T: Debug>(Arc<HandleInner<T>>);
+
+impl Handle<Gateway> {
+    fn new(gateway: Gateway, cmd_tx: mpsc::Sender<Command>) -> Self {
+        Self(Arc::new(HandleInner {
+            inner: gateway,
+            cmd_tx,
+        }))
+    }
+
+    pub async fn submit_success(&self, duration: Duration) {
+        let _ = self
+            .0
+            .cmd_tx
+            .try_send(Command::GatewaySuccess((self.0.inner.clone(), duration)));
+    }
+
+    pub async fn submit_error(&self, duration: Duration) {
+        let _ = self
+            .0
+            .cmd_tx
+            .try_send(Command::GatewayError((self.0.inner.clone(), duration)));
+    }
+}
+
+impl<T: Debug> Deref for Handle<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.inner
+    }
+}
+
+#[derive_where(Debug)]
+struct HandleInner<T: Debug> {
+    inner: T,
+    cmd_tx: mpsc::Sender<Command>,
 }
 
 #[derive(Debug)]
@@ -721,18 +771,18 @@ enum GatewayStatus {
 
 #[derive(Debug, Clone)]
 struct ActiveRoutes {
-    gateways: Vec<(Gateway, usize)>,
+    gateways: Vec<(Handle<Gateway>, usize)>,
     total_weight: u128,
 }
 
-impl FromIterator<(Gateway, usize)> for ActiveRoutes {
-    fn from_iter<T: IntoIterator<Item = (Gateway, usize)>>(iter: T) -> Self {
+impl FromIterator<(Handle<Gateway>, usize)> for ActiveRoutes {
+    fn from_iter<T: IntoIterator<Item = (Handle<Gateway>, usize)>>(iter: T) -> Self {
         let mut total_weight = 0u128;
         let gateways = iter
             .into_iter()
-            .map(|(gw, weight)| {
+            .map(|(handle, weight)| {
                 total_weight = total_weight.saturating_add(weight as u128);
-                (gw, weight)
+                (handle, weight)
             })
             .collect_vec();
         Self {
@@ -743,7 +793,7 @@ impl FromIterator<(Gateway, usize)> for ActiveRoutes {
 }
 
 impl ActiveRoutes {
-    fn pick_gateway(&self) -> Option<&Gateway> {
+    fn pick_gateway(&self) -> Option<Handle<Gateway>> {
         if self.gateways.is_empty() {
             return None;
         }
@@ -753,7 +803,7 @@ impl ActiveRoutes {
         for (gateway, weight) in &self.gateways {
             let weight_u128 = *weight as u128;
             if random_weight < weight_u128 {
-                return Some(gateway);
+                return Some(gateway.clone());
             }
             random_weight -= weight_u128;
         }
@@ -764,15 +814,15 @@ impl ActiveRoutes {
 #[cfg(test)]
 mod tests {
     use crate::api::ApiClient;
-    use crate::routemaster::{ActiveRoutes, GatewayCheckTask, Routemaster};
-    use crate::{Endpoint, gateway};
+    use crate::gateway;
+    use crate::routemaster::{ActiveRoutes, GatewayCheckTask, Handle, Routemaster};
     use ario_core::Gateway;
     use ario_core::network::Network;
     use reqwest::{Client, ClientBuilder};
     use std::str::FromStr;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::Semaphore;
+    use tokio::sync::{Semaphore, mpsc};
     use tokio_util::sync::CancellationToken;
 
     fn init_tracing() {
@@ -784,14 +834,27 @@ mod tests {
 
     #[test]
     fn active_routes() -> anyhow::Result<()> {
-        let active_routes =
-            ActiveRoutes::from_iter([(Gateway::from_str("http://localhost:1984")?, 1000)]);
+        let (tx, rx) = mpsc::channel(10);
+
+        let active_routes = ActiveRoutes::from_iter([(
+            Handle::new(Gateway::from_str("http://localhost:1984")?, tx.clone()),
+            1000,
+        )]);
         assert!(active_routes.pick_gateway().is_some());
 
         let active_routes2 = ActiveRoutes::from_iter([
-            (Gateway::from_str("http://localhost:1984")?, 1000),
-            (Gateway::from_str("http://localhost:2984")?, 2000),
-            (Gateway::from_str("http://localhost:3984")?, 3000),
+            (
+                Handle::new(Gateway::from_str("http://localhost:1984")?, tx.clone()),
+                1000,
+            ),
+            (
+                Handle::new(Gateway::from_str("http://localhost:2984")?, tx.clone()),
+                2000,
+            ),
+            (
+                Handle::new(Gateway::from_str("http://localhost:3984")?, tx.clone()),
+                3000,
+            ),
         ]);
         assert!(active_routes2.pick_gateway().is_some());
 

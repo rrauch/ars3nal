@@ -7,6 +7,7 @@ edition = "2024"
 ario-core = { path = "../ario-core" }
 bon = { workspace = true }
 derive_more = { version = "2.0", features = ["full"] }
+derive-where = { workspace = true }
 futures-concurrency = "7.6"
 futures-lite = { workspace = true }
 itertools = "0.14"
