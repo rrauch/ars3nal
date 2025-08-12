@@ -4,6 +4,8 @@ members = ["ario-core", "ario-client", "arfs", "ars3nal"]
 
 [workspace.dependencies]
 bon = "3.7"
+bytes = "1"
+bytesize = "2.0"
 derive-where = "1.6"
 ecdsa = "0.17.0-rc.5"
 elliptic-curve = { git = "https://github.com/RustCrypto/traits.git", rev = "d5355ef8a85577d9842505cf3241f6e1d011d0da" }

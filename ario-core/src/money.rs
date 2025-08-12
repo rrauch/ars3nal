@@ -368,9 +368,27 @@ impl<'de, C: Currency> Deserialize<'de> for Money<C> {
                     .map(Into::into)
                     .map_err(serde::de::Error::custom)
             }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Money::try_from(value)
+                    .map(Into::into)
+                    .map_err(serde::de::Error::custom)
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Money::try_from(value)
+                    .map(Into::into)
+                    .map_err(serde::de::Error::custom)
+            }
         }
 
-        deserializer.deserialize_str(MoneyVisitor(PhantomData))
+        deserializer.deserialize_any(MoneyVisitor(PhantomData))
     }
 }
 

@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 ario-core = { path = "../ario-core" }
 bon = { workspace = true }
+bytes = { workspace = true }
+bytesize = { workspace = true }
 derive_more = { version = "2.0", features = ["full"] }
 derive-where = { workspace = true }
 futures-concurrency = "7.6"
@@ -13,7 +15,7 @@ futures-lite = { workspace = true }
 itertools = "0.14"
 maybe-owned = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", features = ["stream", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_with = { workspace = true, features = ["base64"] }

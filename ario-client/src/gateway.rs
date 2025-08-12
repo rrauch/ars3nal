@@ -1,14 +1,17 @@
 use crate::api::RequestMethod::Get;
-use crate::api::{ApiClient, ApiRequest, RequestMethod};
-use crate::{Client, Endpoint, api};
+use crate::api::{ApiClient, ApiRequest, ViaJson};
+use crate::{Client, api};
 use ario_core::blob::Blob;
 use ario_core::network::NetworkIdentifier;
 use ario_core::{BlockNumber, Gateway};
+use bytesize::ByteSize;
+use derive_more::{AsRef, Deref, Display, Into};
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::base64::UrlSafe;
 use serde_with::formats::Unpadded;
 use serde_with::serde_as;
+use std::net::SocketAddr;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -38,6 +41,9 @@ pub struct GatewayInfo<'a> {
     pub blocks: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, AsRef, Deref, Into, Display, Serialize, Deserialize)]
+pub struct Peer(SocketAddr);
+
 impl ApiClient {
     pub(crate) async fn gateway_info(
         &self,
@@ -46,17 +52,20 @@ impl ApiClient {
         let req = ApiRequest::builder()
             .endpoint(gateway.join("./info").map_err(api::Error::InvalidUrl)?)
             .request_method(Get)
+            .max_response_len(ByteSize::kib(256))
             .build();
 
-        let info: GatewayInfo = serde_json::from_value(
-            self.send_api_request(req)
-                .await?
-                .json()
-                .await
-                .map_err(|e| api::Error::ReqwestError(e))?,
-        )
-        .map_err(|_| Error::InvalidResponse)?;
-        Ok(info)
+        Ok(self.send_api_request::<ViaJson<_>>(req).await?.0)
+    }
+
+    pub(crate) async fn gateway_peers(&self, gateway: &Gateway) -> Result<Vec<Peer>, Error> {
+        let req = ApiRequest::builder()
+            .endpoint(gateway.join("./peers").map_err(api::Error::InvalidUrl)?)
+            .request_method(Get)
+            .max_response_len(ByteSize::mib(4))
+            .build();
+
+        Ok(self.send_api_request::<ViaJson<_>>(req).await?.0)
     }
 }
 
@@ -64,12 +73,16 @@ impl Client {
     pub async fn gateway_info(&self, gateway: &Gateway) -> Result<GatewayInfo<'static>, Error> {
         self.0.api_client.gateway_info(gateway).await
     }
+
+    pub async fn gateway_peers(&self, gateway: &Gateway) -> Result<Vec<Peer>, Error> {
+        self.0.api_client.gateway_peers(gateway).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::api::ApiClient;
-    use crate::gateway::{Gateway, GatewayInfo};
+    use crate::gateway::{Gateway, GatewayInfo, Peer};
     use ario_core::base64::ToBase64;
     use ario_core::network::Network;
     use reqwest::Client;
@@ -102,11 +115,32 @@ mod tests {
 
     #[ignore]
     #[tokio::test]
-    async fn gateway_info() -> anyhow::Result<()> {
+    async fn gw_info_live() -> anyhow::Result<()> {
         let gw = Gateway::from_str("https://arweave.net")?;
         let client = ApiClient::new(Client::new(), Network::default());
         let info = client.gateway_info(&gw).await?;
         assert_eq!(&info.network, Network::Mainnet.id());
+        Ok(())
+    }
+
+    #[test]
+    fn gw_peers_serde() -> anyhow::Result<()> {
+        let json = r#"
+        ["127.0.0.1:1984","192.168.24.189:1985","[fdc4:d3d9:84ec::]:1983","[2345:0425:2CA1:0:0:0567:5673:23b5]:1984"]
+        "#;
+
+        let peers: Vec<Peer> = serde_json::from_str(json)?;
+        assert_eq!(peers.len(), 4);
+
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn gw_peers_live() -> anyhow::Result<()> {
+        let gw = Gateway::from_str("https://arweave.net")?;
+        let client = ApiClient::new(Client::new(), Network::default());
+        let _peers = client.gateway_peers(&gw).await?;
         Ok(())
     }
 }

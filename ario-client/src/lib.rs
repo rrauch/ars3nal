@@ -1,21 +1,33 @@
 mod api;
 mod gateway;
+mod price;
 mod routemaster;
+mod wallet;
 
 use crate::api::ApiClient;
-use crate::routemaster::Routemaster;
+use crate::routemaster::{Handle, Routemaster};
 use ario_core::Gateway;
 use ario_core::network::Network;
 use ario_core::tx::{TxId, ValidatedTx};
 use ario_core::wallet::WalletAddress;
+pub use bytesize::ByteSize;
 use derive_more::{AsRef, Deref, Display, Into};
 use reqwest::Client as ReqwestClient;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+use thiserror::Error;
 use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct Client(Arc<Inner>);
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error(transparent)]
+    RoutemasterError(#[from] routemaster::Error),
+    #[error(transparent)]
+    ApiError(#[from] api::Error),
+}
 
 #[bon::bon]
 impl Client {
@@ -43,6 +55,30 @@ impl Client {
             api_client,
             routemaster,
         }))
+    }
+
+    async fn gw_handle(&self) -> Result<Handle<Gateway>, Error> {
+        Ok(self.0.routemaster.gateway().await?)
+    }
+
+    pub(crate) async fn with_gw<T, E: Into<api::Error>>(
+        &self,
+        f: impl AsyncFnOnce(&Gateway) -> Result<T, E>,
+    ) -> Result<T, Error> {
+        let gw_handle = self.gw_handle().await?;
+        let start = SystemTime::now();
+        let res = f(&gw_handle).await;
+        let duration = SystemTime::now().duration_since(start).unwrap_or_default();
+        match res {
+            Ok(value) => {
+                let _ = gw_handle.submit_success(duration).await;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = gw_handle.submit_error(duration).await;
+                Err(Error::ApiError(err.into()))
+            }
+        }
     }
 }
 

@@ -1,8 +1,15 @@
 use ario_core::network::Network;
 use bon::Builder;
+use bytes::{Bytes, BytesMut};
+use bytesize::ByteSize;
+use futures_lite::{Stream, StreamExt};
+use itertools::Itertools;
 use maybe_owned::MaybeOwned;
-use reqwest::{Client as ReqwestClient, Response};
-use std::borrow::Cow;
+use reqwest::Client as ReqwestClient;
+use serde::de::DeserializeOwned;
+use std::io::Read;
+use std::str::FromStr;
+use std::string::FromUtf8Error;
 use std::sync::Arc;
 use thiserror::Error;
 use url::Url;
@@ -20,10 +27,16 @@ pub enum Error {
     NotFoundError,
     #[error("server sent an unexpected response, details: `{0}`")]
     UnexpectedResponse(String),
+    #[error("server response exceeds max length of `{0}` bytes")]
+    MaxResponseLenExceeded(u64),
     #[error(transparent)]
     InvalidJson(#[from] serde_json::Error),
     #[error(transparent)]
     InvalidUrl(#[from] url::ParseError),
+    #[error(transparent)]
+    InvalidUtf8(#[from] FromUtf8Error),
+    #[error("server response was empty")]
+    UnexpectedEmptyResponse,
 }
 
 impl ApiClient {
@@ -38,18 +51,21 @@ impl ApiClient {
         &self.0.network
     }
 
-    pub(super) async fn send_api_request<'a>(&self, api_request: ApiRequest<'a>) -> Result<Response, Error> {
+    pub(super) async fn send_api_request<'a, T: TryFromResponseStream>(
+        &self,
+        api_request: ApiRequest<'a>,
+    ) -> Result<T, Error> {
         match self.send_optional_api_request(api_request).await {
-            Ok(Some(resp)) => Ok(resp),
+            Ok(Some(stream)) => Ok(T::try_from(stream).await?),
             Ok(None) => Err(Error::NotFoundError),
             Err(e) => Err(e),
         }
     }
 
-    pub async fn send_optional_api_request<'a>(
+    async fn send_optional_api_request<'a>(
         &self,
         api_request: ApiRequest<'a>,
-    ) -> Result<Option<Response>, Error> {
+    ) -> Result<Option<impl ResponseStream>, Error> {
         let req = self
             .0
             .reqwest_client
@@ -78,8 +94,118 @@ impl ApiClient {
                 .unwrap_or_else(|| status.to_string());
             return Err(Error::HttpResponseError(status.as_u16(), text));
         }
-        Ok(Some(resp))
+
+        let max_bytes = api_request
+            .max_response_len
+            .map(|b| b.as_u64())
+            .unwrap_or(u64::MAX);
+
+        // check both, the content-length header and the response body
+        if let Some(content_len) = [
+            resp.content_length(),
+            resp.headers()
+                .get("Content-Length")
+                .map(|v| v.to_str().map(|s| u64::from_str(s).ok()).ok().flatten())
+                .flatten(),
+        ]
+        .into_iter()
+        .max()
+        .flatten()
+        {
+            if content_len > max_bytes {
+                return Err(Error::MaxResponseLenExceeded(max_bytes));
+            }
+        }
+
+        Ok(Some(resp.bytes_stream().scan(
+            0u64,
+            move |total, chunk| match chunk {
+                Ok(bytes) => {
+                    *total += bytes.len() as u64;
+                    if *total > max_bytes {
+                        Some(Err(ResponseStreamError::MaxResponseLenExceeded(max_bytes)))
+                    } else {
+                        Some(Ok(bytes))
+                    }
+                }
+                Err(e) => Some(Err(e.into())),
+            },
+        )))
     }
+}
+
+#[derive(Error, Debug)]
+enum ResponseStreamError {
+    #[error(transparent)]
+    ReqwestError(#[from] reqwest::Error),
+    #[error("server response exceeds max length of `{0}` bytes")]
+    MaxResponseLenExceeded(u64),
+}
+
+impl From<ResponseStreamError> for Error {
+    fn from(value: ResponseStreamError) -> Self {
+        match value {
+            ResponseStreamError::ReqwestError(err) => Error::ReqwestError(err),
+            ResponseStreamError::MaxResponseLenExceeded(len) => Error::MaxResponseLenExceeded(len),
+        }
+    }
+}
+
+trait TryFromResponseStream {
+    fn try_from<R: ResponseStream>(stream: R) -> impl Future<Output = Result<Self, Error>>
+    where
+        Self: Sized;
+}
+
+pub(crate) struct ViaJson<T: DeserializeOwned>(pub T);
+
+impl<T: DeserializeOwned> TryFromResponseStream for ViaJson<T> {
+    async fn try_from<R: ResponseStream>(stream: R) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        let chunks: Vec<Bytes> = stream.try_collect().await?;
+
+        if chunks.is_empty() {
+            return Err(Error::UnexpectedEmptyResponse);
+        }
+
+        Ok(ViaJson(serde_json::from_reader(SliceRead::new(
+            chunks.iter().map(|b| b.as_ref()).collect_vec(),
+        ))?))
+    }
+}
+
+impl TryFromResponseStream for String {
+    async fn try_from<R: ResponseStream>(stream: R) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        let bytes = stream.try_into_bytes().await?;
+        Ok(String::from_utf8(bytes.to_vec())?)
+    }
+}
+
+pub(crate) trait ResponseStream:
+    Stream<Item = Result<Bytes, ResponseStreamError>> + Unpin + Send
+{
+    fn try_into_bytes(mut self) -> impl Future<Output = Result<Bytes, ResponseStreamError>> + Send
+    where
+        Self: Sized,
+    {
+        async move {
+            let mut buf = BytesMut::new();
+            while let Some(chunk) = self.next().await {
+                let chunk = BytesMut::from(chunk?);
+                buf.unsplit(chunk);
+            }
+            Ok(buf.freeze())
+        }
+    }
+}
+impl<T> ResponseStream for T where
+    T: Stream<Item = Result<Bytes, ResponseStreamError>> + Unpin + Send
+{
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -102,10 +228,44 @@ pub(crate) struct ApiRequest<'a> {
     #[builder(into)]
     endpoint: MaybeOwned<'a, Url>,
     request_method: RequestMethod,
+    max_response_len: Option<ByteSize>,
 }
 
 #[derive(Debug)]
 struct Inner {
     reqwest_client: ReqwestClient,
     network: Network,
+}
+
+struct SliceRead<'a> {
+    slices: std::vec::IntoIter<&'a [u8]>,
+    current: &'a [u8],
+}
+
+impl<'a> SliceRead<'a> {
+    fn new(slices: Vec<&'a [u8]>) -> Self {
+        let mut iter = slices.into_iter();
+        let current = iter.next().unwrap_or(&[]);
+        Self {
+            slices: iter,
+            current,
+        }
+    }
+}
+
+impl<'a> Read for SliceRead<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.current.is_empty() {
+            self.current = self.slices.next().unwrap_or(&[]);
+        }
+
+        if self.current.is_empty() {
+            return Ok(0);
+        }
+
+        let len = buf.len().min(self.current.len());
+        buf[..len].copy_from_slice(&self.current[..len]);
+        self.current = &self.current[len..];
+        Ok(len)
+    }
 }

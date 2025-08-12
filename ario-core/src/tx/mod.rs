@@ -4,7 +4,7 @@ mod raw;
 pub mod v1;
 pub mod v2;
 
-use crate::base64::ToBase64;
+use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob, TypedBlob};
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
@@ -27,11 +27,12 @@ use crate::tx::v2::{TxDraft, UnvalidatedV2Tx, V2Tx, V2TxBuilder, V2TxDataError};
 use crate::typed::{FromInner, Typed};
 use crate::validation::ValidateExt;
 use crate::wallet::{WalletAddress, WalletKind, WalletPk};
-use crate::{JsonError, JsonValue};
+use crate::{JsonError, JsonValue, blob};
 use bigdecimal::BigDecimal;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use serde_repr::{Deserialize_repr, Serialize_repr};
+use std::convert::Infallible;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::Deref;
 use std::str::FromStr;
@@ -268,6 +269,23 @@ pub struct TxKind;
 pub struct TxSignatureKind;
 
 pub type TxId = TypedDigest<TxSignatureKind, Sha256>;
+
+#[derive(Error, Debug)]
+pub enum TxIdError {
+    #[error(transparent)]
+    Base64Error(#[from] TryFromBase64Error<Infallible>),
+    #[error(transparent)]
+    BlobError(#[from] blob::Error),
+}
+
+impl FromStr for TxId {
+    type Err = TxIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = Blob::try_from_base64(s.as_bytes())?;
+        Ok(TxId::try_from(bytes)?)
+    }
+}
 
 impl Display for TxId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
