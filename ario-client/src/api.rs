@@ -1,13 +1,12 @@
 use ario_core::network::Network;
 use bon::Builder;
+use buf_list::{BufList, Cursor};
 use bytes::{Bytes, BytesMut};
 use bytesize::ByteSize;
 use futures_lite::{Stream, StreamExt};
-use itertools::Itertools;
 use maybe_owned::MaybeOwned;
 use reqwest::Client as ReqwestClient;
 use serde::de::DeserializeOwned;
-use std::io::Read;
 use std::str::FromStr;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
@@ -164,15 +163,13 @@ impl<T: DeserializeOwned> TryFromResponseStream for ViaJson<T> {
     where
         Self: Sized,
     {
-        let chunks: Vec<Bytes> = stream.try_collect().await?;
+        let chunks: BufList = stream.try_collect().await?;
 
-        if chunks.is_empty() {
+        if chunks.num_bytes() == 0 {
             return Err(Error::UnexpectedEmptyResponse);
         }
 
-        Ok(ViaJson(serde_json::from_reader(SliceRead::new(
-            chunks.iter().map(|b| b.as_ref()).collect_vec(),
-        ))?))
+        Ok(ViaJson(serde_json::from_reader(Cursor::new(&chunks))?))
     }
 }
 
@@ -235,37 +232,4 @@ pub(crate) struct ApiRequest<'a> {
 struct Inner {
     reqwest_client: ReqwestClient,
     network: Network,
-}
-
-struct SliceRead<'a> {
-    slices: std::vec::IntoIter<&'a [u8]>,
-    current: &'a [u8],
-}
-
-impl<'a> SliceRead<'a> {
-    fn new(slices: Vec<&'a [u8]>) -> Self {
-        let mut iter = slices.into_iter();
-        let current = iter.next().unwrap_or(&[]);
-        Self {
-            slices: iter,
-            current,
-        }
-    }
-}
-
-impl<'a> Read for SliceRead<'a> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.current.is_empty() {
-            self.current = self.slices.next().unwrap_or(&[]);
-        }
-
-        if self.current.is_empty() {
-            return Ok(0);
-        }
-
-        let len = buf.len().min(self.current.len());
-        buf[..len].copy_from_slice(&self.current[..len]);
-        self.current = &self.current[len..];
-        Ok(len)
-    }
 }

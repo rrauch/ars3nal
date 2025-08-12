@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 ario-core = { path = "../ario-core" }
 bon = { workspace = true }
+buf-list = "1.0"
 bytes = { workspace = true }
 bytesize = { workspace = true }
 derive_more = { version = "2.0", features = ["full"] }
