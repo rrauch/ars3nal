@@ -150,7 +150,7 @@ impl From<ResponseStreamError> for Error {
     }
 }
 
-trait TryFromResponseStream {
+pub(super) trait TryFromResponseStream {
     fn try_from<R: ResponseStream>(stream: R) -> impl Future<Output = Result<Self, Error>>
     where
         Self: Sized;
