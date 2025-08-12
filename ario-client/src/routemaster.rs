@@ -7,6 +7,8 @@ use futures_concurrency::future::FutureGroup;
 use futures_lite::future;
 use futures_lite::stream::StreamExt;
 use itertools::Itertools;
+use n0_watcher::Watcher;
+use netwatch::netmon;
 use rand::Rng;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -30,6 +32,7 @@ struct Inner {
     active_rx: watch::Receiver<ActiveRoutes>,
     state_rx: watch::Receiver<State>,
     task_handle: JoinHandle<()>,
+    netwatch_handle: JoinHandle<()>,
     ct: CancellationToken,
     startup_timeout: Duration,
     regular_timeout: Duration,
@@ -41,6 +44,7 @@ enum Command {
     RemoveGateways(Vec<Gateway>),
     GatewaySuccess((Gateway, Duration)),
     GatewayError((Gateway, Duration)),
+    NetworkChangeDetected,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -54,6 +58,13 @@ impl State {
     fn shutting_down(&self) -> bool {
         match self {
             Self::ShuttingDown => true,
+            _ => false,
+        }
+    }
+
+    fn running(&self) -> bool {
+        match self {
+            Self::Running => true,
             _ => false,
         }
     }
@@ -154,13 +165,18 @@ impl BackgroundTask {
             Result<GatewayCheck, CheckError>,
         )>()));
 
-        loop {
+        'main: loop {
             tracing::trace!("next loop iteration");
             // first, process outstanding commands
             let mut modified = false;
             for cmd in cmds.drain(..) {
-                if self.process_cmd(cmd) {
+                let (mod_by_cmd, restarted) = self.process_cmd(cmd);
+                if mod_by_cmd {
                     modified = true;
+                }
+                if restarted {
+                    // routemaster was restarted
+                    continue 'main;
                 }
             }
             if modified || (next_checks_due <= SystemTime::now()) {
@@ -356,7 +372,7 @@ impl BackgroundTask {
         }
     }
 
-    fn process_cmd(&mut self, cmd: Command) -> bool {
+    fn process_cmd(&mut self, cmd: Command) -> (bool, bool) {
         let mut modified = false;
         match cmd {
             Command::AddGateways(gws) => {
@@ -382,8 +398,13 @@ impl BackgroundTask {
             Command::GatewayError((_gw, _duration)) => {
                 // todo
             }
+            Command::NetworkChangeDetected => {
+                tracing::info!("network change detected, restarting routemaster");
+                self.restart();
+                return (modified, true);
+            }
         }
-        modified
+        (modified, false)
     }
 
     fn initiate_gw_checks(
@@ -542,12 +563,14 @@ impl Routemaster {
         max_simultaneous_checks: u32,
         startup_timeout: Duration,
         regular_timeout: Duration,
+        enable_netwatch: bool,
     ) -> Self {
         let ct = CancellationToken::new();
         let check_permits = Arc::new(Semaphore::new(max_simultaneous_checks as usize));
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
         let (active_tx, active_rx) = watch::channel(ActiveRoutes::from_iter(vec![]));
         let (state_tx, state_rx) = watch::channel(State::ReStarting);
+
         let background_task = BackgroundTask::new(
             initial_gateways,
             cmd_rx,
@@ -559,12 +582,21 @@ impl Routemaster {
             check_permits,
         );
 
+        let netwatch_handle = if enable_netwatch {
+            let netwatch_task = Netwatch::new(cmd_tx.clone(), state_rx.clone(), ct.child_token());
+            tokio::task::spawn(netwatch_task.run())
+        } else {
+            // dummy task
+            tokio::task::spawn(async {})
+        };
+
         Self(Arc::new(Inner {
             api_client,
             cmd_tx,
             active_rx,
             state_rx,
             task_handle: tokio::task::spawn(background_task.run()),
+            netwatch_handle,
             _drop_guard: ct.clone().drop_guard(),
             ct,
             startup_timeout,
@@ -576,6 +608,7 @@ impl Routemaster {
 impl Drop for Inner {
     fn drop(&mut self) {
         self.task_handle.abort();
+        self.netwatch_handle.abort();
     }
 }
 
@@ -811,6 +844,91 @@ impl ActiveRoutes {
     }
 }
 
+struct Netwatch {
+    cmd_tx: mpsc::Sender<Command>,
+    state: watch::Receiver<State>,
+    ct: CancellationToken,
+}
+
+impl Netwatch {
+    fn new(
+        cmd_tx: mpsc::Sender<Command>,
+        state: watch::Receiver<State>,
+        ct: CancellationToken,
+    ) -> Self {
+        Self { cmd_tx, state, ct }
+    }
+
+    #[tracing::instrument(name = "netwatch_run", skip(self))]
+    async fn run(mut self) {
+        let monitor = match netmon::Monitor::new().await {
+            Ok(mon) => mon,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to start network monitor. netwatch unavailable");
+                return;
+            }
+        };
+        let mut if_state = monitor.interface_state();
+        let mut previous_state = if_state.get();
+
+        let ct = self.ct.clone();
+        let mut rm_state_rx = self.state.clone();
+        let mut rm_state = { rm_state_rx.borrow_and_update().clone() };
+
+        tracing::info!("netwatch started");
+
+        loop {
+            tokio::select! {
+                r = if_state.updated() => {
+                    match r {
+                        Err(err) => {
+                            tracing::error!(error = %err, "error watching network state");
+                            break;
+                        }
+                        Ok(network_state) => {
+                            let major_change = network_state.is_major_change(&previous_state);
+                            previous_state = network_state;
+                            if major_change {
+                                tracing::info!("major network change detected");
+                                if rm_state.running() {
+                                    match self.cmd_tx.send(Command::NetworkChangeDetected).timeout(Duration::from_secs(60)).await {
+                                        Err(_) => {
+                                            tracing::error!("timeout reached when sending command");
+                                            break;
+                                        },
+                                        Ok(Err(err)) => {
+                                            tracing::error!(error = %err, "error sending command");
+                                            break;
+                                        }
+                                        Ok(Ok(())) => {
+                                            // everything ok here
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                _ = ct.cancelled() => {
+                    // shutting down
+                    break;
+                },
+                res = rm_state_rx.changed() => {
+                    // routemaster state changed
+                    if res.is_err() {
+                        break;
+                    }
+                    rm_state = { rm_state_rx.borrow_and_update().clone() };
+                    if rm_state.shutting_down() {
+                        break;
+                    }
+                }
+            }
+        }
+        tracing::info!("netwatch shutting down");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::api::ApiClient;
@@ -919,6 +1037,7 @@ mod tests {
             10,
             Duration::from_secs(10),
             Duration::from_secs(2),
+            false,
         );
         let gw = routemaster.gateway().await?;
         assert_eq!(gw.to_string(), "https://arweave.net/");
@@ -930,6 +1049,7 @@ mod tests {
             10,
             Duration::from_secs(10),
             Duration::from_secs(2),
+            false,
         );
         {
             let routemaster = routemaster.clone();

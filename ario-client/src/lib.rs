@@ -42,6 +42,7 @@ impl Client {
         #[builder(default = 10)] max_simultaneous_gateway_checks: u32,
         #[builder(default = Duration::from_secs(30))] startup_timeout: Duration,
         #[builder(default = Duration::from_secs(5))] regular_timeout: Duration,
+        #[builder(default = true)] enable_netwatch: bool,
     ) -> Self {
         let api_client = ApiClient::new(reqwest_client, network);
         let routemaster = Routemaster::new(
@@ -50,6 +51,7 @@ impl Client {
             max_simultaneous_gateway_checks,
             startup_timeout,
             regular_timeout,
+            enable_netwatch,
         );
         Self(Arc::new(Inner {
             api_client,
