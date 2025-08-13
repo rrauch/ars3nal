@@ -7,6 +7,7 @@ use ario_core::Gateway;
 use futures_concurrency::future::FutureGroup;
 use futures_lite::{StreamExt, future};
 use itertools::Itertools;
+use rand::Rng;
 use std::collections::HashMap;
 use std::ops::Add;
 use std::pin::Pin;
@@ -418,10 +419,16 @@ impl BackgroundTask {
             } => {
                 // todo: this is basically a stub
                 // better logic is needed here at one point
-                match &status {
-                    GatewayStatus::Ok(_) => last_check.add(Duration::from_secs(600)),
-                    GatewayStatus::Error { .. } => last_check.add(Duration::from_secs(60)),
-                }
+                let base_duration = match &status {
+                    GatewayStatus::Ok(_) => Duration::from_secs(600),
+                    GatewayStatus::Error { .. } => Duration::from_secs(60),
+                };
+                // introduce jitter (+/- 15% range)
+                let jitter_factor = rand::rng().random_range(0.85..=1.15);
+                let jittered_duration =
+                    Duration::from_secs_f64(base_duration.as_secs_f64() * jitter_factor);
+
+                last_check.add(jittered_duration)
             }
         }
     }
