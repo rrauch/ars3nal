@@ -486,6 +486,23 @@ impl Display for TxAnchor {
     }
 }
 
+#[derive(Error, Debug)]
+pub enum TxAnchorError {
+    #[error(transparent)]
+    Base64Error(#[from] TryFromBase64Error<Infallible>),
+    #[error(transparent)]
+    BlobError(#[from] blob::Error),
+}
+
+impl FromStr for TxAnchor {
+    type Err = TxAnchorError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = Blob::try_from_base64(s.as_bytes())?;
+        Ok(TxAnchor::try_from(bytes)?)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum LastTx<'a> {
     TxId(MaybeOwned<'a, TxId>),

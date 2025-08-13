@@ -21,7 +21,7 @@ pub mod confidential;
 pub mod crypto;
 mod data;
 mod json;
-mod jwk;
+pub mod jwk;
 pub mod money;
 pub mod network;
 pub mod typed;

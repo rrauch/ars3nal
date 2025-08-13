@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 ario-core = { path = "../ario-core" }
+async-stream = "0.3"
 bon = { workspace = true }
 buf-list = "1.0"
 bytes = { workspace = true }
@@ -30,5 +31,6 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
 anyhow = "1"
+dotenv = "0.15"
+tokio = { workspace = true, features = ["full"] }

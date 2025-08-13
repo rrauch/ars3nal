@@ -1,4 +1,4 @@
-use crate::api::ApiClient;
+use crate::api::Api;
 use crate::gateway;
 use crate::gateway::GatewayInfo;
 use ario_core::Gateway;
@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 pub(super) struct GatewayCheckTask {
     ct: CancellationToken,
     gateway: Gateway,
-    api_client: ApiClient,
+    api: Api,
     check_permits: Arc<Semaphore>,
 }
 
@@ -34,13 +34,13 @@ impl GatewayCheckTask {
     pub(super) fn new(
         ct: CancellationToken,
         gateway: Gateway,
-        api_client: ApiClient,
+        api: Api,
         check_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
             ct,
             gateway,
-            api_client,
+            api,
             check_permits,
         }
     }
@@ -81,10 +81,10 @@ impl GatewayCheckTask {
 
     // this is the actual check for gateway liveness
     async fn info(&mut self) -> Result<GatewayInfo<'static>, gateway::Error> {
-        let info = self.api_client.gateway_info(&self.gateway).await?;
-        if &info.network != self.api_client.network().id() {
+        let info = self.api.gateway_info(&self.gateway).await?;
+        if &info.network != self.api.network().id() {
             return Err(gateway::Error::IncorrectNetwork {
-                expected: self.api_client.network().id().to_string(),
+                expected: self.api.network().id().to_string(),
                 actual: info.network.to_string(),
             });
         }

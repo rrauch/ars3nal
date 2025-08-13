@@ -1,4 +1,4 @@
-use crate::api::ApiClient;
+use crate::api::Api;
 use crate::gateway;
 use crate::gateway::GatewayInfo;
 use crate::routemaster::gateway_check::{CheckError, GatewayCheck, GatewayCheckTask};
@@ -24,7 +24,7 @@ pub(super) struct BackgroundTask {
     active_tx: watch::Sender<ActiveRoutes>,
     ct: CancellationToken,
     state: watch::Sender<State>,
-    api_client: ApiClient,
+    api: Api,
     check_permits: Arc<Semaphore>,
     _drop_guard: DropGuard,
 }
@@ -37,7 +37,7 @@ impl BackgroundTask {
         active_tx: watch::Sender<ActiveRoutes>,
         ct: CancellationToken,
         state: watch::Sender<State>,
-        api_client: ApiClient,
+        api: Api,
         check_permits: Arc<Semaphore>,
     ) -> Self {
         let _drop_guard = ct.clone().drop_guard();
@@ -55,7 +55,7 @@ impl BackgroundTask {
             active_tx,
             ct,
             state,
-            api_client,
+            api,
             check_permits,
             _drop_guard,
         }
@@ -219,7 +219,9 @@ impl BackgroundTask {
             .iter()
             .filter_map(|(gw, r)| {
                 if let Checked::Checked {
-                    status, duration, ..
+                    status,
+                    avg_duration: duration,
+                    ..
                 } = &r.checked
                 {
                     if let GatewayStatus::Ok(_) = status {
@@ -277,7 +279,7 @@ impl BackgroundTask {
             }
         };
         let last_check = check.completion_time;
-        let duration = check
+        let latest_duration = check
             .completion_time
             .duration_since(check.start_time)
             .unwrap_or_default();
@@ -301,19 +303,24 @@ impl BackgroundTask {
                     status,
                     num_checks: 1,
                     last_check,
-                    duration,
+                    avg_duration: latest_duration,
                 };
             }
             Checked::Checked {
                 status: st,
                 num_checks,
                 last_check: lc,
-                duration: dur,
+                avg_duration,
             } => {
                 *st = status;
                 *num_checks = *num_checks + 1;
                 *lc = last_check;
-                *dur = duration;
+                *avg_duration = {
+                    // Update EMA (α = 0.2, gives 20% weight to latest sample)
+                    Duration::from_secs_f64(
+                        avg_duration.as_secs_f64() * 0.8 + latest_duration.as_secs_f64() * 0.2,
+                    )
+                }
             }
         }
     }
@@ -390,7 +397,7 @@ impl BackgroundTask {
             let task = GatewayCheckTask::new(
                 ct,
                 route.gateway.clone(),
-                self.api_client.clone(),
+                self.api.clone(),
                 self.check_permits.clone(),
             );
             handles.push((route.gateway.clone(), tokio::task::spawn(task.run())));
@@ -451,7 +458,7 @@ enum Checked {
         status: GatewayStatus,
         num_checks: usize,
         last_check: SystemTime,
-        duration: Duration,
+        avg_duration: Duration,
     },
 }
 

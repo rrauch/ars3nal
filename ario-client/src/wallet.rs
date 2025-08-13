@@ -1,5 +1,5 @@
 use crate::api::RequestMethod::Get;
-use crate::api::{ApiClient, ApiRequest, ViaJson};
+use crate::api::{Api, ApiRequest, ViaJson};
 use crate::{Client, api};
 use ario_core::Gateway;
 use ario_core::money::{Money, Winston};
@@ -8,8 +8,8 @@ use ario_core::wallet::WalletAddress;
 use bytesize::ByteSize;
 use std::str::FromStr;
 
-impl ApiClient {
-    pub(crate) async fn wallet_balance(
+impl Api {
+    async fn wallet_balance(
         &self,
         gateway: &Gateway,
         address: &WalletAddress,
@@ -22,12 +22,13 @@ impl ApiClient {
             )
             .request_method(Get)
             .max_response_len(ByteSize::kib(1))
+            .idempotent(true)
             .build();
 
         Ok(self.send_api_request::<ViaJson<_>>(req).await?.0)
     }
 
-    pub(crate) async fn wallet_last_tx(
+    async fn wallet_last_tx(
         &self,
         gateway: &Gateway,
         address: &WalletAddress,
@@ -40,6 +41,7 @@ impl ApiClient {
             )
             .request_method(Get)
             .max_response_len(ByteSize::kib(1))
+            .idempotent(true)
             .build();
 
         // this endpoint appears to return non-json plaintext responses
@@ -58,9 +60,9 @@ impl Client {
         &self,
         address: &WalletAddress,
     ) -> Result<Money<Winston>, super::Error> {
-        let api_client = &self.0.api_client;
+        let api = &self.0.api;
         Ok(self
-            .with_gw(async move |gw| api_client.wallet_balance(gw, address).await)
+            .with_gw(async move |gw| api.wallet_balance(gw, address).await)
             .await?)
     }
 
@@ -68,16 +70,16 @@ impl Client {
         &self,
         address: &WalletAddress,
     ) -> Result<Option<TxId>, super::Error> {
-        let api_client = &self.0.api_client;
+        let api = &self.0.api;
         Ok(self
-            .with_gw(async move |gw| api_client.wallet_last_tx(gw, address).await)
+            .with_gw(async move |gw| api.wallet_last_tx(gw, address).await)
             .await?)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::api::ApiClient;
+    use crate::api::Api;
     use ario_core::Gateway;
     use ario_core::network::Network;
     use ario_core::wallet::WalletAddress;
@@ -88,8 +90,8 @@ mod tests {
     #[tokio::test]
     async fn wallet_balance_live() -> anyhow::Result<()> {
         let gw = Gateway::from_str("https://arweave.net")?;
-        let client = ApiClient::new(Client::new(), Network::default());
-        let winston = client
+        let api = Api::new(Client::new(), Network::default(), false);
+        let winston = api
             .wallet_balance(
                 &gw,
                 &WalletAddress::from_str("4JOmaT9fFe2ojFJEls3Zow5UKO2CBOk7lOirbPTtX1o")?,
@@ -103,8 +105,8 @@ mod tests {
     #[tokio::test]
     async fn wallet_last_tx_live() -> anyhow::Result<()> {
         let gw = Gateway::from_str("https://arweave.net")?;
-        let client = ApiClient::new(Client::new(), Network::default());
-        let tx_id = client
+        let api = Api::new(Client::new(), Network::default(), false);
+        let tx_id = api
             .wallet_last_tx(
                 &gw,
                 &WalletAddress::from_str("4JOmaT9fFe2ojFJEls3Zow5UKO2CBOk7lOirbPTtX1o")?,
@@ -112,7 +114,7 @@ mod tests {
             .await?;
         assert!(tx_id.is_some());
         let _s = tx_id.unwrap().to_string();
-        let tx_id2 = client
+        let tx_id2 = api
             .wallet_last_tx(
                 &gw,
                 &WalletAddress::from_str("3JOmaT9fFe2ojFJEls3Zow5UKO2CBOk7lOirbPTtX1o")?,

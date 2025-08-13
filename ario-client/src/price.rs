@@ -1,13 +1,13 @@
 use crate::api::RequestMethod::Get;
-use crate::api::{ApiClient, ApiRequest, ViaJson};
+use crate::api::{Api, ApiRequest, ViaJson};
 use crate::{Client, api};
 use ario_core::Gateway;
 use ario_core::money::{Money, Winston};
 use ario_core::wallet::WalletAddress;
 use bytesize::ByteSize;
 
-impl ApiClient {
-    pub(crate) async fn price(
+impl Api {
+    async fn price(
         &self,
         gateway: &Gateway,
         data_size: u64,
@@ -21,6 +21,7 @@ impl ApiClient {
             )
             .request_method(Get)
             .max_response_len(ByteSize::kib(1))
+            .idempotent(true)
             .build();
 
         Ok(self.send_api_request::<ViaJson<_>>(req).await?.0)
@@ -40,16 +41,16 @@ impl Client {
         data_size: u64,
         target: Option<&WalletAddress>,
     ) -> Result<Money<Winston>, super::Error> {
-        let api_client = &self.0.api_client;
+        let api = &self.0.api;
         Ok(self
-            .with_gw(async move |gw| api_client.price(gw, data_size, target).await)
+            .with_gw(async move |gw| api.price(gw, data_size, target).await)
             .await?)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::api::ApiClient;
+    use crate::api::Api;
     use crate::price::to_path;
     use ario_core::Gateway;
     use ario_core::money::{Money, Winston};
@@ -81,8 +82,8 @@ mod tests {
     #[tokio::test]
     async fn price_test_live() -> anyhow::Result<()> {
         let gw = Gateway::from_str("https://arweave.net")?;
-        let client = ApiClient::new(Client::new(), Network::default());
-        let _winston = client
+        let api = Api::new(Client::new(), Network::default(), false);
+        let _winston = api
             .price(
                 &gw,
                 0,

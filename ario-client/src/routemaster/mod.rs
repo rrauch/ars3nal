@@ -2,7 +2,7 @@ mod background_task;
 mod gateway_check;
 mod netwatch;
 
-use crate::api::ApiClient;
+use crate::api::Api;
 use crate::routemaster::background_task::BackgroundTask;
 use crate::routemaster::netwatch::Netwatch;
 use ario_core::Gateway;
@@ -24,7 +24,7 @@ pub struct Routemaster(Arc<Inner>);
 
 #[derive(Debug)]
 struct Inner {
-    api_client: ApiClient,
+    api: Api,
     cmd_tx: mpsc::Sender<Command>,
     active_rx: watch::Receiver<ActiveRoutes>,
     state_rx: watch::Receiver<State>,
@@ -69,7 +69,7 @@ impl State {
 
 impl Routemaster {
     pub(crate) fn new(
-        api_client: ApiClient,
+        api: Api,
         initial_gateways: Vec<Gateway>,
         max_simultaneous_checks: u32,
         startup_timeout: Duration,
@@ -89,7 +89,7 @@ impl Routemaster {
             active_tx,
             ct.clone(),
             state_tx,
-            api_client.clone(),
+            api.clone(),
             check_permits,
         );
 
@@ -102,7 +102,7 @@ impl Routemaster {
         };
 
         Self(Arc::new(Inner {
-            api_client,
+            api,
             cmd_tx,
             active_rx,
             state_rx,
@@ -313,7 +313,7 @@ impl ActiveRoutes {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::ApiClient;
+    use crate::api::Api;
     use crate::gateway;
     use crate::routemaster::gateway_check::GatewayCheckTask;
     use crate::routemaster::{ActiveRoutes, Handle, Routemaster};
@@ -370,7 +370,7 @@ mod tests {
     async fn gateway_check() -> anyhow::Result<()> {
         let ct = CancellationToken::new();
         let permits = Arc::new(Semaphore::new(10));
-        let mainnet_client = ApiClient::new(Client::new(), Network::Mainnet);
+        let mainnet_client = Api::new(Client::new(), Network::Mainnet, false);
         let task = GatewayCheckTask::new(
             ct.clone(),
             Gateway::default(),
@@ -380,7 +380,7 @@ mod tests {
         let gw_check = task.run().await?;
         assert!(gw_check.result.is_ok());
 
-        let testnet_client = ApiClient::new(Client::new(), Network::Testnet);
+        let testnet_client = Api::new(Client::new(), Network::Testnet, false);
 
         let task = GatewayCheckTask::new(
             ct.clone(),
@@ -413,7 +413,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn routemaster_live() -> anyhow::Result<()> {
         init_tracing();
-        let client = ApiClient::new(ClientBuilder::new().build()?, Network::default());
+        let client = Api::new(ClientBuilder::new().build()?, Network::default(), false);
         let mut routemaster = Routemaster::new(
             client.clone(),
             vec![Gateway::default()],
