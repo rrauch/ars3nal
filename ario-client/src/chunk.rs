@@ -8,7 +8,7 @@ use ario_core::Gateway;
 use ario_core::base64::OptionalBase64As;
 use ario_core::blob::{AsBlob, Blob};
 use ario_core::crypto::merkle::{DefaultProof, ProofError};
-use ario_core::data::{ExternalData, VerifiableData};
+use ario_core::data::VerifiableData;
 use ario_core::tx::v2::DataRoot;
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
@@ -259,6 +259,9 @@ mod tests {
             .await?
         {
             total += chunk.len() as u64;
+            if total >= data.size() {
+                break;
+            }
         }
 
         assert_eq!(total, data.size());
@@ -283,7 +286,7 @@ mod tests {
 
         let tx = client
             .tx_by_id(&TxId::from_str(
-                "tEaNQkSbDBQvDssXMZ4bmm_l2be_wWkVcE_OZoTEdFM",
+                "fU8dt860JoHpLQIq_n5b47OyPK9nDNTptRHFR_E1TAc",
             )?)
             .await?
             .unwrap()
@@ -302,6 +305,9 @@ mod tests {
             .await?
         {
             total += chunk.len() as u64;
+            if total >= data.size() {
+                break;
+            }
         }
 
         assert_eq!(total, data.size());

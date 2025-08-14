@@ -737,6 +737,9 @@ mod tests {
         {
             total += chunk.len() as u64;
             hasher.update(&chunk);
+            if total >= file_len {
+                break;
+            }
         }
 
         assert_eq!(total, file_len);
