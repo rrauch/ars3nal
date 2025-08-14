@@ -19,7 +19,7 @@ pub mod blob;
 mod chunking;
 pub mod confidential;
 pub mod crypto;
-mod data;
+pub mod data;
 mod json;
 pub mod jwk;
 pub mod money;

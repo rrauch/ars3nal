@@ -1,4 +1,5 @@
 mod api;
+mod chunk;
 mod gateway;
 mod price;
 mod routemaster;
@@ -26,6 +27,8 @@ pub enum Error {
     ApiError(#[from] api::Error),
     #[error(transparent)]
     TxSubmissionError(#[from] tx::TxSubmissionError),
+    #[error(transparent)]
+    UploadError(#[from] chunk::UploadError),
 }
 
 #[bon::bon]

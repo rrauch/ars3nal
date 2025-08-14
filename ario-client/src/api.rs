@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tracing::instrument;
 use url::Url;
+use ario_core::crypto::merkle::ProofError;
 
 #[derive(Debug, Clone)]
 pub struct Api(Arc<Inner>);
@@ -135,6 +136,10 @@ impl Api {
         tracing::debug!(status = %status, duration_ms = duration.as_millis(), "received api response");
 
         if status.as_u16() == 404 {
+            return Ok(None);
+        }
+
+        if status.as_u16() == 204 {
             return Ok(None);
         }
 

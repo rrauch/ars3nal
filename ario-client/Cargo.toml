@@ -34,3 +34,4 @@ url = { workspace = true, features = ["serde"] }
 anyhow = "1"
 dotenv = "0.15"
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["compat"] }

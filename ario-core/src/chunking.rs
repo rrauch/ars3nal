@@ -1,6 +1,7 @@
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
 use crate::crypto::{Output, OutputLen};
+use crate::data::MaybeOwnedDefaultChunkedData;
 use crate::typed::Typed;
 use bytes::Buf;
 use derive_where::derive_where;
@@ -29,6 +30,31 @@ pub struct Chunk<C: Chunker> {
 }
 
 pub type MaybeOwnedChunk<'a, C: Chunker> = MaybeOwned<'a, Chunk<C>>;
+
+pub(crate) trait IntoMaybeOwnedChunk<'a, C: Chunker> {
+    fn into(self) -> MaybeOwnedChunk<'a, C>;
+}
+
+impl<'a, C: Chunker> IntoMaybeOwnedChunk<'a, C> for Chunk<C> {
+    fn into(self) -> MaybeOwnedChunk<'a, C> {
+        MaybeOwned::Owned(self)
+    }
+}
+
+impl<'a, C: Chunker> IntoMaybeOwnedChunk<'a, C> for MaybeOwnedChunk<'a, C> {
+    fn into(self) -> MaybeOwnedChunk<'a, C> {
+        self
+    }
+}
+
+impl<'a> IntoMaybeOwnedChunk<'a, DefaultChunker> for MaybeOwnedDefaultChunkedData<'a> {
+    fn into(self) -> MaybeOwnedChunk<'a, DefaultChunker> {
+        match self {
+            MaybeOwned::Owned(owned) => MaybeOwnedChunk::Owned(owned.0),
+            MaybeOwned::Borrowed(borrowed) => MaybeOwnedChunk::Borrowed(&borrowed.0),
+        }
+    }
+}
 
 impl<C: Chunker> Chunk<C> {
     pub(crate) fn new(output: C::Output, offset: u64, len: usize) -> Self {
@@ -68,15 +94,17 @@ impl<H: Hasher> ChunkInfo for Digest<H> {
 pub trait Chunker: Sized + Send {
     type Output: ChunkInfo;
     fn empty() -> Self::Output;
+    fn new() -> Self;
     fn update(&mut self, input: &mut impl Buf) -> impl IntoIterator<Item = Chunk<Self>>;
     fn finalize(self) -> impl IntoIterator<Item = Chunk<Self>>;
 }
 
-pub trait ChunkerExt
+pub(crate) trait ChunkerExt
 where
     Self: Chunker,
 {
     fn single_input(self, input: &mut impl Buf) -> Vec<Chunk<Self>>;
+    fn single_input_with_offset(self, input: &mut impl Buf, offset: u64) -> Vec<Chunk<Self>>;
     fn try_from_reader(self, reader: &mut impl Read) -> std::io::Result<Vec<Chunk<Self>>> {
         self.try_from_reader_with_buf_size::<{ 64 * 1024 }>(reader)
     }
@@ -104,6 +132,14 @@ impl<T: Chunker> ChunkerExt for T {
         let mut chunks = vec![];
         chunks.extend(self.update(input));
         chunks.extend(self.finalize());
+        chunks
+    }
+
+    fn single_input_with_offset(self, input: &mut impl Buf, offset: u64) -> Vec<Chunk<Self>> {
+        let mut chunks = self.single_input(input);
+        chunks.iter_mut().for_each(|c| {
+            c.offset = (c.offset.start + offset)..(c.offset.end + offset);
+        });
         chunks
     }
 
@@ -158,6 +194,10 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunke
 
     fn empty() -> Self::Output {
         H::new().finalize()
+    }
+
+    fn new() -> Self {
+        Self::new()
     }
 
     fn update(&mut self, input: &mut impl Buf) -> impl IntoIterator<Item = Chunk<Self>> {

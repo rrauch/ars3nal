@@ -805,6 +805,7 @@ mod tests {
     use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
     use crate::crypto::keys::SupportedSecretKey;
     use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
+    use crate::data::VerifiableData;
     use crate::jwk::Jwk;
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::v2::DataRoot;
@@ -933,11 +934,13 @@ mod tests {
         let data_root = DataRoot::try_from(Blob::from([0u8; 32]))?;
         let data_size = 32u64;
 
+        let data = ExternalData::new(data_root.clone(), data_size);
+
         let draft = TxBuilder::v2()
             .reward(1234)?
             .tx_anchor(TxAnchor::from_inner([0u8; 48]))
             .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 101)?)
-            .data_upload(ExternalData::new(data_root.clone(), data_size))
+            .data_upload(&data)
             .draft();
 
         let valid_tx = draft.sign(&wallet)?;
@@ -1023,10 +1026,12 @@ mod tests {
     fn upload_pss() -> anyhow::Result<()> {
         let wallet = Wallet::from_jwk(&Jwk::from_json(WALLET_RSA_JWK)?)?;
 
+        let data = VerifiableData::from_single_value(UPLOAD_DATA);
+
         let draft = TxBuilder::v2()
             .reward(12345)?
             .tx_anchor(TxAnchor::from_inner([0u8; 48]))
-            .data_upload(UPLOAD_DATA.into())
+            .data_upload(data.external_data())
             .draft();
 
         let valid_tx = wallet.sign_tx_draft(draft)?;

@@ -1,13 +1,16 @@
 use crate::blob::{AsBlob, Blob};
-use crate::chunking::{Chunk, ChunkInfo, Chunker, DefaultChunker, MaybeOwnedChunk};
+use crate::chunking::{
+    Chunk, ChunkInfo, Chunker, ChunkerExt, DefaultChunker, IntoMaybeOwnedChunk, MaybeOwnedChunk,
+};
 use crate::crypto::Output;
 use crate::crypto::hash::{Digest, Hashable, HashableExt, Hasher, Sha256};
 use crate::typed::{FromInner, Typed};
 use bytemuck::TransparentWrapper;
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use derive_where::derive_where;
 use hybrid_array::typenum::Unsigned;
 use rangemap::RangeMap;
+use std::iter;
 use std::marker::PhantomData;
 use std::ops::Range;
 use thiserror::Error;
@@ -29,7 +32,27 @@ impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleRoot<H, C, NOTE_SIZE> 
     const LEAF_PROOF_LEN: usize = { Self::HASH_SIZE + NOTE_SIZE };
     const BRANCH_PROOF_LEN: usize = { Self::HASH_SIZE * 2 + NOTE_SIZE };
 
-    pub fn verify_chunk(
+    pub fn verify_data(
+        &self,
+        data: &mut impl Buf,
+        proof: &Proof<H, C, NOTE_SIZE>,
+    ) -> Result<(), ProofError> {
+        let len = (proof.offset.end - proof.offset.start) as usize;
+        if data.remaining() != len {
+            return Err(ProofError::InvalidDataLength {
+                expected: len,
+                actual: data.remaining(),
+            });
+        }
+        let chunk = C::new()
+            .single_input_with_offset(data, proof.offset.start)
+            .into_iter()
+            .next()
+            .expect("chunk should exist");
+        self.verify_chunk(&chunk, proof)
+    }
+
+    fn verify_chunk(
         &self,
         chunk: &Chunk<C>,
         proof: &Proof<H, C, NOTE_SIZE>,
@@ -153,6 +176,8 @@ impl<'a> LeafProof<'a> {
 pub enum ProofError {
     #[error("invalid proof length: expected '{expected}' but found '{actual}'")]
     InvalidProofLength { expected: usize, actual: usize },
+    #[error("invalid data length: expected '{expected}' but found '{actual}'")]
+    InvalidDataLength { expected: usize, actual: usize },
     #[error("incorrect offset: expected '{expected:?}' but found '{actual:?}'")]
     IncorrectOffset {
         expected: Range<u64>,
@@ -177,6 +202,10 @@ impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleTree<'_, H, C, NOTE_SI
         self.root.num_chunks()
     }
 
+    pub fn chunks(&self) -> impl Iterator<Item = &Range<u64>> {
+        self.root.chunks()
+    }
+
     pub fn offset(&self) -> &Range<u64> {
         self.root.offset()
     }
@@ -186,7 +215,7 @@ impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleTree<'_, H, C, NOTE_SI
     }
 }
 
-impl<'a, H: Hasher, C: Chunker, I: Into<MaybeOwnedChunk<'a, C>>, const NOTE_SIZE: usize>
+impl<'a, H: Hasher, C: Chunker, I: IntoMaybeOwnedChunk<'a, C>, const NOTE_SIZE: usize>
     FromIterator<I> for MerkleTree<'a, H, C, NOTE_SIZE>
 {
     fn from_iter<T: IntoIterator<Item = I>>(iter: T) -> Self {
@@ -270,6 +299,17 @@ impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> Node<'_, H, C, NOTE_SIZE> {
         }
     }
 
+    fn chunks(&self) -> impl Iterator<Item = &Range<u64>> {
+        let iter: Box<dyn Iterator<Item = &Range<u64>>> = match self {
+            Node::Leaf(leaf) => match leaf.is_empty() {
+                true => Box::new(iter::empty()),
+                false => Box::new(iter::once(leaf.chunk.offset())),
+            },
+            Node::Branch(branch) => Box::new(branch.chunks()),
+        };
+        iter
+    }
+
     fn is_empty(&self) -> bool {
         self.num_chunks() == 0
     }
@@ -283,7 +323,7 @@ struct Leaf<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
 }
 
 impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> Leaf<'a, H, C, NOTE_SIZE> {
-    fn from_chunk<I: Into<MaybeOwnedChunk<'a, C>>>(chunk: I) -> Self {
+    fn from_chunk<I: IntoMaybeOwnedChunk<'a, C>>(chunk: I) -> Self {
         let chunk = chunk.into();
         let note = to_note::<NOTE_SIZE>(chunk.offset().end);
         let mut id_hasher = H::new();
@@ -349,6 +389,10 @@ impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> Branch<'a, H, C, NOTE_SI
     fn num_chunks(&self) -> usize {
         self.left.num_chunks() + self.right.num_chunks()
     }
+
+    fn chunks(&self) -> impl Iterator<Item = &Range<u64>> {
+        self.left.chunks().chain(self.right.chunks())
+    }
 }
 
 fn generate_proofs<H: Hasher, C: Chunker, const NOTE_SIZE: usize>(
@@ -364,11 +408,10 @@ fn generate_proofs<H: Hasher, C: Chunker, const NOTE_SIZE: usize>(
                 let mut proof = BytesMut::from(partial_proof);
                 proof.extend_from_slice(leaf.chunk.output().as_blob().bytes());
                 proof.extend_from_slice(&leaf.note);
-                proofs.push(Proof {
-                    offset: leaf.chunk.offset().clone(),
-                    proof: proof.freeze().into(),
-                    _phantom: PhantomData,
-                })
+                proofs.push(Proof::new(
+                    leaf.chunk.offset().clone(),
+                    proof.freeze().into(),
+                ))
             }
             Node::Branch(branch) => {
                 let mut partial_proof = BytesMut::from(partial_proof);
@@ -393,10 +436,30 @@ pub struct Proof<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
     _phantom: PhantomData<(H, C)>,
 }
 
+impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> AsBlob for Proof<'a, H, C, NOTE_SIZE> {
+    fn as_blob(&self) -> Blob<'_> {
+        self.proof.as_blob()
+    }
+}
+
+impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> Proof<'a, H, C, NOTE_SIZE> {
+    pub(crate) fn new(offset: Range<u64>, proof: Blob<'a>) -> Self {
+        Self {
+            offset,
+            proof,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub(crate) fn offset(&self) -> &Range<u64> {
+        &self.offset
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::chunking::{ChunkerExt, DefaultChunker};
+    use crate::chunking::{ChunkerExt, DefaultChunker, MaybeOwnedChunk};
     use crate::crypto::merkle::DefaultMerkleTree;
     use std::io::Cursor;
 
@@ -532,7 +595,7 @@ mod tests {
     #[test]
     fn verify_chunks() -> anyhow::Result<()> {
         let chunks = DefaultChunker::new().single_input(&mut Cursor::new(ONE_MB));
-        let tree = DefaultMerkleTree::from_iter(chunks.iter());
+        let tree = DefaultMerkleTree::from_iter(chunks.iter().map(|c| MaybeOwnedChunk::from(c)));
         let root = tree.root();
 
         for chunk in &chunks {

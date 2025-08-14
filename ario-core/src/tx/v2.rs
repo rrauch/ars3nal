@@ -35,7 +35,8 @@ pub(crate) struct V2Tx<'a, const VALIDATED: bool = false>(V2TxData<'a>);
 pub(crate) type UnvalidatedV2Tx<'a> = V2Tx<'a, false>;
 pub(crate) type ValidatedV2Tx<'a> = V2Tx<'a, true>;
 
-pub(crate) type DataRoot = DefaultMerkleRoot;
+pub type DataRoot = DefaultMerkleRoot;
+pub type MaybeOwnedDataRoot<'a> = MaybeOwned<'a, DataRoot>;
 
 impl<'a, const VALIDATED: bool> V2Tx<'a, VALIDATED> {
     pub(super) fn as_inner(&self) -> &V2TxData<'a> {
@@ -474,7 +475,7 @@ pub struct TxDraft<'a> {
     tags: Vec<Tag<'a>>,
     tx_anchor: TxAnchor,
     transfer: Option<Transfer>,
-    data_upload: Option<ExternalData>,
+    data_upload: Option<&'a ExternalData<'a>>,
 }
 
 impl<'a> From<&'a TxDraft<'a>> for TxHashBuilder<'a> {
@@ -512,13 +513,13 @@ impl<'a> TxDraft<'a> {
         };
 
         let (data_size, data_root) = match self.data_upload {
-            Some(upload) => (upload.size(), Some(upload.into_inner())),
+            Some(upload) => (upload.size(), Some(upload.root().clone())),
             None => (0, None),
         };
 
         let tx_data = V2TxData {
             id: signature_data.signature().digest(),
-            last_tx: self.tx_anchor,
+            last_tx: self.tx_anchor.clone(),
             tags: self.tags,
             target,
             quantity,

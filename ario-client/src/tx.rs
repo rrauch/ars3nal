@@ -5,18 +5,25 @@ use crate::api::{
 };
 use crate::routemaster::Handle;
 use crate::{Client, api};
-use ario_core::blob::Blob;
+use ario_core::blob::{AsBlob, Blob};
+use ario_core::crypto::merkle::ProofError;
+use ario_core::data::{Data, ExternalData, MaybeOwnedExternalData, VerifiableData};
 use ario_core::tx::{LastTx, Tx, TxAnchor, TxId, UnvalidatedTx, ValidatedTx};
 use ario_core::{BlockNumber, Gateway, JsonValue};
 use async_stream::try_stream;
 use bytesize::ByteSize;
-use futures_lite::Stream;
-use serde::Deserialize;
+use derive_where::derive_where;
+use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, Stream};
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
 use serde_with::base64::Base64;
 use serde_with::base64::UrlSafe;
 use serde_with::formats::Unpadded;
 use serde_with::serde_as;
+use std::fmt::Debug;
+use std::io::{Cursor, SeekFrom};
+use std::ops::Range;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
@@ -141,7 +148,7 @@ impl Api {
                     .payload(Payload::Json(&tx_json))
                     .build(),
             )
-            .max_response_len(ByteSize::kib(64))
+            .max_response_len(ByteSize::kib(512))
             .build();
 
         Ok(self.send_api_request(req).await?)
@@ -192,7 +199,13 @@ impl Client {
     }
 }
 
-pub struct TxSubmission<State>(State);
+pub enum Submission<'a> {
+    AwaitingChunks(TxSubmission<AwaitingData<'a>>),
+    Submitted(TxSubmission<Submitted>),
+}
+
+#[derive_where(Debug)]
+pub struct TxSubmission<State: Debug>(State);
 
 #[derive(Debug)]
 struct Prepared {
@@ -208,6 +221,10 @@ pub enum TxSubmissionError {
     IncorrectTxAnchor,
     #[error("tx_status not found")]
     TxStatusNotFound,
+    #[error("external data does not match tx data")]
+    IncorrectExternalData,
+    #[error(transparent)]
+    UploadError(#[from] std::io::Error),
 }
 
 impl TxSubmission<Prepared> {
@@ -219,10 +236,7 @@ impl TxSubmission<Prepared> {
         self.0.created
     }
 
-    pub async fn submit(
-        self,
-        tx: &ValidatedTx<'_>,
-    ) -> Result<TxSubmission<Submitted>, super::Error> {
+    pub async fn submit<'a>(self, tx: &'a ValidatedTx<'a>) -> Result<Submission<'a>, super::Error> {
         match tx.last_tx() {
             LastTx::TxAnchor(tx_anchor) => {
                 if tx_anchor.as_ref() != self.tx_anchor() {
@@ -243,13 +257,157 @@ impl TxSubmission<Prepared> {
 
         let tx_id = tx.id().clone();
 
+        Ok(match tx.data() {
+            Some(Data::External(external)) => {
+                Submission::AwaitingChunks(TxSubmission(AwaitingData {
+                    gw_handle,
+                    client,
+                    tx_id,
+                    created: self.0.created,
+                    data: external,
+                }))
+            }
+            _ => Submission::Submitted(TxSubmission(Submitted {
+                gw_handle,
+                client,
+                tx_id,
+                created: self.0.created,
+                submitted: SystemTime::now(),
+            })),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct AwaitingData<'a> {
+    gw_handle: Handle<Gateway>,
+    tx_id: TxId,
+    client: Client,
+    created: SystemTime,
+    data: MaybeOwnedExternalData<'a>,
+}
+
+impl<'a> TxSubmission<AwaitingData<'a>> {
+    pub fn tx_id(&self) -> &TxId {
+        &self.0.tx_id
+    }
+
+    pub fn created(&self) -> SystemTime {
+        self.0.created
+    }
+
+    pub fn data<'b>(
+        self,
+        data: &'b VerifiableData<'b>,
+    ) -> Result<TxSubmission<UploadChunks<'b>>, (Self, super::Error)> {
+        // make sure the external data matches the tx data
+        if self.0.data.as_ref() != data.external_data() {
+            return Err((self, TxSubmissionError::IncorrectExternalData.into()));
+        }
+
+        let chunks = data.chunks().map(|c| c.clone()).collect_vec();
+
+        Ok(TxSubmission(UploadChunks {
+            gw_handle: self.0.gw_handle,
+            tx_id: self.0.tx_id,
+            client: self.0.client,
+            created: self.0.created,
+            data,
+            chunks,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct UploadChunks<'a> {
+    gw_handle: Handle<Gateway>,
+    tx_id: TxId,
+    client: Client,
+    created: SystemTime,
+    data: &'a VerifiableData<'a>,
+    chunks: Vec<Range<u64>>,
+}
+
+impl<'a> TxSubmission<UploadChunks<'a>> {
+    pub fn tx_id(&self) -> &TxId {
+        &self.0.tx_id
+    }
+
+    pub fn created(&self) -> SystemTime {
+        self.0.created
+    }
+
+    pub async fn from_async_reader<R: AsyncRead + AsyncSeek + Send + Unpin>(
+        mut self,
+        reader: &mut R,
+    ) -> Result<TxSubmission<Submitted>, (Self, super::Error)> {
+        let chunks = self
+            .0
+            .chunks
+            .drain(..)
+            .sorted_by(|a, b| Ord::cmp(&a.start, &b.start))
+            .collect_vec();
+
+        let mut buffer = vec![0u8; 1024 * 256];
+
+        let mut chunks_iter = chunks.into_iter();
+        while let Some(chunk) = chunks_iter.next() {
+            if let Err(err) = self.process_chunk(&chunk, &mut buffer, reader).await {
+                let mut remaining = vec![chunk];
+                remaining.extend(chunks_iter);
+                return Err((
+                    Self(UploadChunks {
+                        gw_handle: self.0.gw_handle,
+                        tx_id: self.0.tx_id,
+                        client: self.0.client,
+                        created: self.0.created,
+                        data: self.0.data,
+                        chunks: remaining,
+                    }),
+                    err,
+                ));
+            }
+        }
+
+        // all chunks uploaded, tx submitted
         Ok(TxSubmission(Submitted {
-            gw_handle,
-            client,
-            tx_id,
+            gw_handle: self.0.gw_handle,
+            tx_id: self.0.tx_id,
+            client: self.0.client,
             created: self.0.created,
             submitted: SystemTime::now(),
         }))
+    }
+
+    async fn process_chunk<R: AsyncRead + AsyncSeek + Send + Unpin>(
+        &self,
+        chunk: &Range<u64>,
+        buf: &mut [u8],
+        reader: &mut R,
+    ) -> Result<(), super::Error> {
+        let len = (chunk.end - chunk.start) as usize;
+        Self::read_chunk_data(chunk.start, &mut buf[..len], reader)
+            .await
+            .map_err(|e| TxSubmissionError::UploadError(e))?;
+
+        let data = &buf[..len];
+
+        self.0
+            .client
+            .upload_chunk_with_gw(&self.0.gw_handle, &self.0.data, chunk, Blob::Slice(data))
+            .await?;
+
+        Ok(())
+    }
+
+    async fn read_chunk_data<R: AsyncRead + AsyncSeek + Send + Unpin>(
+        offset: u64,
+        buf: &mut [u8],
+        reader: &mut R,
+    ) -> std::io::Result<()> {
+        reader.seek(SeekFrom::Start(offset)).await?;
+        reader.read_exact(buf).await?;
+        Ok(())
     }
 }
 
@@ -368,9 +526,10 @@ pub struct Offset {
 #[cfg(test)]
 mod tests {
     use crate::api::Api;
-    use crate::tx::Status;
+    use crate::tx::{Status, Submission};
     use anyhow::bail;
     use ario_core::Gateway;
+    use ario_core::data::VerifiableData;
     use ario_core::jwk::Jwk;
     use ario_core::network::Network;
     use ario_core::tx::{Transfer, TxBuilder, TxId};
@@ -379,6 +538,9 @@ mod tests {
     use reqwest::Client;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+
+    static ONE_MB_PATH: &'static str = "./testdata/1mb.bin";
 
     fn init_tracing() {
         let _ = tracing_subscriber::fmt()
@@ -451,7 +613,7 @@ mod tests {
 
     #[ignore]
     #[tokio::test]
-    async fn tx_submit_live() -> anyhow::Result<()> {
+    async fn tx_submit_transfer_live() -> anyhow::Result<()> {
         dotenv::dotenv().ok();
         init_tracing();
 
@@ -482,7 +644,65 @@ mod tests {
 
         let tx = wallet.sign_tx_draft(tx_draft)?;
 
-        let tx_sub = tx_sub.submit(&tx).await?;
+        let tx_sub = match tx_sub.submit(&tx).await? {
+            Submission::Submitted(tx_sub) => tx_sub,
+            _ => unreachable!(),
+        };
+
+        let status = tx_sub.status().try_next().await?.unwrap();
+        assert!(status.pending());
+
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn tx_submit_upload_live() -> anyhow::Result<()> {
+        dotenv::dotenv().ok();
+        init_tracing();
+
+        let arlocal = std::env::var("ARLOCAL_URL").unwrap();
+        let network_id = std::env::var("ARLOCAL_ID").unwrap_or("arlocal".to_string());
+        let wallet_jwk = std::env::var("ARLOCAL_WALLET_JWK").unwrap();
+
+        let client = crate::Client::builder()
+            .enable_netwatch(false)
+            .network(Network::Local(network_id.try_into()?))
+            .gateways([Gateway::from_str(arlocal.as_str())?])
+            .build();
+
+        let json =
+            tokio::fs::read_to_string(<PathBuf as AsRef<Path>>::as_ref(&PathBuf::from(wallet_jwk)))
+                .await?;
+        let jwk = Jwk::from_json(json.as_str())?;
+        let wallet = Wallet::from_jwk(&jwk)?;
+
+        let file = tokio::fs::File::open(ONE_MB_PATH).await?;
+        let verifiable = VerifiableData::try_from_async_reader(&mut file.compat()).await?;
+
+        let tx_sub = client.tx_begin().await?;
+
+        let tx_draft = TxBuilder::v2()
+            .reward("12")?
+            .tx_anchor(tx_sub.tx_anchor().clone())
+            .data_upload(verifiable.external_data())
+            .draft();
+
+        let tx = wallet.sign_tx_draft(tx_draft)?;
+
+        let tx_sub = match tx_sub.submit(&tx).await? {
+            Submission::AwaitingChunks(tx_sub) => tx_sub,
+            _ => unreachable!(),
+        };
+
+        let tx_sub = tx_sub.data(&verifiable).map_err(|(_, err)| err)?;
+
+        let file = tokio::fs::File::open(ONE_MB_PATH).await?;
+
+        let tx_sub = tx_sub
+            .from_async_reader(&mut file.compat())
+            .await
+            .map_err(|(_, err)| err)?;
 
         let status = tx_sub.status().try_next().await?.unwrap();
         assert!(status.pending());
