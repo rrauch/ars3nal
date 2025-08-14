@@ -5,9 +5,8 @@ use crate::api::{
 };
 use crate::routemaster::Handle;
 use crate::{Client, api};
-use ario_core::blob::{AsBlob, Blob};
-use ario_core::crypto::merkle::ProofError;
-use ario_core::data::{Data, ExternalData, MaybeOwnedExternalData, VerifiableData};
+use ario_core::blob::Blob;
+use ario_core::data::{Data, MaybeOwnedExternalData, VerifiableData};
 use ario_core::tx::{LastTx, Tx, TxAnchor, TxId, UnvalidatedTx, ValidatedTx};
 use ario_core::{BlockNumber, Gateway, JsonValue};
 use async_stream::try_stream;
@@ -15,15 +14,15 @@ use bytesize::ByteSize;
 use derive_where::derive_where;
 use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, Stream};
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_with::DisplayFromStr;
 use serde_with::base64::Base64;
 use serde_with::base64::UrlSafe;
 use serde_with::formats::Unpadded;
 use serde_with::serde_as;
 use std::fmt::Debug;
-use std::io::{Cursor, SeekFrom};
-use std::ops::Range;
+use std::io::SeekFrom;
+use std::ops::{Add, Range};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
@@ -520,7 +519,15 @@ pub struct Offset {
     #[serde_as(as = "DisplayFromStr")]
     size: u64,
     #[serde_as(as = "DisplayFromStr")]
-    offset: u64,
+    offset: u128,
+}
+
+impl Offset {
+    pub fn absolute(&self, relative: u64) -> u128 {
+        self.offset
+            .saturating_sub(self.size as u128)
+            .add((relative + 1) as u128)
+    }
 }
 
 #[cfg(test)]
@@ -529,6 +536,7 @@ mod tests {
     use crate::tx::{Status, Submission};
     use anyhow::bail;
     use ario_core::Gateway;
+    use ario_core::crypto::hash::{Hasher, HasherExt, Sha256};
     use ario_core::data::VerifiableData;
     use ario_core::jwk::Jwk;
     use ario_core::network::Network;
@@ -657,7 +665,7 @@ mod tests {
 
     #[ignore]
     #[tokio::test]
-    async fn tx_submit_upload_live() -> anyhow::Result<()> {
+    async fn tx_submit_upload_roundtrip_live() -> anyhow::Result<()> {
         dotenv::dotenv().ok();
         init_tracing();
 
@@ -698,14 +706,45 @@ mod tests {
         let tx_sub = tx_sub.data(&verifiable).map_err(|(_, err)| err)?;
 
         let file = tokio::fs::File::open(ONE_MB_PATH).await?;
+        let file_len = file.metadata().await?.len();
 
         let tx_sub = tx_sub
             .from_async_reader(&mut file.compat())
             .await
             .map_err(|(_, err)| err)?;
 
-        let status = tx_sub.status().try_next().await?.unwrap();
-        assert!(status.pending());
+        // wait for tx to be processed
+        let mut status_stream = tx_sub.status();
+        loop {
+            match status_stream.try_next().await? {
+                Some(status) => {
+                    if status.accepted() {
+                        break;
+                    }
+                }
+                None => {
+                    bail!("status stream ended prematurely");
+                }
+            }
+        }
+        let mut hasher = Sha256::new();
+        let tx_offset = client.tx_offset(tx_sub.tx_id()).await?;
+        let data_root = verifiable.external_data().root();
+        let mut total = 0;
+        while let Some(chunk) = client
+            .download_chunk(tx_offset.absolute(total), total, data_root)
+            .await?
+        {
+            total += chunk.len() as u64;
+            hasher.update(&chunk);
+        }
+
+        assert_eq!(total, file_len);
+
+        let hash = hasher.finalize();
+        let expected_hash = Sha256::digest(tokio::fs::read(ONE_MB_PATH).await?);
+
+        assert_eq!(hash, expected_hash);
 
         Ok(())
     }

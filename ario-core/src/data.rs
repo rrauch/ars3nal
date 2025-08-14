@@ -1,7 +1,6 @@
 use crate::blob::{AsBlob, Blob, TypedBlob};
 use crate::chunking::{Chunker, ChunkerExt, DefaultChunker, MaybeOwnedChunk, TypedChunk};
-use crate::crypto::hash::Sha256;
-use crate::crypto::merkle::{DefaultMerkleTree, Proof};
+use crate::crypto::merkle::{DefaultMerkleTree, DefaultProof};
 use crate::tx::v2::{DataRoot, MaybeOwnedDataRoot};
 use crate::typed::FromInner;
 use futures_lite::AsyncRead;
@@ -31,7 +30,7 @@ impl<'a> VerifiableData<'a> {
         self.merkle_tree.chunks()
     }
 
-    pub fn proof(&self, range: &Range<u64>) -> Option<&Proof<Sha256, DefaultChunker, 32>> {
+    pub fn proof(&self, range: &Range<u64>) -> Option<&DefaultProof> {
         if let Some(proof) = self.merkle_tree.proof(range.start) {
             if proof.offset() == range {
                 return Some(proof);

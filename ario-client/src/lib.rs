@@ -29,6 +29,8 @@ pub enum Error {
     TxSubmissionError(#[from] tx::TxSubmissionError),
     #[error(transparent)]
     UploadError(#[from] chunk::UploadError),
+    #[error(transparent)]
+    DownloadError(#[from] chunk::DownloadError),
 }
 
 #[bon::bon]

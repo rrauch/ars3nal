@@ -429,6 +429,8 @@ fn generate_proofs<H: Hasher, C: Chunker, const NOTE_SIZE: usize>(
     proofs
 }
 
+pub type DefaultProof<'a> = Proof<'a, Sha256, DefaultChunker, 32>;
+
 #[derive_where(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
     offset: Range<u64>,
@@ -443,7 +445,8 @@ impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> AsBlob for Proof<'a, H, 
 }
 
 impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> Proof<'a, H, C, NOTE_SIZE> {
-    pub(crate) fn new(offset: Range<u64>, proof: Blob<'a>) -> Self {
+    // todo: should not be public
+    pub fn new(offset: Range<u64>, proof: Blob<'a>) -> Self {
         Self {
             offset,
             proof,
@@ -451,7 +454,7 @@ impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> Proof<'a, H, C, NOTE_SIZ
         }
     }
 
-    pub(crate) fn offset(&self) -> &Range<u64> {
+    pub fn offset(&self) -> &Range<u64> {
         &self.offset
     }
 }

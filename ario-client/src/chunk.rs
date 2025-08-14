@@ -1,12 +1,17 @@
-use crate::api::RequestMethod::Post;
-use crate::api::{Api, ApiRequest, ApiRequestBody, ContentType, Payload};
+use crate::api::RequestMethod::{Get, Post};
+use crate::api::{
+    Api, ApiRequest, ApiRequestBody, ContentType, Payload, TryFromResponseStream, ViaJson,
+};
+use crate::routemaster::Handle;
 use crate::{Client, api};
 use ario_core::Gateway;
+use ario_core::base64::OptionalBase64As;
 use ario_core::blob::{AsBlob, Blob};
-use ario_core::crypto::merkle::ProofError;
-use ario_core::data::VerifiableData;
+use ario_core::crypto::merkle::{DefaultProof, ProofError};
+use ario_core::data::{ExternalData, VerifiableData};
+use ario_core::tx::v2::DataRoot;
 use bytesize::ByteSize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
 use serde_with::base64::Base64;
 use serde_with::base64::UrlSafe;
@@ -38,14 +43,49 @@ impl Api {
 
         Ok(self.send_api_request(req).await?)
     }
+
+    async fn download_chunk(
+        &self,
+        gateway: &Gateway,
+        offset: u128,
+    ) -> Result<Option<DownloadChunk<'static>>, api::Error> {
+        let req = ApiRequest::builder()
+            .endpoint(
+                gateway
+                    .join(format!("./chunk/{}", offset).as_str())
+                    .map_err(api::Error::InvalidUrl)?,
+            )
+            .request_method(Get)
+            .max_response_len(ByteSize::mib(1))
+            .idempotent(true)
+            .build();
+
+        match self.send_optional_api_request(req).await? {
+            Some(stream) => Ok(Some(
+                <ViaJson<_> as TryFromResponseStream>::try_from(stream)
+                    .await?
+                    .0,
+            )),
+            None => Ok(None),
+        }
+    }
 }
 
 impl Client {
-    pub async fn upload_chunk(&self) {}
+    pub async fn upload_chunk(
+        &self,
+        verifiable: &VerifiableData<'_>,
+        offset: &Range<u64>,
+        data: Blob<'_>,
+    ) -> Result<(), super::Error> {
+        let gw = self.0.routemaster.gateway().await?;
+        self.upload_chunk_with_gw(&gw, verifiable, offset, data)
+            .await
+    }
 
     pub(crate) async fn upload_chunk_with_gw(
         &self,
-        gateway: &Gateway,
+        gw_handle: &Handle<Gateway>,
         verifiable: &VerifiableData<'_>,
         offset: &Range<u64>,
         data: Blob<'_>,
@@ -82,15 +122,47 @@ impl Client {
             chunk: data,
         };
 
-        self.0.api.upload_chunk(gateway, &upload_chunk).await?;
+        let api = &self.0.api;
+        let chunk = &upload_chunk;
+        self.with_existing_gw(gw_handle, async move |gw| api.upload_chunk(gw, chunk).await)
+            .await?;
         Ok(())
+    }
+
+    pub async fn download_chunk(
+        &self,
+        offset: u128,
+        relative_offset: u64,
+        data_root: &DataRoot,
+    ) -> Result<Option<Blob<'static>>, super::Error> {
+        let api = &self.0.api;
+
+        let chunk: DownloadChunk<'static> = match self
+            .with_gw(async move |gw| api.download_chunk(gw, offset).await)
+            .await?
+        {
+            Some(chunk) => chunk,
+            None => {
+                return Ok(None);
+            }
+        };
+
+        let proof = DefaultProof::new(
+            relative_offset..(relative_offset + chunk.chunk.len() as u64),
+            chunk.data_path,
+        );
+
+        data_root
+            .verify_data(&mut Cursor::new(chunk.chunk.as_ref()), &proof)
+            .map_err(|e| DownloadError::ProofError(e))?;
+
+        // verification passed, chunk data ok
+        Ok(Some(chunk.chunk))
     }
 }
 
 #[derive(Error, Debug)]
 pub enum UploadError {
-    #[error(transparent)]
-    IoError(#[from] std::io::Error),
     #[error(transparent)]
     ProofError(#[from] ProofError),
     #[error("no proof was found for chunk at offset '{0}'")]
@@ -99,6 +171,12 @@ pub enum UploadError {
     EmptyChunk,
     #[error("chunk length incorrect; expected '{expected}' but got '{actual}'")]
     IncorrectChunkLen { expected: usize, actual: usize },
+}
+
+#[derive(Error, Debug)]
+pub enum DownloadError {
+    #[error(transparent)]
+    ProofError(#[from] ProofError),
 }
 
 #[serde_as]
@@ -114,4 +192,120 @@ struct UploadChunk<'a> {
     offset: u64,
     #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
     chunk: Blob<'a>,
+}
+
+#[serde_as]
+#[derive(Clone, Deserialize, Debug)]
+struct DownloadChunk<'a> {
+    #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
+    chunk: Blob<'a>,
+    #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
+    data_path: Blob<'a>,
+    #[serde_as(as = "OptionalBase64As")]
+    #[serde(default)]
+    tx_path: Option<Blob<'a>>,
+    /*#[serde_as(as = "OptionalBase64As")]
+    #[serde(default)]
+    data_root: Option<Blob<'a>>,
+    #[serde(default)]
+    data_size: Option<u64>,
+    #[serde(default)]
+    offset: Option<u128>,*/
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Client;
+    use ario_core::Gateway;
+    use ario_core::network::Network;
+    use ario_core::tx::TxId;
+    use std::str::FromStr;
+
+    fn init_tracing() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_test_writer()
+            .try_init();
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn download_chunks() -> anyhow::Result<()> {
+        init_tracing();
+
+        let client = Client::builder()
+            .gateways([Gateway::default()])
+            .enable_netwatch(false)
+            .build();
+
+        let tx = client
+            .tx_by_id(&TxId::from_str(
+                "-ynymmePYt7lZMOaCgcvkPUeaK0eFa_F7Ox7CJ629Ak",
+            )?)
+            .await?
+            .unwrap()
+            .validate()
+            .map_err(|(_, e)| e)?;
+
+        let data = tx.data().unwrap();
+        let data_root = data.data_root().unwrap();
+
+        let tx_offset = client.tx_offset(tx.id()).await?;
+
+        let mut total = 0;
+
+        while let Some(chunk) = client
+            .download_chunk(tx_offset.absolute(total), total, data_root)
+            .await?
+        {
+            total += chunk.len() as u64;
+        }
+
+        assert_eq!(total, data.size());
+
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn download_chunks_local() -> anyhow::Result<()> {
+        dotenv::dotenv().ok();
+        init_tracing();
+
+        let arlocal = std::env::var("ARLOCAL_URL").unwrap();
+        let network_id = std::env::var("ARLOCAL_ID").unwrap_or("arlocal".to_string());
+
+        let client = Client::builder()
+            .enable_netwatch(false)
+            .network(Network::Local(network_id.try_into()?))
+            .gateways([Gateway::from_str(arlocal.as_str())?])
+            .build();
+
+        let tx = client
+            .tx_by_id(&TxId::from_str(
+                "tEaNQkSbDBQvDssXMZ4bmm_l2be_wWkVcE_OZoTEdFM",
+            )?)
+            .await?
+            .unwrap()
+            .validate()
+            .map_err(|(_, e)| e)?;
+
+        let data = tx.data().unwrap();
+        let data_root = data.data_root().unwrap();
+
+        let tx_offset = client.tx_offset(tx.id()).await?;
+
+        let mut total = 0;
+
+        while let Some(chunk) = client
+            .download_chunk(tx_offset.absolute(total), total, data_root)
+            .await?
+        {
+            total += chunk.len() as u64;
+        }
+
+        assert_eq!(total, data.size());
+
+        Ok(())
+    }
 }
