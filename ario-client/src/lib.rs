@@ -1,6 +1,8 @@
 mod api;
 mod chunk;
 mod gateway;
+#[cfg(feature = "graphql")]
+pub mod graphql;
 mod price;
 mod routemaster;
 mod tx;

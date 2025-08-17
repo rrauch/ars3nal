@@ -3,6 +3,7 @@ resolver = "3"
 members = ["ario-core", "ario-client", "arfs", "ars3nal"]
 
 [workspace.dependencies]
+anyhow = "1"
 bon = "3.7"
 bytes = "1"
 bytesize = "2.0"

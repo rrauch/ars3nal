@@ -1,5 +1,4 @@
 use ario_core::JsonValue;
-use ario_core::crypto::merkle::ProofError;
 use ario_core::network::Network;
 use bon::Builder;
 use buf_list::{BufList, Cursor};
@@ -8,6 +7,7 @@ use bytesize::ByteSize;
 use futures_lite::{Stream, StreamExt};
 use maybe_owned::MaybeOwned;
 use reqwest::Client as ReqwestClient;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
@@ -51,6 +51,9 @@ pub enum Error {
     PayloadError(#[from] PayloadError),
     #[error("charset '{0:?}' unsupported")]
     UnsupportedCharset(Charset),
+    #[cfg(feature = "graphql")]
+    #[error(transparent)]
+    GraphQlError(#[from] crate::graphql::GraphQlError),
 }
 
 impl Api {
@@ -454,12 +457,31 @@ pub(crate) struct ApiRequestBody<'a> {
 
 pub(crate) enum Payload<'a> {
     Json(&'a JsonValue),
+    #[cfg(feature = "graphql")]
+    GraphQL(Vec<u8>),
+}
+
+impl<'a> Into<Payload<'a>> for &'a JsonValue {
+    fn into(self) -> Payload<'a> {
+        Payload::Json(self)
+    }
+}
+
+#[cfg(feature = "graphql")]
+impl<'a, F, V: Serialize> TryFrom<&'a cynic::Operation<F, V>> for Payload<'static> {
+    type Error = serde_json::Error;
+
+    fn try_from(value: &'a cynic::Operation<F, V>) -> Result<Self, Self::Error> {
+        serde_json::to_vec(value).map(|b| Self::GraphQL(b))
+    }
 }
 
 impl<'a> Debug for Payload<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Json(_) => f.write_str("json"),
+            #[cfg(feature = "graphql")]
+            Self::GraphQL(_) => f.write_str("graphql"),
         }
     }
 }
@@ -476,6 +498,8 @@ impl<'a> TryInto<reqwest::Body> for Payload<'a> {
     fn try_into(self) -> Result<reqwest::Body, Self::Error> {
         Ok(match self {
             Self::Json(json) => reqwest::Body::from(serde_json::to_vec(json)?),
+            #[cfg(feature = "graphql")]
+            Self::GraphQL(graphql) => reqwest::Body::from(graphql),
         })
     }
 }

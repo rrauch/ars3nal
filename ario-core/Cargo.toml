@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0"
+anyhow = { workspace = true }
 bigdecimal = { version = "0.4", features = ["serde-json"] }
 bip32 = { version = "0.5", features = ["k256"] }
 bip39 = { version = "2.2", features = ["zeroize"] }
