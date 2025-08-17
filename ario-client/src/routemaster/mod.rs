@@ -33,6 +33,8 @@ struct Inner {
     ct: CancellationToken,
     startup_timeout: Duration,
     regular_timeout: Duration,
+    check_permits: Arc<Semaphore>,
+    max_check_permits: usize,
     _drop_guard: DropGuard,
 }
 
@@ -71,7 +73,7 @@ impl Routemaster {
     pub(crate) fn new(
         api: Api,
         initial_gateways: Vec<Gateway>,
-        max_simultaneous_checks: u32,
+        max_simultaneous_checks: usize,
         startup_timeout: Duration,
         regular_timeout: Duration,
         enable_netwatch: bool,
@@ -90,7 +92,7 @@ impl Routemaster {
             ct.clone(),
             state_tx,
             api.clone(),
-            check_permits,
+            check_permits.clone(),
         );
 
         let netwatch_handle = if enable_netwatch {
@@ -112,6 +114,8 @@ impl Routemaster {
             ct,
             startup_timeout,
             regular_timeout,
+            check_permits,
+            max_check_permits: max_simultaneous_checks,
         }))
     }
 }
@@ -129,6 +133,8 @@ pub enum Error {
     ShuttingDown,
     #[error("Operation timed out")]
     Timeout,
+    #[error("No usable gateways available right now")]
+    NoUsableGateways,
 }
 
 impl Routemaster {
@@ -177,6 +183,14 @@ impl Routemaster {
         .await
     }
 
+    fn background_checks_active(&self) -> bool {
+        let active = self
+            .0
+            .max_check_permits
+            .saturating_sub(self.0.check_permits.available_permits());
+        active > 0
+    }
+
     pub fn try_gateway(&self) -> Option<Handle<Gateway>> {
         if self.state().shutting_down() {
             return None;
@@ -201,6 +215,11 @@ impl Routemaster {
             if let Some(gw) = self.0.active_rx.borrow().pick_gateway() {
                 return Ok(gw);
             }
+        }
+
+        // fail fast if no background checks are active right now and state is `Running`
+        if !self.background_checks_active() && state == State::Running {
+            return Err(Error::NoUsableGateways);
         }
 
         // looks like we have to wait and see

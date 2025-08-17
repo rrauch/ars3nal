@@ -45,7 +45,7 @@ impl Client {
             gws.into_iter().collect::<Vec<_>>()
         })]
         gateways: Vec<Gateway>,
-        #[builder(default = 10)] max_simultaneous_gateway_checks: u32,
+        #[builder(default = 10)] max_simultaneous_gateway_checks: usize,
         #[builder(default = Duration::from_secs(30))] startup_timeout: Duration,
         #[builder(default = Duration::from_secs(5))] regular_timeout: Duration,
         #[builder(default = true)] enable_netwatch: bool,
