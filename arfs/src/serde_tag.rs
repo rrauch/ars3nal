@@ -218,7 +218,6 @@ where
     }
 }
 
-
 #[derive(Error, Debug)]
 pub enum Error {
     #[error(transparent)]
@@ -270,7 +269,7 @@ where
 
 fn try_into_tag<'a>(
     name: serde_content::Value<'a>,
-    value: serde_content::Value<'a>,
+    mut value: serde_content::Value<'a>,
 ) -> Result<Option<Tag<'a>>, Error> {
     let name = match name {
         serde_content::Value::String(str) => {
@@ -287,20 +286,27 @@ fn try_into_tag<'a>(
         }
     };
 
-    let value = match value {
-        serde_content::Value::Bytes(bytes) => TagValue::try_from(Blob::from(bytes.into_owned()))
-            .map_err(|_| {
-                Error::SerializationError(<serde_content::Error as SerError>::custom(
-                    "expected a valid tag value",
-                ))
-            })?,
-        serde_content::Value::Option(None) => return Ok(None),
-        _ => {
-            return Err(Error::SerializationError(
-                <serde_content::Error as SerError>::custom("expected Bytes"),
-            ));
-        }
-    };
+    loop {
+        let value = match value {
+            serde_content::Value::Bytes(bytes) => {
+                TagValue::try_from(Blob::from(bytes.into_owned())).map_err(|_| {
+                    Error::SerializationError(<serde_content::Error as SerError>::custom(
+                        "expected a valid tag value",
+                    ))
+                })?
+            }
+            serde_content::Value::Option(None) => return Ok(None),
+            serde_content::Value::Option(Some(optional_value)) => {
+                value = *optional_value;
+                continue;
+            }
+            _ => {
+                return Err(Error::SerializationError(
+                    <serde_content::Error as SerError>::custom("expected Bytes"),
+                ));
+            }
+        };
 
-    Ok(Some(Tag::new(name, value)))
+        return Ok(Some(Tag::new(name, value)));
+    }
 }

@@ -4,17 +4,18 @@ use crate::serde_tag::BytesToStr;
 use crate::serde_tag::Chain;
 use crate::serde_tag::ToFromStr;
 use ario_core::base64::Base64Error;
-use ario_core::blob::{Blob, OwnedBlob};
-use ario_core::tx::{Tag, TagValue, TxId};
+use ario_core::blob::OwnedBlob;
+use ario_core::tx::{Tag, TxId};
 use ario_core::wallet::WalletAddress;
 use ario_core::{BlockNumber, JsonValue};
 use chrono::{DateTime, Utc};
 use derive_where::derive_where;
-use serde::de::{DeserializeOwned, Error};
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_with::DisplayFromStr;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_with::TimestampMilliSeconds;
 use serde_with::TimestampSeconds;
 use serde_with::serde_as;
+use serde_with::{DisplayFromStr, skip_serializing_none};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
@@ -83,6 +84,15 @@ impl<ID: Id, TAG> FromStr for TaggedId<ID, TAG> {
 struct Model<H, M, T> {
     header: Header<H, T>,
     metadata: Metadata<M, T>,
+}
+
+impl<H, T> Model<H, (), T> {
+    fn new_without_metadata(header: Header<H, T>) -> Self {
+        Self {
+            header,
+            metadata: Metadata::none(),
+        }
+    }
 }
 
 impl<H, M, T> Model<H, M, T> {
@@ -194,6 +204,16 @@ struct Metadata<M, Tag> {
     _marker: PhantomData<Tag>,
 }
 
+impl<Tag> Metadata<(), Tag> {
+    fn none() -> Self {
+        Self {
+            inner: (),
+            extra: HashMap::default(),
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<M, Tag> TryFrom<JsonValue> for Metadata<M, Tag>
 where
     M: DeserializeOwned + Sized,
@@ -221,6 +241,7 @@ pub type DriveId = TaggedId<Uuid, DriveKind>;
 type DriveEntity = Model<DriveHeader, DriveMetadata, DriveKind>;
 
 #[serde_as]
+#[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct DriveHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
@@ -257,25 +278,31 @@ struct DriveMetadata {
     root_folder_id: FolderId,
 }
 
-/*
 pub struct DriveSignatureKind;
-type DriveSignatureEntity<'a> = Model<'a, DriveSignatureHeader<'a>, (), DriveSignatureKind>;
+type DriveSignatureEntity = Model<DriveSignatureHeader, (), DriveSignatureKind>;
 
-#[derive(Debug, Clone, PartialEq)]
-struct DriveSignatureHeader<'a> {
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct DriveSignatureHeader {
+    #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
+    #[serde(rename = "Signature-Format")]
     signature_format: SignatureFormat,
+    #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
+    #[serde(default, rename = "Cipher?")]
     cipher: Option<Cipher>,
-    cipher_iv: Option<Blob<'a>>,
-    data: Blob<'a>,
+    #[serde(rename = "Cipher-IV")]
+    cipher_iv: OwnedBlob,
+    //data: Blob<'a>,
 }
 
-enum Entity<'a> {
-    Drive(DriveEntity<'a>),
-    /*DriveSignature(DriveSignatureEntity<'a>),
-    Folder(FolderEntity<'a>),
-    File(FileEntity<'a>),
-    Snapshot(SnapshotEntity<'a>),*/
-}*/
+enum Entity {
+    Drive(DriveEntity),
+    DriveSignature(DriveSignatureEntity),
+    Folder(FolderEntity),
+    File(FileEntity),
+    Snapshot(SnapshotEntity),
+}
 
 fn unsupported_signature_format_err(s: &str) -> ParseError {
     ParseError::UnsupportedSignatureFormat(s.to_string())
@@ -294,64 +321,130 @@ enum SignatureFormat {
 
 pub struct FolderKind;
 pub type FolderId = TaggedId<Uuid, FolderKind>;
-/*type FolderEntity<'a> = Model<'a, FolderHeader<'a>, FolderMetadata, FolderKind>;
+type FolderEntity = Model<FolderHeader, FolderMetadata, FolderKind>;
 
-#[derive(Debug, Clone, PartialEq)]
-struct FolderHeader<'a> {
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct FolderHeader {
+    #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
+    #[serde(default, rename = "Cipher?")]
     cipher: Option<Cipher>,
-    cipher_iv: Option<Blob<'a>>,
+    #[serde(rename = "Cipher-IV?")]
+    cipher_iv: Option<OwnedBlob>,
+    #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
+    #[serde(rename = "Content-Type")]
     content_type: ContentType,
+    #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
+    #[serde(rename = "Drive-Id")]
     drive_id: DriveId,
+    #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
+    #[serde(rename = "Folder-Id")]
     folder_id: FolderId,
+    #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
+    #[serde(rename = "Parent-Folder-Id?")]
     parent_folder_id: Option<FolderId>,
+    #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
+    #[serde(rename = "Unix-Time")]
     time: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FolderMetadata {
     name: String,
+    #[serde(rename = "isHidden", default = "bool_false")]
+    hidden: bool,
+}
+
+fn bool_false() -> bool {
+    false
 }
 
 pub struct FileKind;
 pub type FileId = TaggedId<Uuid, FileKind>;
-type FileEntity<'a> = Model<'a, FileHeader<'a>, FileMetadata, FileKind>;
+type FileEntity = Model<FileHeader, FileMetadata, FileKind>;
 
-#[derive(Debug, Clone, PartialEq)]
-struct FileHeader<'a> {
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct FileHeader {
+    #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
+    #[serde(default, rename = "Cipher?")]
     cipher: Option<Cipher>,
-    cipher_iv: Option<Blob<'a>>,
+    #[serde(rename = "Cipher-IV?")]
+    cipher_iv: Option<OwnedBlob>,
+    #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
+    #[serde(rename = "Content-Type")]
     content_type: ContentType,
+    #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
+    #[serde(rename = "Drive-Id")]
     drive_id: DriveId,
+    #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
+    #[serde(rename = "File-Id")]
     file_id: FileId,
+    #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
+    #[serde(rename = "Parent-Folder-Id")]
     parent_folder_id: FolderId,
+    #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
+    #[serde(rename = "Unix-Time")]
     time: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FileMetadata {
     name: String,
     size: u64,
+    #[serde_as(as = "TimestampMilliSeconds")]
+    #[serde(rename = "lastModifiedDate")]
     last_modified: DateTime<Utc>,
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "dataTxId")]
     data_tx_id: TxId,
-    data_content_type: ContentType,
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "dataContentType")]
+    content_type: ContentType,
+    #[serde(rename = "isHidden", default = "bool_false")]
+    hidden: bool,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(rename = "pinnedDataOwner")]
     pinned_data_owner: Option<WalletAddress>,
 }
 
 pub struct SnapshotKind;
 pub type SnapshotId = TaggedId<Uuid, SnapshotKind>;
-type SnapshotEntity<'a> = Model<'a, SnapshotHeader, (), SnapshotKind>;
+type SnapshotEntity = Model<SnapshotHeader, (), SnapshotKind>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct SnapshotHeader {
+    #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
+    #[serde(rename = "Drive-Id")]
     drive_id: DriveId,
+    #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
+    #[serde(rename = "Snapshot-Id")]
     snapshot_id: SnapshotId,
+    #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
+    #[serde(rename = "Content-Type")]
     content_type: ContentType,
+    #[serde_as(as = "Chain<(BytesToStr, ToFromStr<u64>, _)>")]
+    #[serde(rename = "Block-Start")]
     block_start: BlockNumber,
+    #[serde_as(as = "Chain<(BytesToStr, ToFromStr<u64>, _)>")]
+    #[serde(rename = "Block-End")]
     block_end: BlockNumber,
+    #[serde_as(as = "Chain<(BytesToStr, ToFromStr<u64>, _)>")]
+    #[serde(rename = "Data-Start")]
     data_start: BlockNumber,
+    #[serde_as(as = "Chain<(BytesToStr, ToFromStr<u64>, _)>")]
+    #[serde(rename = "Data-End")]
     data_end: BlockNumber,
+    #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
+    #[serde(rename = "Unix-Time")]
     time: DateTime<Utc>,
-}*/
+}
 
 fn unsupported_privacy_err(s: &str) -> ParseError {
     ParseError::UnsupportedPrivacy(s.to_string())
@@ -412,14 +505,18 @@ enum Cipher {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ArFsVersion, ContentType, DriveEntity, DriveHeader, DriveId, DriveKind, DriveMetadata,
-        FolderId, Header, Metadata, Privacy,
+        ArFsVersion, Cipher, ContentType, DriveEntity, DriveHeader, DriveId, DriveKind,
+        DriveMetadata, DriveSignatureEntity, DriveSignatureHeader, DriveSignatureKind, FileEntity,
+        FileHeader, FileId, FileKind, FileMetadata, FolderEntity, FolderHeader, FolderId,
+        FolderKind, FolderMetadata, Header, Metadata, Privacy, SignatureFormat, SnapshotEntity,
+        SnapshotHeader, SnapshotId, SnapshotKind,
     };
     use ario_client::Client;
     use ario_client::graphql::cynic;
     use ario_client::graphql::schema;
     use ario_core::blob::Blob;
-    use ario_core::tx::Tag;
+    use ario_core::tx::{Tag, TxId};
+    use ario_core::wallet::WalletAddress;
     use ario_core::{Gateway, JsonValue};
     use chrono::DateTime;
     use std::str::FromStr;
@@ -508,9 +605,324 @@ mod tests {
         let tags2: Vec<Tag<'_>> = drive_entity.header().try_into()?;
 
         let header2 = Header::<DriveHeader, DriveKind>::try_from(&tags2)?;
-        let tags3: Vec<Tag<'_>> = (&header2).try_into()?;
+        let _tags3: Vec<Tag<'_>> = (&header2).try_into()?;
 
         assert_eq!(drive_entity.header(), &header2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn drive_signature_entity_roundtrip() -> anyhow::Result<()> {
+        let tags = vec![
+            Tag::from((Blob::from("ArFS".as_bytes()), Blob::from("0.15".as_bytes()))),
+            Tag::from((
+                Blob::from("Signature-Format".as_bytes()),
+                Blob::from("1".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Cipher?".as_bytes()),
+                Blob::from("AES256-GCM".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Cipher-IV".as_bytes()),
+                Blob::from("todo".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Entity-Type".as_bytes()),
+                Blob::from("drive-signature".as_bytes()),
+            )),
+        ];
+
+        let header = Header::<DriveSignatureHeader, DriveSignatureKind>::try_from(&tags)?;
+        let sig_entity = DriveSignatureEntity::new_without_metadata(header);
+
+        assert_eq!(
+            sig_entity.header().version(),
+            &ArFsVersion::from_str("0.15")?
+        );
+
+        assert_eq!(
+            sig_entity.header().inner.signature_format,
+            SignatureFormat::V1
+        );
+        assert_eq!(sig_entity.header().inner.cipher, Some(Cipher::Aes256Gcm));
+        //todo: check iv && data
+
+        // roundtrip testing
+
+        let tags2: Vec<Tag<'_>> = sig_entity.header().try_into()?;
+
+        let header2 = Header::<DriveSignatureHeader, DriveSignatureKind>::try_from(&tags2)?;
+        let _tags3: Vec<Tag<'_>> = (&header2).try_into()?;
+
+        assert_eq!(sig_entity.header(), &header2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn folder_entity_roundtrip() -> anyhow::Result<()> {
+        let metadata: JsonValue =
+            serde_json::from_str(r#"{"name":"folder1","isHidden": false, "some": "extra"}"#)?;
+
+        let tags = vec![
+            Tag::from((Blob::from("ArFS".as_bytes()), Blob::from("0.15".as_bytes()))),
+            Tag::from((
+                Blob::from("Drive-Id".as_bytes()),
+                Blob::from("29253cd0-7b5e-4788-bb3b-1786601c8ee0".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Folder-Id".as_bytes()),
+                Blob::from("19253cd0-7b5e-4788-bb3b-1786601c8ee0".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Unix-Time".as_bytes()),
+                Blob::from("1755436511".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Entity-Type".as_bytes()),
+                Blob::from("folder".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Content-Type".as_bytes()),
+                Blob::from("application/json".as_bytes()),
+            )),
+        ];
+
+        let header = Header::<FolderHeader, FolderKind>::try_from(&tags)?;
+        let metadata = Metadata::<FolderMetadata, FolderKind>::try_from(metadata)?;
+        let folder_entity = FolderEntity::new(header, metadata);
+
+        assert_eq!(
+            folder_entity.header().version(),
+            &ArFsVersion::from_str("0.15")?
+        );
+
+        assert_eq!(
+            &folder_entity.header().inner.drive_id,
+            &DriveId::from_str("29253cd0-7b5e-4788-bb3b-1786601c8ee0")?
+        );
+
+        assert_eq!(
+            &folder_entity.header().inner.folder_id,
+            &FolderId::from_str("19253cd0-7b5e-4788-bb3b-1786601c8ee0")?
+        );
+
+        assert_eq!(folder_entity.header().inner.content_type, ContentType::Json);
+
+        assert_eq!(
+            &folder_entity.header().inner.time,
+            &(DateTime::from_timestamp("1755436511".parse()?, 0).unwrap())
+        );
+
+        assert_eq!(folder_entity.metadata().inner.name, "folder1");
+        assert_eq!(folder_entity.metadata().inner.hidden, false);
+
+        assert!(folder_entity.metadata().extra.contains_key("some"));
+
+        // roundtrip testing
+
+        let tags2: Vec<Tag<'_>> = folder_entity.header().try_into()?;
+
+        let header2 = Header::<FolderHeader, FolderKind>::try_from(&tags2)?;
+        let _tags3: Vec<Tag<'_>> = (&header2).try_into()?;
+
+        assert_eq!(folder_entity.header(), &header2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn file_entity_roundtrip() -> anyhow::Result<()> {
+        let metadata: JsonValue = serde_json::from_str(
+            r#"{
+    "name": "filename.jpg",
+    "size": 12345,
+    "lastModifiedDate": 1755685342863,
+    "dataTxId": "0AYIaLLvU794EoxFsJzAGZ5l_24JvdHfmECvQHgKqok",
+    "dataContentType": "image/jpeg",
+    "isHidden": false,
+    "pinnedDataOwner": "JNC6vBhjHY1EPwV3pEeNmrsgFMxH5d38_LHsZ7jful8"
+}"#,
+        )?;
+
+        let tags = vec![
+            Tag::from((Blob::from("ArFS".as_bytes()), Blob::from("0.15".as_bytes()))),
+            Tag::from((
+                Blob::from("Drive-Id".as_bytes()),
+                Blob::from("29253cd0-7b5e-4788-bb3b-1786601c8ee0".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Parent-Folder-Id".as_bytes()),
+                Blob::from("19253cd0-7b5e-4788-bb3b-1786601c8ee0".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Unix-Time".as_bytes()),
+                Blob::from("1755436511".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("File-Id".as_bytes()),
+                Blob::from("39253cd0-7b5e-4788-bb3b-1786601c8ee0".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Entity-Type".as_bytes()),
+                Blob::from("file".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Content-Type".as_bytes()),
+                Blob::from("application/json".as_bytes()),
+            )),
+        ];
+
+        let header = Header::<FileHeader, FileKind>::try_from(&tags)?;
+        let metadata = Metadata::<FileMetadata, FileKind>::try_from(metadata)?;
+        let file_entity = FileEntity::new(header, metadata);
+
+        assert_eq!(
+            file_entity.header().version(),
+            &ArFsVersion::from_str("0.15")?
+        );
+
+        assert_eq!(
+            &file_entity.header().inner.drive_id,
+            &DriveId::from_str("29253cd0-7b5e-4788-bb3b-1786601c8ee0")?
+        );
+
+        assert_eq!(
+            &file_entity.header().inner.parent_folder_id,
+            &FolderId::from_str("19253cd0-7b5e-4788-bb3b-1786601c8ee0")?
+        );
+
+        assert_eq!(
+            &file_entity.header().inner.file_id,
+            &FileId::from_str("39253cd0-7b5e-4788-bb3b-1786601c8ee0")?
+        );
+
+        assert_eq!(file_entity.header().inner.content_type, ContentType::Json);
+
+        assert_eq!(
+            &file_entity.header().inner.time,
+            &(DateTime::from_timestamp("1755436511".parse()?, 0).unwrap())
+        );
+
+        assert_eq!(file_entity.metadata().inner.name, "filename.jpg");
+        assert_eq!(file_entity.metadata().inner.hidden, false);
+        assert_eq!(file_entity.metadata().inner.size, 12345);
+        assert_eq!(
+            &file_entity.metadata().inner.last_modified,
+            &(DateTime::from_timestamp_millis(1755685342863).unwrap())
+        );
+        assert_eq!(
+            &file_entity.metadata.inner.data_tx_id,
+            &TxId::from_str("0AYIaLLvU794EoxFsJzAGZ5l_24JvdHfmECvQHgKqok")?
+        );
+        assert_eq!(
+            &file_entity.metadata.inner.content_type,
+            &ContentType::Other("image/jpeg".to_string())
+        );
+        assert_eq!(
+            file_entity.metadata.inner.pinned_data_owner.as_ref(),
+            Some(&WalletAddress::from_str(
+                "JNC6vBhjHY1EPwV3pEeNmrsgFMxH5d38_LHsZ7jful8"
+            )?)
+        );
+
+        // roundtrip testing
+
+        let tags2: Vec<Tag<'_>> = file_entity.header().try_into()?;
+
+        let header2 = Header::<FileHeader, FileKind>::try_from(&tags2)?;
+        let _tags3: Vec<Tag<'_>> = (&header2).try_into()?;
+
+        assert_eq!(file_entity.header(), &header2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_entity_roundtrip() -> anyhow::Result<()> {
+        let tags = vec![
+            Tag::from((Blob::from("ArFS".as_bytes()), Blob::from("0.15".as_bytes()))),
+            Tag::from((
+                Blob::from("Drive-Id".as_bytes()),
+                Blob::from("29253cd0-7b5e-4788-bb3b-1786601c8ee0".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Unix-Time".as_bytes()),
+                Blob::from("1755436511".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Snapshot-Id".as_bytes()),
+                Blob::from("49253cd0-7b5e-4788-bb3b-1786601c8ee0".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Entity-Type".as_bytes()),
+                Blob::from("snapshot".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Content-Type".as_bytes()),
+                Blob::from("application/json".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Block-Start".as_bytes()),
+                Blob::from("1111".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Block-End".as_bytes()),
+                Blob::from("111123".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Data-Start".as_bytes()),
+                Blob::from("21111".as_bytes()),
+            )),
+            Tag::from((
+                Blob::from("Data-End".as_bytes()),
+                Blob::from("2111123".as_bytes()),
+            )),
+        ];
+
+        let header = Header::<SnapshotHeader, SnapshotKind>::try_from(&tags)?;
+        let snapshot_entity = SnapshotEntity::new_without_metadata(header);
+
+        assert_eq!(
+            snapshot_entity.header().version(),
+            &ArFsVersion::from_str("0.15")?
+        );
+
+        assert_eq!(
+            &snapshot_entity.header().inner.drive_id,
+            &DriveId::from_str("29253cd0-7b5e-4788-bb3b-1786601c8ee0")?
+        );
+
+        assert_eq!(
+            &snapshot_entity.header().inner.snapshot_id,
+            &SnapshotId::from_str("49253cd0-7b5e-4788-bb3b-1786601c8ee0")?
+        );
+
+        assert_eq!(
+            snapshot_entity.header().inner.content_type,
+            ContentType::Json
+        );
+
+        assert_eq!(
+            &snapshot_entity.header().inner.time,
+            &(DateTime::from_timestamp("1755436511".parse()?, 0).unwrap())
+        );
+
+        assert_eq!(*snapshot_entity.header().inner.block_start, 1111);
+        assert_eq!(*snapshot_entity.header().inner.block_end, 111123);
+        assert_eq!(*snapshot_entity.header().inner.data_start, 21111);
+        assert_eq!(*snapshot_entity.header().inner.data_end, 2111123);
+
+        // roundtrip testing
+
+        let tags2: Vec<Tag<'_>> = snapshot_entity.header().try_into()?;
+
+        let header2 = Header::<SnapshotHeader, SnapshotKind>::try_from(&tags2)?;
+        let _tags3: Vec<Tag<'_>> = (&header2).try_into()?;
+
+        assert_eq!(snapshot_entity.header(), &header2);
 
         Ok(())
     }
@@ -532,6 +944,7 @@ mod tests {
         pub id: cynic::Id,
     }
 
+    #[ignore]
     #[tokio::test]
     async fn foo() -> anyhow::Result<()> {
         init_tracing();

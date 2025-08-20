@@ -18,7 +18,7 @@ use crate::crypto::signature::{Scheme as SignatureScheme, SupportsSignatures};
 use crate::jwk::Jwk;
 use crate::tx::v2::TxDraft;
 use crate::tx::{TxError, TxHash, TxSignature, ValidatedTx};
-use crate::typed::FromInner;
+use crate::typed::{FromInner, WithDisplay};
 use crate::{Address, blob};
 use bip39::Mnemonic;
 use bytemuck::TransparentWrapper;
@@ -180,6 +180,8 @@ impl<SK: WalletSecretKey> WalletSk<SK> {
 }
 
 pub type WalletAddress = Address<WalletKind>;
+
+impl WithDisplay for WalletAddress {}
 
 #[derive(Error, Debug)]
 pub enum WalletAddressError {
