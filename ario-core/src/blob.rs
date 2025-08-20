@@ -1,6 +1,8 @@
 use crate::typed::{FromInner, Typed};
 use bytes::{Buf, Bytes};
 use hybrid_array::{Array, ArraySize};
+use serde::de::Visitor;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::array::TryFromSliceError;
 use std::fmt::{Debug, Formatter};
 use std::io::Cursor;
@@ -96,6 +98,93 @@ impl<'a> Blob<'a> {
         Blob::from(bytes)
     }
 }
+
+impl<'a> Serialize for Blob<'a> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(self.bytes())
+    }
+}
+
+impl<'de> Deserialize<'de> for Blob<'static> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct BytesVisitor;
+
+        impl<'de> Visitor<'de> for BytesVisitor {
+            type Value = Blob<'static>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("bytes")
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Blob::from(v.to_vec()))
+            }
+
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Blob::from(v))
+            }
+        }
+
+        let bytes = deserializer.deserialize_byte_buf(BytesVisitor)?;
+        Ok(Blob::from(bytes))
+    }
+}
+
+/*impl<'de: 'a, 'a> Deserialize<'de> for Blob<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct BytesVisitor<'a>(PhantomData<&'a ()>);
+
+        impl<'de: 'a, 'a> Visitor<'de> for BytesVisitor<'a> {
+            type Value = Blob<'a>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("bytes")
+            }
+
+            fn visit_borrowed_bytes<E>(self, v: &'de [u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Blob::from(v))
+            }
+
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Blob::from(v))
+            }
+        }
+
+        let bytes = <&'a [u8]>::deserialize(deserializer)?;
+        Ok(Blob::from(bytes))
+    }
+}*/
+
+/*impl<'de> Deserialize<'de> for Blob<'static> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let data =  Vec::<u8>::deserialize(deserializer)?;
+        Ok(Blob::from(data))
+    }
+}*/
 
 impl<'a> AsRef<[u8]> for Blob<'a> {
     fn as_ref(&self) -> &[u8] {

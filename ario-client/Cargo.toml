@@ -16,7 +16,7 @@ bytes = { workspace = true }
 bytesize = { workspace = true }
 cynic = { version = "3", optional = true }
 cynic-codegen = { version = "3", optional = true }
-derive_more = { version = "2.0", features = ["full"] }
+derive_more = { workspace = true, features = ["full"] }
 derive-where = { workspace = true }
 futures-concurrency = "7.6"
 futures-lite = { workspace = true }

@@ -9,6 +9,7 @@ bytes = "1"
 bytesize = "2.0"
 chrono = "0.4"
 derive-where = "1.6"
+derive_more = "2.0"
 ecdsa = "0.17.0-rc.5"
 elliptic-curve = { git = "https://github.com/RustCrypto/traits.git", rev = "d5355ef8a85577d9842505cf3241f6e1d011d0da" }
 futures-lite = "2.6"
@@ -24,6 +25,7 @@ tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 url = "2.5"
+uuid = "1"
 zeroize = "1.8"
 
 [patch.crates-io]
