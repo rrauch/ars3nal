@@ -49,8 +49,51 @@ pub trait AsymmetricScheme {
     type PublicKey: PublicKey;
 }
 
+pub trait SymmetricScheme {
+    type SecretKey: SymmetricKey;
+}
+
 pub trait KeySize: ArraySize + Send + Sync {}
 impl<T> KeySize for T where T: ArraySize + Send + Sync {}
+
+pub(crate) trait SymmetricKey {
+    type Scheme: SymmetricScheme;
+}
+
+pub type TypedSymmetricKey<T, K: SymmetricKey> = Typed<T, K>;
+
+/*impl<K: SymmetricKey> DecryptionExt<<K::Scheme as SupportsEncryption>::Scheme> for K
+where
+    K::Scheme: SupportsEncryption<Decryptor = K>,
+{
+    type DecryptionError =
+        <<K::Scheme as SupportsEncryption>::Scheme as encryption::Scheme>::DecryptionError;
+
+    fn decrypt(
+        &self,
+        ciphertext: &Ciphertext<'_, <K::Scheme as SupportsEncryption>::Scheme>,
+    ) -> Result<OwnedBlob, Self::DecryptionError> {
+        <<K::Scheme as SupportsEncryption>::Scheme as encryption::Scheme>::new_decryptor(self, ciphertext)
+    }
+}
+
+impl<K: SymmetricKey> EncryptionExt<<K::Scheme as SupportsEncryption>::Scheme> for K
+where
+    K::Scheme: SupportsEncryption<Encryptor = K>,
+{
+    type EncryptionError =
+        <<K::Scheme as SupportsEncryption>::Scheme as encryption::Scheme>::EncryptionError;
+
+    fn encrypt(
+        &self,
+        plaintext: &<<K::Scheme as SupportsEncryption>::Scheme as encryption::Scheme>::Plaintext<
+            '_,
+        >,
+    ) -> Result<Ciphertext<'static, <K::Scheme as SupportsEncryption>::Scheme>, Self::EncryptionError>
+    {
+        <<K::Scheme as SupportsEncryption>::Scheme as encryption::Scheme>::new_encryptor(self, plaintext)
+    }
+}*/
 
 pub(crate) trait SecretKey {
     type Scheme: AsymmetricScheme;

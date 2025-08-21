@@ -22,7 +22,7 @@ pub struct VerifiableData<'a> {
 }
 
 impl<'a> VerifiableData<'a> {
-    pub fn external_data(&self) -> &ExternalData {
+    pub fn external_data(&self) -> &ExternalData<'_> {
         &self.external_data
     }
 
@@ -30,7 +30,7 @@ impl<'a> VerifiableData<'a> {
         self.merkle_tree.chunks()
     }
 
-    pub fn proof(&self, range: &Range<u64>) -> Option<&DefaultProof> {
+    pub fn proof(&self, range: &Range<u64>) -> Option<&DefaultProof<'_>> {
         if let Some(proof) = self.merkle_tree.proof(range.start) {
             if proof.offset() == range {
                 return Some(proof);

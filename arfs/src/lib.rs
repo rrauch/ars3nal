@@ -81,30 +81,56 @@ impl<ID: Id, TAG> FromStr for TaggedId<ID, TAG> {
     }
 }
 
-struct Model<H, M, T> {
-    header: Header<H, T>,
-    metadata: Metadata<M, T>,
+struct Model<E: Entity> {
+    header: Header<E::Header, E>,
+    metadata: Metadata<E::Metadata, E>,
+    _marker: PhantomData<E>,
 }
 
-impl<H, T> Model<H, (), T> {
-    fn new_without_metadata(header: Header<H, T>) -> Self {
+trait Entity {
+    const TYPE: &'static str;
+
+    type Header;
+    type Metadata;
+}
+
+trait Encryptable {
+    type EncryptionKey;
+    type DecryptionKey;
+    type Error: Display + Send;
+
+    type Ciphertext;
+    type Plaintext;
+}
+
+trait EncryptExt<E: Encryptable> {
+    fn encrypt(&self, key: &E::EncryptionKey) -> Result<E::Ciphertext, E::Error>;
+}
+
+impl<E: Encryptable> EncryptExt<E> for E::Plaintext {
+    fn encrypt(&self, key: &E::EncryptionKey) -> Result<E::Ciphertext, E::Error> {
+        todo!()
+    }
+}
+
+trait DecryptExt<K, P, E> {
+    fn decrypt(&self, key: &K) -> Result<P, E>;
+}
+
+impl<E: Entity> Model<E> {
+    fn new(header: Header<E::Header, E>, metadata: Metadata<E::Metadata, E>) -> Self {
         Self {
             header,
-            metadata: Metadata::none(),
+            metadata,
+            _marker: PhantomData,
         }
     }
-}
 
-impl<H, M, T> Model<H, M, T> {
-    fn new(header: Header<H, T>, metadata: Metadata<M, T>) -> Self {
-        Self { header, metadata }
-    }
-
-    pub(crate) fn header(&self) -> &Header<H, T> {
+    pub(crate) fn header(&self) -> &Header<E::Header, E> {
         &self.header
     }
 
-    pub(crate) fn metadata(&self) -> &Metadata<M, T> {
+    pub(crate) fn metadata(&self) -> &Metadata<E::Metadata, E> {
         &self.metadata
     }
 }
@@ -238,16 +264,23 @@ where
 
 pub struct DriveKind;
 pub type DriveId = TaggedId<Uuid, DriveKind>;
-type DriveEntity = Model<DriveHeader, DriveMetadata, DriveKind>;
+
+impl Entity for DriveKind {
+    const TYPE: &'static str = "drive";
+    type Header = DriveHeader;
+    type Metadata = DriveMetadata;
+}
+
+type DriveEntity = Model<DriveKind>;
 
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct DriveHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
-    #[serde(default, rename = "Cipher?")]
+    #[serde(default, rename = "Cipher")]
     cipher: Option<Cipher>,
-    #[serde(rename = "Cipher-IV?")]
+    #[serde(rename = "Cipher-IV")]
     cipher_iv: Option<OwnedBlob>,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Content-Type")]
@@ -259,10 +292,10 @@ struct DriveHeader {
     #[serde(rename = "Drive-Privacy")]
     privacy: Privacy,
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
-    #[serde(default, rename = "Drive-Auth-Mode?")]
+    #[serde(default, rename = "Drive-Auth-Mode")]
     auth_mode: Option<AuthMode>,
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
-    #[serde(default, rename = "Signature-Type?")]
+    #[serde(default, rename = "Signature-Type")]
     signature_type: Option<SignatureFormat>,
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
     #[serde(rename = "Unix-Time")]
@@ -279,7 +312,14 @@ struct DriveMetadata {
 }
 
 pub struct DriveSignatureKind;
-type DriveSignatureEntity = Model<DriveSignatureHeader, (), DriveSignatureKind>;
+
+impl Entity for DriveSignatureKind {
+    const TYPE: &'static str = "drive-signature";
+    type Header = DriveSignatureHeader;
+    type Metadata = ();
+}
+
+type DriveSignatureEntity = Model<DriveSignatureKind>;
 
 #[serde_as]
 #[skip_serializing_none]
@@ -289,13 +329,14 @@ struct DriveSignatureHeader {
     #[serde(rename = "Signature-Format")]
     signature_format: SignatureFormat,
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
-    #[serde(default, rename = "Cipher?")]
+    #[serde(default, rename = "Cipher")]
     cipher: Option<Cipher>,
     #[serde(rename = "Cipher-IV")]
     cipher_iv: OwnedBlob,
     //data: Blob<'a>,
 }
 
+/*
 enum Entity {
     Drive(DriveEntity),
     DriveSignature(DriveSignatureEntity),
@@ -303,6 +344,7 @@ enum Entity {
     File(FileEntity),
     Snapshot(SnapshotEntity),
 }
+*/
 
 fn unsupported_signature_format_err(s: &str) -> ParseError {
     ParseError::UnsupportedSignatureFormat(s.to_string())
@@ -321,16 +363,24 @@ enum SignatureFormat {
 
 pub struct FolderKind;
 pub type FolderId = TaggedId<Uuid, FolderKind>;
-type FolderEntity = Model<FolderHeader, FolderMetadata, FolderKind>;
+
+impl Entity for FolderKind {
+    const TYPE: &'static str = "folder";
+    type Header = FolderHeader;
+    //type Metadata = Encryptable<OwnedBlob, FolderMetadata>;
+    type Metadata = FolderMetadata;
+}
+
+type FolderEntity = Model<FolderKind>;
 
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FolderHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
-    #[serde(default, rename = "Cipher?")]
+    #[serde(default, rename = "Cipher")]
     cipher: Option<Cipher>,
-    #[serde(rename = "Cipher-IV?")]
+    #[serde(rename = "Cipher-IV")]
     cipher_iv: Option<OwnedBlob>,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Content-Type")]
@@ -342,7 +392,7 @@ struct FolderHeader {
     #[serde(rename = "Folder-Id")]
     folder_id: FolderId,
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
-    #[serde(rename = "Parent-Folder-Id?")]
+    #[serde(rename = "Parent-Folder-Id")]
     parent_folder_id: Option<FolderId>,
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
     #[serde(rename = "Unix-Time")]
@@ -363,16 +413,24 @@ fn bool_false() -> bool {
 
 pub struct FileKind;
 pub type FileId = TaggedId<Uuid, FileKind>;
-type FileEntity = Model<FileHeader, FileMetadata, FileKind>;
+
+impl Entity for FileKind {
+    const TYPE: &'static str = "file";
+    type Header = FileHeader;
+    //type Metadata = Encryptable<OwnedBlob, FileMetadata>;
+    type Metadata = FileMetadata;
+}
+
+type FileEntity = Model<FileKind>;
 
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FileHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
-    #[serde(default, rename = "Cipher?")]
+    #[serde(default, rename = "Cipher")]
     cipher: Option<Cipher>,
-    #[serde(rename = "Cipher-IV?")]
+    #[serde(rename = "Cipher-IV")]
     cipher_iv: Option<OwnedBlob>,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Content-Type")]
@@ -415,7 +473,14 @@ struct FileMetadata {
 
 pub struct SnapshotKind;
 pub type SnapshotId = TaggedId<Uuid, SnapshotKind>;
-type SnapshotEntity = Model<SnapshotHeader, (), SnapshotKind>;
+
+impl Entity for SnapshotKind {
+    const TYPE: &'static str = "snapshot";
+    type Header = SnapshotHeader;
+    type Metadata = ();
+}
+
+type SnapshotEntity = Model<SnapshotKind>;
 
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -621,7 +686,7 @@ mod tests {
                 Blob::from("1".as_bytes()),
             )),
             Tag::from((
-                Blob::from("Cipher?".as_bytes()),
+                Blob::from("Cipher".as_bytes()),
                 Blob::from("AES256-GCM".as_bytes()),
             )),
             Tag::from((
@@ -635,7 +700,7 @@ mod tests {
         ];
 
         let header = Header::<DriveSignatureHeader, DriveSignatureKind>::try_from(&tags)?;
-        let sig_entity = DriveSignatureEntity::new_without_metadata(header);
+        let sig_entity = DriveSignatureEntity::new(header, Metadata::none());
 
         assert_eq!(
             sig_entity.header().version(),
@@ -883,7 +948,7 @@ mod tests {
         ];
 
         let header = Header::<SnapshotHeader, SnapshotKind>::try_from(&tags)?;
-        let snapshot_entity = SnapshotEntity::new_without_metadata(header);
+        let snapshot_entity = SnapshotEntity::new(header, Metadata::none());
 
         assert_eq!(
             snapshot_entity.header().version(),

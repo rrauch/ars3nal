@@ -47,13 +47,13 @@ impl EcdsaSignatureData {
         (owner, signature).into()
     }
 
-    pub(super) fn owner(&self) -> Owner {
+    pub(super) fn owner(&self) -> Owner<'_> {
         match self {
             Self::Secp256k1 { owner, .. } => Owner::Secp256k1(owner.into()),
         }
     }
 
-    pub(super) fn signature(&self) -> tx::Signature {
+    pub(super) fn signature(&self) -> tx::Signature<'_> {
         match self {
             Self::Secp256k1 { signature, .. } => tx::Signature::Secp256k1(signature.into()),
         }

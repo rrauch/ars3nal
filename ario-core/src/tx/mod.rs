@@ -376,7 +376,7 @@ impl TxHash {
         }
     }
 
-    pub(crate) fn to_sign_prehash(&self) -> MaybeOwned<Sha256Hash> {
+    pub(crate) fn to_sign_prehash(&self) -> MaybeOwned<'_, Sha256Hash> {
         match self {
             TxHash::DeepHash(deep_hash) => deep_hash.digest().into(),
             TxHash::Shallow(shallow) => MaybeOwned::Borrowed(shallow),

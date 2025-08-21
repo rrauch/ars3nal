@@ -210,7 +210,7 @@ impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleTree<'_, H, C, NOTE_SI
         self.root.offset()
     }
 
-    pub fn proof(&self, offset: u64) -> Option<&Proof<H, C, NOTE_SIZE>> {
+    pub fn proof(&self, offset: u64) -> Option<&Proof<'_, H, C, NOTE_SIZE>> {
         self.proofs.get(&offset)
     }
 }

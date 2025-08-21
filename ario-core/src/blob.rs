@@ -268,6 +268,12 @@ impl<const N: usize> AsBlob for [u8; N] {
     }
 }
 
+impl AsBlob for Vec<u8> {
+    fn as_blob(&self) -> Blob<'_> {
+        Blob::Slice(self.as_slice())
+    }
+}
+
 impl<'a> AsBlob for &'a [u8] {
     fn as_blob(&self) -> Blob<'a> {
         Blob::Slice(self)

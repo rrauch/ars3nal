@@ -129,21 +129,21 @@ pub(super) enum V2SignatureData {
 }
 
 impl V2SignatureData {
-    pub(super) fn owner(&self) -> Owner {
+    pub(super) fn owner(&self) -> Owner<'_> {
         match self {
             Self::Pss(pss) => pss.owner(),
             Self::Ecdsa(ecdsa) => ecdsa.owner(),
         }
     }
 
-    pub(super) fn tx_owner(&self) -> Option<Owner> {
+    pub(super) fn tx_owner(&self) -> Option<Owner<'_>> {
         match self {
             Self::Pss(pss) => Some(pss.owner()),
             Self::Ecdsa(_) => None,
         }
     }
 
-    pub(super) fn signature(&self) -> Signature {
+    pub(super) fn signature(&self) -> Signature<'_> {
         match self {
             Self::Pss(pss) => pss.signature(),
             Self::Ecdsa(ecdsa) => ecdsa.signature(),
@@ -233,7 +233,7 @@ impl<'a> V2TxData<'a> {
         &self.signature_data
     }
 
-    pub fn tx_hash(&self) -> MaybeOwned<TxHash> {
+    pub fn tx_hash(&self) -> MaybeOwned<'_, TxHash> {
         if let Some(tx_hash) = self.tx_hash.as_ref() {
             tx_hash.into()
         } else {

@@ -18,6 +18,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "aead"
+version = "0.6.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c01559752fbde7734af628961723aa734aa46351cbf5c9ce41133ad2ae1a09b9"
+dependencies = [
+ "crypto-common 0.2.0-rc.3",
+ "inout",
+]
+
+[[package]]
+name = "aes"
+version = "0.9.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd4838e4ad37bb032dea137f441d5f71c16c26c068af512e64c5bc13a88cdfc7"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures",
+ "zeroize",
+]
+
+[[package]]
+name = "aes-gcm"
+version = "0.11.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2be322be4a73a3a55ad74b9833238e76bfd6034ce69a05c1b41c879f6a3bdca6"
+dependencies = [
+ "aead",
+ "aes",
+ "cipher",
+ "ctr",
+ "ghash",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -114,6 +151,8 @@ dependencies = [
 name = "ario-core"
 version = "0.1.0"
 dependencies = [
+ "aes",
+ "aes-gcm",
  "anyhow",
  "bigdecimal",
  "bip32",
@@ -122,11 +161,15 @@ dependencies = [
  "bytemuck",
  "bytes",
  "ct-codecs",
+ "ctr",
  "derive-where",
  "digest 0.11.0-rc.0",
  "ecdsa 0.17.0-rc.5",
  "elliptic-curve 0.14.0-rc.10",
  "futures-lite",
+ "ghash",
+ "hex",
+ "hex-literal",
  "hkdf",
  "hybrid-array",
  "k256 0.14.0-pre.9",
@@ -141,6 +184,7 @@ dependencies = [
  "serde_repr",
  "serde_with",
  "sha2 0.11.0-rc.0",
+ "subtle",
  "thiserror 2.0.12",
  "tokio",
  "tokio-util",
@@ -316,6 +360,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "block-padding"
+version = "0.4.0-rc.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee88d14c41bbae2e333f574a27fc73d96fe1039e5a356c20d06a7f2a34cd8e5a"
+dependencies = [
+ "hybrid-array",
+]
+
+[[package]]
 name = "bon"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -439,6 +492,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cipher"
+version = "0.5.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd4ef774202f1749465fc7cf88d70fc30620e8cacd5429268f4bff7d003bd976"
+dependencies = [
+ "crypto-common 0.2.0-rc.3",
+ "inout",
+ "zeroize",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -543,6 +607,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a23fa214dea9efd4dacee5a5614646b30216ae0f05d4bb51bafb50e9da1c5be"
 dependencies = [
  "hybrid-array",
+ "rand_core 0.9.3",
 ]
 
 [[package]]
@@ -561,6 +626,15 @@ name = "ct-codecs"
 version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b10589d1a5e400d61f9f38f12f884cfd080ff345de8f17efda36fe0e4a02aa8"
+
+[[package]]
+name = "ctr"
+version = "0.10.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f239edce204df0e4503cccef3492552773d1ca4e002659a59ca715f099b45ca1"
+dependencies = [
+ "cipher",
+]
 
 [[package]]
 name = "cynic"
@@ -1177,6 +1251,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghash"
+version = "0.6.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7df2ef47489983b86b012ce4955b61fcfb1a99a761a1a8c79c3129e722da6795"
+dependencies = [
+ "polyval",
+ "zeroize",
+]
+
+[[package]]
 name = "gimli"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1258,6 +1342,12 @@ name = "hex-conservative"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "212ab92002354b4819390025006c897e8140934349e8635c9b077f47b4dcbd20"
+
+[[package]]
+name = "hex-literal"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcaaec4551594c969335c98c903c1397853d4198408ea609190f420500f6be71"
 
 [[package]]
 name = "hkdf"
@@ -1574,6 +1664,16 @@ dependencies = [
  "equivalent",
  "hashbrown 0.15.4",
  "serde",
+]
+
+[[package]]
+name = "inout"
+version = "0.2.0-rc.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c774c86bce20ea04abe1c37cf0051c5690079a3a28ef5fdac2a5a0412b3d7d74"
+dependencies = [
+ "block-padding",
+ "hybrid-array",
 ]
 
 [[package]]
@@ -2265,6 +2365,17 @@ name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
+
+[[package]]
+name = "polyval"
+version = "0.7.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff52e661730d7c6f95a72137e812e337eb5ff371d38d8588798e0df8404e610c"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "universal-hash",
+]
 
 [[package]]
 name = "portable-atomic"
@@ -3543,6 +3654,16 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "universal-hash"
+version = "0.6.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17866ce72039aaa929b785c51d08d0395e02cb5eaffd3efdf634b9b1f80b8157"
+dependencies = [
+ "crypto-common 0.2.0-rc.3",
+ "subtle",
+]
 
 [[package]]
 name = "untrusted"

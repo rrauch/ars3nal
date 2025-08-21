@@ -112,14 +112,14 @@ impl PssSignatureData {
         }
     }
 
-    pub(super) fn owner(&self) -> Owner {
+    pub(super) fn owner(&self) -> Owner<'_> {
         match self {
             Self::Rsa4096 { owner, .. } => Owner::Rsa4096(owner.into()),
             Self::Rsa2048 { owner, .. } => Owner::Rsa2048(owner.into()),
         }
     }
 
-    pub(super) fn signature(&self) -> Signature {
+    pub(super) fn signature(&self) -> Signature<'_> {
         match self {
             Self::Rsa4096 { signature, .. } => Signature::Rsa4096(signature.into()),
             Self::Rsa2048 { signature, .. } => Signature::Rsa2048(signature.into()),

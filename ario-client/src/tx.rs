@@ -32,7 +32,7 @@ impl Api {
         &self,
         gateway: &Gateway,
         tx_id: &TxId,
-    ) -> Result<Option<UnvalidatedTx>, api::Error> {
+    ) -> Result<Option<UnvalidatedTx<'_>>, api::Error> {
         let req = ApiRequest::builder()
             .endpoint(
                 gateway
@@ -59,7 +59,7 @@ impl Api {
         &self,
         gateway: &Gateway,
         tx_id: &TxId,
-    ) -> Result<Option<Status>, api::Error> {
+    ) -> Result<Option<Status<'_>>, api::Error> {
         let req = ApiRequest::builder()
             .endpoint(
                 gateway
@@ -155,14 +155,14 @@ impl Api {
 }
 
 impl Client {
-    pub async fn tx_by_id(&self, tx_id: &TxId) -> Result<Option<UnvalidatedTx>, super::Error> {
+    pub async fn tx_by_id(&self, tx_id: &TxId) -> Result<Option<UnvalidatedTx<'_>>, super::Error> {
         let api = &self.0.api;
         Ok(self
             .with_gw(async move |gw| api.tx_by_id(gw, tx_id).await)
             .await?)
     }
 
-    pub async fn tx_status(&self, tx_id: &TxId) -> Result<Option<Status>, super::Error> {
+    pub async fn tx_status(&self, tx_id: &TxId) -> Result<Option<Status<'_>>, super::Error> {
         let api = &self.0.api;
         Ok(self
             .with_gw(async move |gw| api.tx_status(gw, tx_id).await)
@@ -432,7 +432,7 @@ impl TxSubmission<Submitted> {
         self.0.created
     }
 
-    pub fn status(&self) -> impl Stream<Item = Result<Status, super::Error>> + Send + Unpin {
+    pub fn status(&self) -> impl Stream<Item = Result<Status<'_>, super::Error>> + Send + Unpin {
         const MIN_DELAY: Duration = Duration::from_secs(1);
         const MAX_DELAY: Duration = Duration::from_secs(60);
 
