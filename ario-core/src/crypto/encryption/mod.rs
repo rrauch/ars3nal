@@ -445,6 +445,23 @@ pub trait DecryptionExt {
     ) -> Result<(), Error>
     where
         Self: 'a;
+
+    fn decrypting_reader<'a, I: Read>(
+        params: Self::DecryptionParams<'a>,
+        ciphertext_reader: &'a mut I,
+    ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
+    where
+        Self: 'a,
+    {
+        Self::decrypting_reader_with_buf_size::<I, { 64 * 1024 }>(params, ciphertext_reader)
+    }
+
+    fn decrypting_reader_with_buf_size<'a, I: Read, const BUF_SIZE: usize>(
+        params: Self::DecryptionParams<'a>,
+        ciphertext_reader: &'a mut I,
+    ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
+    where
+        Self: 'a;
 }
 
 impl<T> DecryptionExt for T
@@ -496,15 +513,30 @@ where
             <Self::Decryptor<'a> as Decryptor>::Alignment::to_usize(),
         );
 
-        let decryptor = <Self as Scheme>::new_decryptor(params).map_err(|e| e.into())?;
-
-        let mut reader = DecryptingReader::new(decryptor, ciphertext_reader, buf_size);
+        let mut reader =
+            Self::decrypting_reader_with_buf_size::<I, BUF_SIZE>(params, ciphertext_reader)?;
         let mut writer = &mut BufWriter::with_capacity(buf_size, plaintext_writer);
         io::copy(&mut reader, &mut writer)?;
         if let Some(residual) = reader.close(tag)? {
             writer.write_all(&residual)?;
         }
         Ok(())
+    }
+
+    fn decrypting_reader_with_buf_size<'a, I: Read, const BUF_SIZE: usize>(
+        params: Self::DecryptionParams<'a>,
+        ciphertext_reader: &'a mut I,
+    ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
+    where
+        Self: 'a,
+    {
+        let decryptor = <Self as Scheme>::new_decryptor(params).map_err(|e| e.into())?;
+
+        Ok(DecryptingReader::new(
+            decryptor,
+            ciphertext_reader,
+            BUF_SIZE,
+        ))
     }
 }
 

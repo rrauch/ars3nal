@@ -5,12 +5,11 @@ use futures_lite::AsyncWrite;
 use hybrid_array::typenum::Unsigned;
 use std::cmp::min;
 use std::io::{Cursor, Error, ErrorKind, Read, Result, Write};
-use zeroize::Zeroize;
 
 pub struct EncryptingWriter<'a, E: Encryptor<'a>, W> {
     encryptor: Option<E>,
     writer: &'a mut W,
-    buf: Cursor<Vec<u8>>,
+    buf: Buffer,
 }
 
 impl<'a, E: Encryptor<'a>, W> EncryptingWriter<'a, E, W> {
@@ -18,14 +17,13 @@ impl<'a, E: Encryptor<'a>, W> EncryptingWriter<'a, E, W> {
         Self {
             encryptor: Some(encryptor),
             writer,
-            buf: Cursor::new(vec![0u8; align(buf_size, E::Alignment::to_usize())]),
+            buf: Buffer::new(align(buf_size, E::Alignment::to_usize())),
         }
     }
 }
 
 impl<'a, E: Encryptor<'a>, W> Drop for EncryptingWriter<'a, E, W> {
     fn drop(&mut self) {
-        self.buf.get_mut().zeroize();
         debug_assert!(
             self.encryptor.is_none(),
             "encryptor was not closed properly. 'close' needs to be called manually prior to dropping!"
@@ -66,7 +64,7 @@ impl<'a, E: Encryptor<'a>, W: AsyncWrite> EncryptingWriter<'a, E, W> {
 
 impl<'a, E: Encryptor<'a>, W: Write> Write for EncryptingWriter<'a, E, W> {
     fn write(&mut self, input: &[u8]) -> Result<usize> {
-        if !self.buf.has_remaining() {
+        if self.buf.remaining_mut() == 0 {
             // output buffer full, flush first
             self.flush()?;
         }
@@ -76,13 +74,11 @@ impl<'a, E: Encryptor<'a>, W: Write> Write for EncryptingWriter<'a, E, W> {
             .as_mut()
             .ok_or(Error::new(ErrorKind::Other, "writer already closed"))?;
 
-        let len = min(input.len(), self.buf.remaining());
+        let len = min(input.len(), self.buf.remaining_mut());
 
         let mut input = Cursor::new(&input[..len]);
 
-        let start = self.buf.position() as usize;
-        let end = start + len;
-        let mut output = &mut self.buf.get_mut().as_mut_slice()[start..end];
+        let mut output = self.buf.as_mut();
         let out_len_start = output.len();
 
         encryptor
@@ -91,17 +87,16 @@ impl<'a, E: Encryptor<'a>, W: Write> Write for EncryptingWriter<'a, E, W> {
         let bytes_consumed = input.position() as usize;
         let bytes_produced = out_len_start - output.len();
 
-        self.buf.advance(bytes_produced);
+        self.buf.mark_produced(bytes_produced);
 
         Ok(bytes_consumed)
     }
 
     fn flush(&mut self) -> Result<()> {
-        let len = self.buf.position() as usize;
-        if len > 0 {
-            let data = &self.buf.get_ref().as_slice()[..len];
+        if self.buf.remaining() > 0 {
+            let data = self.buf.as_ref();
             self.writer.write_all(data)?;
-            self.buf.set_position(0);
+            self.buf.mark_consumed(data.len());
         }
         self.writer.flush()?;
         Ok(())
@@ -193,7 +188,7 @@ impl<'a, D: Decryptor<'a>, R: Read> Read for DecryptingReader<'a, D, R> {
                 if n == 0 {
                     self.eof = true;
                 } else {
-                    self.buf.advance_mut(n);
+                    self.buf.mark_produced(n);
                 }
                 need_input = false;
             }
@@ -226,7 +221,7 @@ impl<'a, D: Decryptor<'a>, R: Read> Read for DecryptingReader<'a, D, R> {
 
             let bytes_consumed = input.position() as usize;
             let bytes_produced = out_len_start - output.len();
-            self.buf.advance(bytes_consumed);
+            self.buf.mark_consumed(bytes_consumed);
             if bytes_produced > 0 {
                 return Ok(bytes_produced);
             }
@@ -264,8 +259,8 @@ mod buffer {
         /// Advances the read position by consuming `read` bytes
         /// # Panics
         /// Panics if `read` exceeds available bytes
-        pub fn advance(&mut self, read: usize) {
-            assert!(read <= self.len, "attempt to advance beyond available data");
+        pub fn mark_consumed(&mut self, read: usize) {
+            assert!(read <= self.len, "attempt to consume beyond available data");
             self.head = (self.head + read) % self.bytes.len();
             self.len -= read;
         }
@@ -285,7 +280,7 @@ mod buffer {
         /// Advances the write position by committing `written` bytes
         /// # Panics
         /// Panics if `written` exceeds available space
-        pub fn advance_mut(&mut self, written: usize) {
+        pub fn mark_produced(&mut self, written: usize) {
             assert!(
                 written <= self.remaining_mut(),
                 "attempt to advance beyond available space"
@@ -343,33 +338,33 @@ mod buffer {
             // Write data
             let write_slice = buf.as_mut();
             write_slice[..2].copy_from_slice(&[1, 2]);
-            buf.advance_mut(2);
+            buf.mark_produced(2);
 
             assert_eq!(buf.remaining(), 2);
             assert_eq!(buf.remaining_mut(), 2);
             assert_eq!(buf.as_ref(), &[1, 2]);
 
             // Read data
-            buf.advance(1);
+            buf.mark_consumed(1);
             assert_eq!(buf.remaining(), 1);
             assert_eq!(buf.as_ref(), &[2]);
 
             // Write more data
             let write_slice = buf.as_mut();
             write_slice[..2].copy_from_slice(&[3, 4]);
-            buf.advance_mut(2);
+            buf.mark_produced(2);
 
             assert_eq!(buf.remaining(), 3);
             assert_eq!(buf.as_ref(), &[2, 3, 4]);
 
             // Test circular behavior
-            buf.advance(3); // Read all
+            buf.mark_consumed(3); // Read all
             assert_eq!(buf.remaining(), 0);
 
             // Write past end (should wrap)
             let write_slice = buf.as_mut();
             write_slice[..3].copy_from_slice(&[5, 6, 7]);
-            buf.advance_mut(3);
+            buf.mark_produced(3);
 
             assert_eq!(buf.remaining(), 3);
             assert_eq!(buf.as_ref(), &[5, 6, 7]);
@@ -382,14 +377,14 @@ mod buffer {
             // Fill buffer
             let write_slice = buf.as_mut();
             write_slice.copy_from_slice(&[1, 2, 3]);
-            buf.advance_mut(3);
+            buf.mark_produced(3);
 
             assert_eq!(buf.remaining(), 3);
             assert_eq!(buf.remaining_mut(), 0);
             assert_eq!(buf.as_ref(), &[1, 2, 3]);
 
             // Read partially
-            buf.advance(2);
+            buf.mark_consumed(2);
             assert_eq!(buf.remaining(), 1);
             assert_eq!(buf.as_ref(), &[3]);
 
@@ -404,7 +399,7 @@ mod buffer {
             // Write some data
             let write_slice = buf.as_mut();
             write_slice[..2].copy_from_slice(&[1, 2]);
-            buf.advance_mut(2);
+            buf.mark_produced(2);
 
             assert_eq!(buf.remaining(), 2);
 
@@ -420,7 +415,7 @@ mod buffer {
         #[should_panic(expected = "attempt to advance beyond available data")]
         fn test_advance_beyond_data() {
             let mut buf = Buffer::new(2);
-            buf.advance(1);
+            buf.mark_consumed(1);
         }
 
         #[test]
@@ -430,8 +425,8 @@ mod buffer {
             let mut buf = Buffer::new(2);
             let write_slice = buf.as_mut();
             write_slice[..2].copy_from_slice(&[1, 2]);
-            buf.advance_mut(2);
-            buf.advance_mut(1); // Should panic
+            buf.mark_produced(2);
+            buf.mark_produced(1); // Should panic
         }
     }
 }
