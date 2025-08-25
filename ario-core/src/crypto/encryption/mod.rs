@@ -1,113 +1,16 @@
-mod read_write;
+pub mod decryption;
+pub mod encryption;
 
-use crate::crypto::encryption::read_write::{DecryptingReader, EncryptingWriter};
+use crate::buffer::{BufError, BufMutExt};
+use crate::crypto::encryption::decryption::DecryptingReader;
+use crate::crypto::encryption::encryption::EncryptingWriter;
 use bytes::{Buf, BufMut};
+use futures_lite::AsyncWriteExt;
+use futures_lite::{AsyncRead, AsyncWrite};
 use hybrid_array::ArraySize;
-use hybrid_array::typenum::Unsigned;
-use std::cmp::min;
-use std::io::{BufReader, BufWriter, Cursor, Read, Write};
-use std::{io, ptr};
+use std::io;
+use std::io::{Read, Write};
 use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum BufError {
-    #[error("chunk too small: required: '{required}', actual: '{actual}'")]
-    ChunkTooSmall { required: usize, actual: usize },
-    #[error("buffer too small: required: '{required}', actual: '{actual}'")]
-    BufferTooSmall { required: usize, actual: usize },
-    #[error("buffer overflow")]
-    BufferOverflow,
-}
-
-pub(crate) trait BufExt {
-    fn chunk_slice(&self, len: usize) -> Result<&[u8], BufError>;
-    fn write_all<W: Write>(&mut self, output: W) -> io::Result<usize>;
-}
-
-impl<T: Buf> BufExt for T {
-    fn chunk_slice(&self, len: usize) -> Result<&[u8], BufError> {
-        assert!(len > 0);
-
-        if self.chunk().len() < len {
-            return Err(BufError::ChunkTooSmall {
-                required: len,
-                actual: self.chunk().len(),
-            });
-        }
-
-        Ok(&self.chunk()[..len])
-    }
-
-    fn write_all<W: Write>(&mut self, mut writer: W) -> io::Result<usize> {
-        let mut written = 0;
-        while self.has_remaining() {
-            let chunk = self.chunk();
-            let len = chunk.len();
-            writer.write_all(chunk)?;
-            self.advance(len);
-            written += len;
-        }
-        Ok(written)
-    }
-}
-
-pub(crate) trait BufMutExt {
-    fn chunk_mut_slice(&mut self, len: usize) -> Result<&mut [u8], BufError>;
-    fn copy_from_slice(&mut self, input: &[u8]) -> Result<(), BufError> {
-        self.copy_from_buf(&mut Cursor::new(input))
-    }
-
-    fn copy_from_buf(&mut self, input: &mut impl Buf) -> Result<(), BufError>;
-}
-
-impl<T: BufMut> BufMutExt for T {
-    fn chunk_mut_slice(&mut self, len: usize) -> Result<&mut [u8], BufError> {
-        if self.chunk_mut().len() < len {
-            return Err(BufError::ChunkTooSmall {
-                required: len,
-                actual: self.chunk_mut().len(),
-            });
-        }
-
-        // SAFETY: We're zero-initializing possibly uninitialized memory.
-        // The slice bounds are guaranteed valid and writing to MaybeUninit<u8> as u8 is safe.
-        let output = unsafe {
-            let maybe_uninit = self.chunk_mut()[..len].as_uninit_slice_mut();
-            ptr::write_bytes(
-                maybe_uninit.as_mut_ptr() as *mut u8,
-                0x00,
-                maybe_uninit.len(),
-            );
-            std::slice::from_raw_parts_mut(maybe_uninit.as_mut_ptr() as *mut _, maybe_uninit.len())
-        };
-
-        Ok(output)
-    }
-
-    fn copy_from_buf(&mut self, input: &mut impl Buf) -> Result<(), BufError> {
-        if self.remaining_mut() < input.remaining() {
-            return Err(BufError::BufferTooSmall {
-                required: input.remaining(),
-                actual: self.remaining_mut(),
-            });
-        }
-
-        loop {
-            if !input.has_remaining() {
-                break;
-            }
-            let chunk_len = self.chunk_mut().len();
-            assert!(chunk_len > 0);
-
-            let len = min(input.remaining(), chunk_len);
-            let out = self.chunk_mut_slice(len)?;
-            out.copy_from_slice(&input.chunk()[..len]);
-            input.advance(len);
-            unsafe { self.advance_mut(len) }
-        }
-        Ok(())
-    }
-}
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -116,24 +19,8 @@ pub enum Error {
     #[error("encryption / decryption error: {0}")]
     Other(String),
     #[error(transparent)]
-    IoError(#[from] std::io::Error),
+    IoError(#[from] io::Error),
 }
-
-//#[derive_where(Clone, PartialEq)]
-/*#[repr(transparent)]
-pub struct Ciphertext<'a, S: Scheme>(S::EncryptedData<'a>);
-
-impl<'a, S: Scheme> Ciphertext<'a, S> {
-    pub(crate) fn new(data: S::EncryptedData<'a>) -> Self {
-        Self(data)
-    }
-}
-
-impl<'a, S: Scheme> AsBlob for Ciphertext<'a, S> {
-    fn as_blob(&self) -> Blob<'_> {
-        self.0.as_blob()
-    }
-}*/
 
 /// A stateful, incremental encryptor that processes data in chunks.
 ///
@@ -143,7 +30,7 @@ impl<'a, S: Scheme> AsBlob for Ciphertext<'a, S> {
 pub trait Encryptor<'a> {
     type Error: Into<Error>;
     /// The type returned after finalization (e.g., an authentication tag for AEAD, or `()` if not applicable).
-    type AuthenticationTag;
+    type AuthenticationTag: Send + Sync;
 
     /// Required alignment for certain operations such as buffering and seeking.
     /// Typically, the cipher's block size.
@@ -182,7 +69,7 @@ pub trait Encryptor<'a> {
 pub trait Decryptor<'a> {
     type Error: Into<Error>;
     /// The type required for finalization (e.g., an authentication tag for AEAD, or `()` if not applicable).
-    type AuthenticationTag;
+    type AuthenticationTag: Send + Sync;
 
     /// Required alignment for certain operations such as buffering and seeking.
     /// Typically, the cipher's block size.
@@ -209,21 +96,17 @@ pub trait Decryptor<'a> {
     fn finalize(self, tag: &Self::AuthenticationTag) -> Result<Option<Vec<u8>>, Self::Error>;
 }
 
-/*
 pub mod hazmat {
     use crate::crypto::encryption::Decryptor;
-    use bytes::{Buf, BufMut};
 
-    pub trait FinalizeDecryptionWithoutVerification<'a>: Decryptor<'a> {
-        /// Allows finalizing while skipping verification.
+    pub trait FinalizeDecryptionWithoutAuthentication<'a>: Decryptor<'a> {
+        /// Allows finalizing while skipping authentication.
         /// Intended to be used together with `SeekableDecryptor::seek`.
         ///
-        /// **WARNING**: Only use if ciphertext has already been pre-verified!
-        fn finalize_unverified<I: Buf, O: BufMut>(
-            self,
-            ciphertext: &mut I,
-            plaintext: &mut O,
-        ) -> Result<(), Self::Error>;
+        /// **WARNING**: Only use if ciphertext has already been pre-authenticated!
+        ///
+        /// This consumes the decryptor and returns any residual plaintext from internal buffering.
+        fn finalize_unauthenticated(self) -> Result<Option<Vec<u8>>, Self::Error>;
     }
 
     pub trait SeekableDecryptor<'a>: Decryptor<'a> {
@@ -232,7 +115,7 @@ pub mod hazmat {
         /// **WARNING**: May make verification impossible!
         fn seek(&mut self, position: u64) -> Result<(), Self::Error>;
     }
-}*/
+}
 
 /// A trait representing a cryptographic scheme capable of incremental encryption and decryption.
 ///
@@ -242,12 +125,12 @@ pub trait Scheme {
     /// A stateful encryptor for this scheme.
     type Encryptor<'a>: Encryptor<'a>;
     /// The parameters required to initialize an encryptor (e.g., key, nonce, associated data).
-    type EncryptionParams<'a>;
+    type EncryptionParams<'a>: Send;
 
     /// A stateful decryptor for this scheme.
     type Decryptor<'a>: Decryptor<'a>;
     /// The parameters required to initialize a decryptor (e.g., key, nonce, associated data).
-    type DecryptionParams<'a>;
+    type DecryptionParams<'a>: Send;
 
     type Error: Into<Error>;
 
@@ -263,7 +146,7 @@ pub trait Scheme {
 }
 
 pub trait EncryptionExt {
-    type EncryptionParams<'a>
+    type EncryptionParams<'a>: Send
     where
         Self: 'a;
     type Encryptor<'a>: Encryptor<'a>
@@ -282,7 +165,7 @@ pub trait EncryptionExt {
         ciphertext_writer: &'a mut O,
     ) -> Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>
     where
-        Self: 'a,
+        Self: Unpin + 'a,
     {
         Self::encrypt_readwrite_with_buf_size::<I, O, { 64 * 1024 }>(
             params,
@@ -297,14 +180,14 @@ pub trait EncryptionExt {
         ciphertext_writer: &'a mut O,
     ) -> Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>
     where
-        Self: 'a;
+        Self: Unpin + 'a;
 
     fn encrypting_writer<'a, O: Write>(
         params: Self::EncryptionParams<'a>,
         ciphertext_writer: &'a mut O,
     ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
     where
-        Self: 'a,
+        Self: Unpin + 'a,
     {
         Self::encrypting_writer_with_buf_size::<O, { 64 * 1024 }>(params, ciphertext_writer)
     }
@@ -314,7 +197,64 @@ pub trait EncryptionExt {
         ciphertext_writer: &'a mut O,
     ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
     where
-        Self: 'a;
+        Self: Unpin + 'a;
+
+    fn encrypt_async_readwrite<'a, I: AsyncRead + Unpin + Send, O: AsyncWrite + Unpin + Send>(
+        params: Self::EncryptionParams<'a>,
+        plaintext_reader: &'a mut I,
+        ciphertext_writer: &'a mut O,
+    ) -> impl Future<
+        Output = Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>,
+    > + Send
+    where
+        Self: Unpin + 'a,
+        for<'b> Self: 'b,
+        for<'b> Self::Encryptor<'b>: Send + Unpin,
+    {
+        Self::encrypt_async_readwrite_with_buf_size::<I, O, { 64 * 1024 }>(
+            params,
+            plaintext_reader,
+            ciphertext_writer,
+        )
+    }
+
+    fn encrypt_async_readwrite_with_buf_size<
+        'a,
+        I: AsyncRead + Unpin + Send,
+        O: AsyncWrite + Unpin + Send,
+        const BUF_SIZE: usize,
+    >(
+        params: Self::EncryptionParams<'a>,
+        plaintext_reader: &'a mut I,
+        ciphertext_writer: &'a mut O,
+    ) -> impl Future<
+        Output = Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>,
+    > + Send
+    where
+        Self: Unpin + 'a,
+        for<'b> Self: 'b,
+        for<'b> Self::Encryptor<'b>: Send + Unpin;
+
+    fn encrypting_async_writer<'a, O: AsyncWrite + Unpin>(
+        params: Self::EncryptionParams<'a>,
+        ciphertext_writer: &'a mut O,
+    ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
+    where
+        Self: Unpin + 'a,
+        for<'b> Self: 'b,
+        for<'b> Self::Encryptor<'b>: Send + Unpin,
+    {
+        Self::encrypting_async_writer_with_buf_size::<O, { 64 * 1024 }>(params, ciphertext_writer)
+    }
+
+    fn encrypting_async_writer_with_buf_size<'a, O: AsyncWrite + Unpin, const BUF_SIZE: usize>(
+        params: Self::EncryptionParams<'a>,
+        ciphertext_writer: &'a mut O,
+    ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
+    where
+        Self: Unpin + 'a,
+        for<'b> Self: 'b,
+        for<'b> Self::Encryptor<'b>: Send + Unpin;
 }
 
 impl<T> EncryptionExt for T
@@ -324,11 +264,11 @@ where
     type EncryptionParams<'a>
         = <Self as Scheme>::EncryptionParams<'a>
     where
-        T: 'a;
+        Self: 'a;
     type Encryptor<'a>
         = <Self as Scheme>::Encryptor<'a>
     where
-        T: 'a;
+        Self: 'a;
 
     fn encrypt<'a, I: Buf, O: BufMut>(
         params: Self::EncryptionParams<'a>,
@@ -336,7 +276,7 @@ where
         ciphertext: &mut O,
     ) -> Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>
     where
-        T: 'a,
+        Self: 'a,
     {
         let mut encryptor = <Self as Scheme>::new_encryptor(params).map_err(|e| e.into())?;
         while plaintext.has_remaining() {
@@ -346,7 +286,7 @@ where
         }
         let (tag, residual) = encryptor.finalize().map_err(|e| e.into())?;
         if let Some(residual) = residual {
-            ciphertext.copy_from_slice(residual.as_slice())?;
+            ciphertext.copy_all_from_slice(residual.as_slice())?;
         }
         Ok(tag)
     }
@@ -357,21 +297,12 @@ where
         ciphertext_writer: &'a mut O,
     ) -> Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>
     where
-        T: 'a,
+        Self: Unpin + 'a,
     {
-        // todo: can this be made const?
-        let buf_size = align(
-            BUF_SIZE,
-            <Self::Encryptor<'a> as Encryptor>::Alignment::to_usize(),
-        );
-
         let mut writer =
-            encrypting_writer_with_buf_size::<O, Self>(params, ciphertext_writer, buf_size)?;
-        io::copy(
-            &mut BufReader::with_capacity(buf_size, plaintext_reader),
-            &mut writer,
-        )?;
-        Ok(writer.close()?)
+            encrypting_writer_with_buf_size::<O, Self>(params, ciphertext_writer, BUF_SIZE)?;
+        io::copy(plaintext_reader, &mut writer)?;
+        Ok(writer.finalize()?)
     }
 
     fn encrypting_writer_with_buf_size<'a, O: Write, const BUF_SIZE: usize>(
@@ -379,9 +310,49 @@ where
         ciphertext_writer: &'a mut O,
     ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
     where
-        Self: 'a,
+        Self: Unpin + 'a,
     {
         encrypting_writer_with_buf_size::<O, Self>(params, ciphertext_writer, BUF_SIZE)
+    }
+
+    fn encrypt_async_readwrite_with_buf_size<
+        'a,
+        I: AsyncRead + Unpin + Send,
+        O: AsyncWrite + Unpin + Send,
+        const BUF_SIZE: usize,
+    >(
+        params: Self::EncryptionParams<'a>,
+        plaintext_reader: &'a mut I,
+        ciphertext_writer: &'a mut O,
+    ) -> impl Future<
+        Output = Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>,
+    > + Send
+    where
+        Self: Unpin + 'a,
+        for<'b> Self: 'b,
+        for<'b> Self::Encryptor<'b>: Send + Unpin,
+    {
+        async {
+            let mut writer = encrypting_async_writer_with_buf_size::<O, Self>(
+                params,
+                ciphertext_writer,
+                BUF_SIZE,
+            )?;
+            futures_lite::io::copy(plaintext_reader, &mut writer).await?;
+            Ok(writer.finalize_async().await?)
+        }
+    }
+
+    fn encrypting_async_writer_with_buf_size<'a, O: AsyncWrite + Unpin, const BUF_SIZE: usize>(
+        params: Self::EncryptionParams<'a>,
+        ciphertext_writer: &'a mut O,
+    ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
+    where
+        Self: Unpin + 'a,
+        for<'b> Self: 'b,
+        for<'b> Self::Encryptor<'b>: Send + Unpin,
+    {
+        encrypting_async_writer_with_buf_size::<O, Self>(params, ciphertext_writer, BUF_SIZE)
     }
 }
 
@@ -393,6 +364,24 @@ fn encrypting_writer_with_buf_size<'a, O: Write, T>(
 where
     T: 'a,
     T: Scheme,
+{
+    let encryptor = <T as Scheme>::new_encryptor(params).map_err(|e| e.into())?;
+    Ok(EncryptingWriter::new(
+        encryptor,
+        ciphertext_writer,
+        buf_size,
+    ))
+}
+
+fn encrypting_async_writer_with_buf_size<'a, O: AsyncWrite + Unpin, T>(
+    params: <T as Scheme>::EncryptionParams<'a>,
+    ciphertext_writer: &'a mut O,
+    buf_size: usize,
+) -> Result<EncryptingWriter<'a, <T as Scheme>::Encryptor<'a>, O>, Error>
+where
+    T: 'a,
+    T: Scheme,
+    T: Unpin,
 {
     let encryptor = <T as Scheme>::new_encryptor(params).map_err(|e| e.into())?;
     Ok(EncryptingWriter::new(
@@ -462,6 +451,62 @@ pub trait DecryptionExt {
     ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
     where
         Self: 'a;
+
+    fn decrypt_async_readwrite<'a, I: AsyncRead + Send + Unpin, O: AsyncWrite + Send + Unpin>(
+        params: Self::DecryptionParams<'a>,
+        ciphertext_reader: &'a mut I,
+        plaintext_writer: &'a mut O,
+        tag: &<Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
+    ) -> impl Future<Output = Result<(), Error>> + Send
+    where
+        Self: Unpin + 'a,
+        for<'b> Self: 'b,
+        for<'b> Self::Decryptor<'b>: Send + Unpin,
+    {
+        Self::decrypt_async_readwrite_with_buf_size::<I, O, { 64 * 1024 }>(
+            params,
+            ciphertext_reader,
+            plaintext_writer,
+            tag,
+        )
+    }
+
+    fn decrypt_async_readwrite_with_buf_size<
+        'a,
+        I: AsyncRead + Send + Unpin,
+        O: AsyncWrite + Send + Unpin,
+        const BUF_SIZE: usize,
+    >(
+        params: Self::DecryptionParams<'a>,
+        ciphertext_reader: &'a mut I,
+        plaintext_writer: &'a mut O,
+        tag: &<Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
+    ) -> impl Future<Output = Result<(), Error>> + Send
+    where
+        Self: Unpin + 'a,
+        for<'b> Self: 'b,
+        for<'b> Self::Decryptor<'b>: Send + Unpin;
+
+    fn decrypting_async_reader<'a, I: AsyncRead + Unpin>(
+        params: Self::DecryptionParams<'a>,
+        ciphertext_reader: &'a mut I,
+    ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
+    where
+        Self: 'a,
+        Self: Unpin,
+        Self::Decryptor<'a>: Unpin,
+    {
+        Self::decrypting_async_reader_with_buf_size::<I, { 64 * 1024 }>(params, ciphertext_reader)
+    }
+
+    fn decrypting_async_reader_with_buf_size<'a, I: AsyncRead + Unpin, const BUF_SIZE: usize>(
+        params: Self::DecryptionParams<'a>,
+        ciphertext_reader: &'a mut I,
+    ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
+    where
+        Self: 'a,
+        Self: Unpin,
+        Self::Decryptor<'a>: Unpin;
 }
 
 impl<T> DecryptionExt for T
@@ -494,7 +539,7 @@ where
         }
         let residual = decryptor.finalize(tag).map_err(|e| e.into())?;
         if let Some(residual) = residual {
-            plaintext.copy_from_slice(residual.as_slice())?;
+            plaintext.copy_all_from_slice(residual.as_slice())?;
         }
         Ok(())
     }
@@ -508,16 +553,11 @@ where
     where
         T: 'a,
     {
-        let buf_size = align(
-            BUF_SIZE,
-            <Self::Decryptor<'a> as Decryptor>::Alignment::to_usize(),
-        );
-
         let mut reader =
             Self::decrypting_reader_with_buf_size::<I, BUF_SIZE>(params, ciphertext_reader)?;
-        let mut writer = &mut BufWriter::with_capacity(buf_size, plaintext_writer);
+        let mut writer = plaintext_writer;
         io::copy(&mut reader, &mut writer)?;
-        if let Some(residual) = reader.close(tag)? {
+        if let Some(residual) = reader.finalize(tag)? {
             writer.write_all(&residual)?;
         }
         Ok(())
@@ -529,6 +569,50 @@ where
     ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
     where
         Self: 'a,
+    {
+        let decryptor = <Self as Scheme>::new_decryptor(params).map_err(|e| e.into())?;
+
+        Ok(DecryptingReader::new(
+            decryptor,
+            ciphertext_reader,
+            BUF_SIZE,
+        ))
+    }
+
+    async fn decrypt_async_readwrite_with_buf_size<
+        'a,
+        I: AsyncRead + Unpin,
+        O: AsyncWrite + Unpin,
+        const BUF_SIZE: usize,
+    >(
+        params: Self::DecryptionParams<'a>,
+        ciphertext_reader: &'a mut I,
+        plaintext_writer: &'a mut O,
+        tag: &<Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
+    ) -> Result<(), Error>
+    where
+        Self: Unpin + 'a,
+        for<'b> Self: 'b,
+        for<'b> Self::Decryptor<'b>: Send + Unpin,
+    {
+        let mut reader =
+            Self::decrypting_async_reader_with_buf_size::<I, BUF_SIZE>(params, ciphertext_reader)?;
+        let mut writer = plaintext_writer;
+        futures_lite::io::copy(&mut reader, &mut writer).await?;
+        if let Some(residual) = reader.finalize(tag)? {
+            writer.write_all(&residual).await?;
+        }
+        Ok(())
+    }
+
+    fn decrypting_async_reader_with_buf_size<'a, I: AsyncRead + Unpin, const BUF_SIZE: usize>(
+        params: Self::DecryptionParams<'a>,
+        ciphertext_reader: &'a mut I,
+    ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
+    where
+        Self: 'a,
+        Self: Unpin,
+        Self::Decryptor<'a>: Unpin,
     {
         let decryptor = <Self as Scheme>::new_decryptor(params).map_err(|e| e.into())?;
 

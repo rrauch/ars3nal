@@ -16,6 +16,7 @@ pub mod tx;
 
 pub mod base64;
 pub mod blob;
+pub mod buffer;
 mod chunking;
 pub mod confidential;
 pub mod crypto;
@@ -27,14 +28,6 @@ pub mod network;
 pub mod typed;
 mod validation;
 pub mod wallet;
-//pub struct DriveKind;
-//pub type DriveId = id::TypedUuid<DriveKind>;
-
-//pub struct FolderKind;
-//pub type FolderId = id::TypedUuid<FolderKind>;
-
-//pub struct FileKind;
-//pub type FileId = id::TypedUuid<FileKind>;
 
 pub struct AddressKind<T>(PhantomData<T>);
 pub type Address<T> = TypedDigest<AddressKind<T>, Sha256>;

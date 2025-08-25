@@ -160,6 +160,7 @@ dependencies = [
  "bon",
  "bytemuck",
  "bytes",
+ "circular-buffer",
  "ct-codecs",
  "ctr",
  "derive-where",
@@ -173,6 +174,7 @@ dependencies = [
  "hkdf",
  "hybrid-array",
  "k256 0.14.0-pre.9",
+ "maybe-async",
  "maybe-owned",
  "rand",
  "rand_chacha",
@@ -501,6 +503,12 @@ dependencies = [
  "inout",
  "zeroize",
 ]
+
+[[package]]
+name = "circular-buffer"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23bdce1da528cadbac4654b5632bfcd8c6c63e25b1d42cea919a95958790b51d"
 
 [[package]]
 name = "const-oid"
@@ -1882,6 +1890,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8263075bb86c5a1b1427b5ae862e8889656f126e9f77c484496e8b47cf5c5558"
 dependencies = [
  "regex-automata 0.1.10",
+]
+
+[[package]]
+name = "maybe-async"
+version = "0.2.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cf92c10c7e361d6b99666ec1c6f9805b0bea2c3bd8c78dc6fe98ac5bd78db11"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
 ]
 
 [[package]]

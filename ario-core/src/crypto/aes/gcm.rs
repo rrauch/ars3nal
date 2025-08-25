@@ -1,7 +1,11 @@
+use crate::buffer::{BufError, BufExt, BufMutExt, CircularBuffer, StackCircularBuffer};
 use crate::confidential::RevealExt;
 use crate::crypto::aes::{Aes, AesCipher, AesKey};
 use crate::crypto::encryption;
-use crate::crypto::encryption::{BufExt, BufMutExt, Decryptor, Encryptor, Scheme};
+use crate::crypto::encryption::hazmat::{
+    FinalizeDecryptionWithoutAuthentication, SeekableDecryptor,
+};
+use crate::crypto::encryption::{Decryptor, Encryptor, Scheme};
 use aes::cipher::typenum::U16;
 use aes::cipher::{
     BlockCipherEncrypt, InOutBuf, InnerIvInit, KeyInit, StreamCipherCore, crypto_common,
@@ -16,7 +20,6 @@ use hybrid_array::{Array, ArraySize};
 use maybe_owned::MaybeOwned;
 use std::borrow::Cow;
 use std::cmp::min;
-use std::io::Cursor;
 use std::marker::PhantomData;
 use thiserror::Error;
 use zeroize::Zeroize;
@@ -119,7 +122,7 @@ where
         }
 
         self.ctr.set_block_pos(
-            <Ctr<BIT> as StreamCipherSeekCore>::Counter::try_from(pos / block_size)
+            <Ctr<BIT> as StreamCipherSeekCore>::Counter::try_from((pos / block_size) + 1) // payload starts at counter 1
                 .map_err(|_| Error::InvalidSeekPosition(pos))?,
         );
 
@@ -221,14 +224,6 @@ where
                 return Err(Error::PlaintextTooLong);
             }
 
-            if input.len() > output.len() {
-                // we couldn't process the final input
-                // due to insufficient output buffer capacity
-                return Err(Error::InsufficientOutputBufferCapacity {
-                    additional_required: input.len() - output.len(),
-                });
-            }
-
             let len = input.len();
             let mut buf = InOutBuf::new(input, output).unwrap();
             self.ctr.apply_keystream_partial(buf.reborrow());
@@ -289,11 +284,7 @@ mod private {
 #[derive(Error, Debug)]
 pub enum Error {
     #[error(transparent)]
-    BufError(#[from] encryption::BufError),
-    #[error(
-        "insufficient output buffer capacity, additional bytes required: '{additional_required}'"
-    )]
-    InsufficientOutputBufferCapacity { additional_required: usize },
+    BufError(#[from] BufError),
     #[error("associated data exceeds maximum length")]
     AssociatedDataTooLong,
     #[error("ciphertext exceeds maximum allowed length")]
@@ -444,14 +435,15 @@ where
     }
 
     fn finalize(self) -> Result<(Self::AuthenticationTag, Option<Vec<u8>>), Self::Error> {
-        Ok(self
-            .block_fragment
-            .process_finalize(|plaintext, ciphertext| {
+        Ok(process_finalize(
+            self.block_fragment,
+            |plaintext, ciphertext| {
                 let tag = self
                     .aes_gcm
                     .process_finalize(plaintext, ciphertext, Op::Enc)?;
                 Ok(tag)
-            })?)
+            },
+        )?)
     }
 }
 
@@ -476,6 +468,29 @@ where
 {
     fn block_size() -> usize {
         <Aes<BIT> as AesCipher>::Cipher::block_size()
+    }
+
+    fn finalize_maybe_authenticated(
+        self,
+        tag: Option<&Tag<TagSize>>,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        use subtle::ConstantTimeEq;
+
+        process_finalize(self.block_fragment, |ciphertext, plaintext| {
+            let generated_tag = self
+                .aes_gcm
+                .process_finalize(ciphertext, plaintext, Op::Dec)?;
+            if let Some(tag) = tag {
+                if tag.0.ct_eq(&generated_tag.0).into() {
+                    Ok(())
+                } else {
+                    Err(Error::DecryptionError)
+                }
+            } else {
+                Ok(())
+            }
+        })
+        .map(|(_, residual)| residual)
     }
 }
 
@@ -512,21 +527,40 @@ where
     }
 
     fn finalize(self, tag: &Self::AuthenticationTag) -> Result<Option<Vec<u8>>, Self::Error> {
-        use subtle::ConstantTimeEq;
+        self.finalize_maybe_authenticated(Some(tag))
+    }
+}
 
-        self.block_fragment
-            .process_finalize(|ciphertext, plaintext| {
-                let generated_tag =
-                    self.aes_gcm
-                        .process_finalize(ciphertext, plaintext, Op::Dec)?;
+impl<'a, const BIT: usize, TagSize, NonceSize> FinalizeDecryptionWithoutAuthentication<'a>
+    for AesGcmDecryptor<'a, BIT, TagSize, NonceSize>
+where
+    TagSize: ValidTagSize,
+    NonceSize: ArraySize,
+    Aes<BIT>: AesCipher,
+    <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
+{
+    fn finalize_unauthenticated(self) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.finalize_maybe_authenticated(None)
+    }
+}
 
-                if tag.0.ct_eq(&generated_tag.0).into() {
-                    Ok(())
-                } else {
-                    Err(Error::DecryptionError)
-                }
-            })
-            .map(|(_, residual)| residual)
+impl<'a, const BIT: usize, TagSize, NonceSize> SeekableDecryptor<'a>
+    for AesGcmDecryptor<'a, BIT, TagSize, NonceSize>
+where
+    TagSize: ValidTagSize,
+    NonceSize: ArraySize,
+    Aes<BIT>: AesCipher,
+    <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
+{
+    fn seek(&mut self, position: u64) -> Result<(), Self::Error> {
+        let current_pos = self.aes_gcm.pos;
+        if position == current_pos {
+            return Ok(());
+        }
+
+        self.aes_gcm.seek(position)?;
+        self.block_fragment.clear();
+        Ok(())
     }
 }
 
@@ -535,8 +569,8 @@ where
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
-    buf: Cursor<Block<BIT>>,
-    out_buf: Block<BIT>,
+    in_buf: CircularBuffer<Block<BIT>>,
+    out_buf: CircularBuffer<Block<BIT>>,
 }
 
 impl<const BIT: usize> BlockFragment<BIT>
@@ -546,15 +580,21 @@ where
 {
     fn new() -> Self {
         Self {
-            buf: Cursor::new(Block::default()),
-            out_buf: Block::default(),
+            in_buf: StackCircularBuffer::new(),
+            out_buf: StackCircularBuffer::new(),
         }
+    }
+
+    fn clear(&mut self) {
+        self.in_buf.reset();
+        self.out_buf.reset();
     }
 
     fn block_size() -> usize {
         <Aes<BIT> as AesCipher>::Cipher::block_size()
     }
 
+    /*
     /// Handles buffering of incomplete blocks
     ///
     /// Returns `true` if a full block is ready for further processing
@@ -593,8 +633,9 @@ where
 
             return Ok(false);
         }
-    }
+    }*/
 
+    /*
     /// Processes the buffered block with the provided Fn.
     ///
     /// Marks current buffered block as handled on success.
@@ -606,7 +647,7 @@ where
     where
         Aes<BIT>: AesCipher,
     {
-        assert!(!self.buf.has_remaining());
+        assert!(!self.in_buf.has_remaining());
         let block_size = Self::block_size();
         let output_capacity = output.remaining_mut();
         if output_capacity < block_size {
@@ -615,25 +656,28 @@ where
             });
         }
 
-        let block = self.buf.get_ref();
+        let block = self.in_buf.get_ref();
 
         if output.chunk_mut().len() >= block_size {
             // enough space remaining in output chunk
-            let out = output.chunk_mut_slice(block_size)?;
+
+            // SAFETY: used solely for writing initialized bytes
+            let out = unsafe { output.chunk_mut_slice_unsafe() };
+
             handler(block, out)?;
         } else {
             // use temporary buffer
             let out = self.out_buf.as_mut_slice();
             handler(block, out)?;
-            output.copy_from_slice(&out)?;
+            output.copy_all_from_slice(&out)?;
         }
 
         // mark processed
-        self.buf.set_position(0);
+        self.in_buf.set_position(0);
         Ok(block_size)
-    }
+    }*/
 
-    fn process_finalize<T>(
+    /*fn process_finalize<T>(
         self,
         handler: impl FnOnce(&[u8], &mut [u8]) -> Result<T, Error>,
     ) -> Result<(T, Option<Vec<u8>>), Error> {
@@ -650,15 +694,15 @@ where
         let out = if out.is_empty() { None } else { Some(out) };
 
         Ok((t, out))
-    }
+    }*/
 
-    fn filled_buf_as_slice(&self) -> &[u8] {
-        &self.buf.get_ref().as_slice()[..(self.buf.position() as usize)]
+    /*fn filled_buf_as_slice(&self) -> &[u8] {
+        &self.in_buf.get_ref().as_slice()[..(self.in_buf.position() as usize)]
     }
 
     fn fill_buf<I: Buf>(&mut self, input: &mut I) -> usize {
-        let remaining = self.buf.remaining();
-        let pos = self.buf.position();
+        let remaining = self.in_buf.remaining();
+        let pos = self.in_buf.position();
         let len = min(remaining, input.chunk().len());
         if len == 0 {
             // insufficient input
@@ -666,11 +710,11 @@ where
         }
         let start = pos as usize;
         let end = start + len;
-        let out = &mut self.buf.get_mut()[start..end];
+        let out = &mut self.in_buf.get_mut()[start..end];
         input.copy_to_slice(out);
-        self.buf.advance(len);
+        self.in_buf.advance(len);
         len
-    }
+    }*/
 }
 
 fn process<I: Buf, O: BufMut, const BIT: usize, TagSize, NonceSize>(
@@ -680,21 +724,120 @@ fn process<I: Buf, O: BufMut, const BIT: usize, TagSize, NonceSize>(
     block_fragment: &mut BlockFragment<BIT>,
     aes_gcm: &mut AesGcm<BIT, TagSize, NonceSize>,
     op: Op,
-) -> Result<u64, Error>
+) -> Result<(), Error>
 where
     TagSize: ValidTagSize,
     NonceSize: ArraySize,
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
-    let mut bytes_processed = 0;
+    assert!(input.has_remaining() || output.has_remaining_mut());
+
+    loop {
+        // make sure we don't get stuck
+        if !input.has_remaining() && !output.has_remaining_mut() {
+            return Ok(());
+        }
+
+        // deal with partials & unflushed buffers first
+
+        // 1. return any remaining bytes in the output buffer first
+        if !block_fragment.out_buf.is_empty() {
+            output.transfer_from_buf(&mut block_fragment.out_buf);
+            return Ok(());
+        }
+
+        // 2. fill partial block if there is one
+        if !block_fragment.in_buf.is_empty() {
+            block_fragment.in_buf.transfer_from_buf(input);
+        }
+
+        // 3. if partial block is full, process now
+        if block_fragment.in_buf.is_full() {
+            debug_assert!(block_fragment.out_buf.is_empty());
+            // buffered block ready to be processed
+            let n = aes_gcm.process_incremental(
+                block_fragment.in_buf.chunk(),
+                unsafe { block_fragment.out_buf.chunk_mut_slice_unsafe() },
+                op,
+            )? as usize;
+
+            block_fragment.in_buf.advance(n);
+            unsafe { block_fragment.out_buf.advance_mut(n) };
+            continue;
+        }
+
+        // 4. handle input chunk that is < block_size
+        let chunk = input.chunk();
+        if chunk.has_remaining() && chunk.remaining() < block_size {
+            block_fragment
+                .in_buf
+                .transfer_exact_from_buf(input, chunk.len())
+                .map_err(|_| BufError::Other)?;
+            continue;
+        }
+
+        // 5. handle output that is < block_size
+        if output.chunk_mut().len() < block_size {
+            // attempt to fill in_buf
+            let len = min(block_fragment.in_buf.remaining_mut(), input.remaining());
+            block_fragment
+                .in_buf
+                .transfer_from_buf(&mut input.limit_buf(len));
+            if block_fragment.in_buf.is_full() {
+                // managed to fill a block
+                continue;
+            }
+            // unable to fill a full block
+            // cannot produce any output at this time
+            return Ok(());
+        }
+
+        // main processing section
+
+        let input_chunk = input.chunk();
+        // SAFETY: used solely for writing initialized bytes
+        let output_chunk = unsafe { output.chunk_mut_slice_unsafe() };
+
+        let num_bytes_processable = min(input_chunk.len(), output_chunk.len());
+        if num_bytes_processable == 0 {
+            // processed everything we can
+            return Ok(());
+        }
+        assert!(num_bytes_processable >= block_size);
+
+        // align to block size
+        let num_bytes_processable = num_bytes_processable / block_size * block_size;
+
+        let n = aes_gcm.process_incremental(
+            &input_chunk[..num_bytes_processable],
+            &mut output_chunk[..num_bytes_processable],
+            op,
+        )? as usize;
+
+        input.advance(n);
+        unsafe { output.advance_mut(n) };
+    }
+    /*
+    // main processing
+    let num_bytes_processable = min(input.remaining(), output.remaining_mut());
+    if num_bytes_processable == 0 {
+        return Ok(());
+    }
+    assert!(num_bytes_processable >= block_size);
+
+    // align to block size
+    let num_bytes_processable = num_bytes_processable / block_size * block_size;
+
+    //Ok(self.buf.is_full())
+
     loop {
         if block_fragment.maybe_buffer(input)? {
             // buffered block ready to be processed
-            bytes_processed += block_fragment.process(output, |input, output| {
+            block_fragment.process(output, |input, output| {
                 aes_gcm.process_incremental(input, output, op)?;
                 Ok(())
-            })? as u64;
+            })?;
         }
 
         // max number of bytes we can process in this iteration
@@ -703,7 +846,7 @@ where
 
         let num_bytes_processable = min(input_len, output_len);
         if num_bytes_processable == 0 {
-            return Ok(bytes_processed);
+            return Ok(());
         }
 
         if num_bytes_processable < block_size {
@@ -715,15 +858,53 @@ where
         let num_bytes_processable = num_bytes_processable / block_size * block_size;
 
         let input_slice = input.chunk_slice(num_bytes_processable)?;
-        let output_slice = output.chunk_mut_slice(num_bytes_processable)?;
 
-        bytes_processed += aes_gcm.process_incremental(input_slice, output_slice, op)?;
+        // SAFETY: used solely for writing initialized bytes
+        let output_slice = unsafe { &mut output.chunk_mut_slice_unsafe()[..num_bytes_processable] };
+
+        aes_gcm.process_incremental(input_slice, output_slice, op)?;
 
         input.advance(num_bytes_processable);
         unsafe {
             output.advance_mut(num_bytes_processable);
         }
-    }
+    }*/
+}
+
+fn process_finalize<T, const BIT: usize>(
+    mut block_fragment: BlockFragment<BIT>,
+    handler: impl FnOnce(&[u8], &mut [u8]) -> Result<T, Error>,
+) -> Result<(T, Option<Vec<u8>>), Error>
+where
+    Aes<BIT>: AesCipher,
+    <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
+{
+    let residual_len = block_fragment.in_buf.remaining() + block_fragment.out_buf.remaining();
+    let mut out = Vec::with_capacity(residual_len);
+
+    out.transfer_from_buf(&mut block_fragment.out_buf);
+
+    let input = if block_fragment.in_buf.has_remaining() {
+        Cow::Borrowed(block_fragment.in_buf.make_contiguous())
+    } else {
+        Cow::Owned(vec![])
+    };
+
+    let out_buf = if out.capacity() != out.len() {
+        // SAFETY: used solely for writing initialized bytes
+        unsafe { out.chunk_mut_slice_unsafe() }
+    } else {
+        &mut []
+    };
+
+    let t = handler(input.as_ref(), out_buf)?;
+
+    let len = out_buf.len();
+    unsafe { out.advance_mut(len) }
+
+    let out = if out.is_empty() { None } else { Some(out) };
+
+    Ok((t, out))
 }
 
 #[cfg(test)]
@@ -735,7 +916,7 @@ mod tests {
     use aes::cipher::consts::U12;
     use bytes::BytesMut;
     use hex_literal::hex;
-    use std::io::Cursor;
+    use std::io::{Cursor, Read, Seek, SeekFrom};
 
     static ONE_MB: &'static [u8] = include_bytes!("../../../testdata/1mb.bin");
 
@@ -753,16 +934,12 @@ mod tests {
     include!("../../../testdata/aes_gcm_256_nist.tests");
 
     /*const TEST_VECTORS: &[TestVector<[u8; 32], [u8; 12]>] = &[TestVector {
-        key: &hex!("1fded32d5999de4a76e0f8082108823aef60417e1896cf4218a2fa90f632ec8a"),
-        nonce: &hex!("1f3afa4711e9474f32e70462"),
-        plaintext: &hex!(
-            "06b2c75853df9aeb17befd33cea81c630b0fc53667ff45199c629c8e15dce41e530aa792f796b8138eeab2e86c7b7bee1d40b0"
-        ),
+        key: &hex!("82c4f12eeec3b2d3d157b0f992d292b237478d2cecc1d5f161389b97f999057a"),
+        nonce: &hex!("7b40b20f5f397177990ef2d1"),
+        plaintext: &hex!("982a296ee1cd7086afad976945"),
         aad: b"",
-        ciphertext: &hex!(
-            "91fbd061ddc5a7fcc9513fcdfdc9c3a7c5d4d64cedf6a9c24ab8a77c36eefbf1c5dc00bc50121b96456c8cd8b6ff1f8b3e480f"
-        ),
-        tag: &hex!("30096d340f3d5c42d82a6f475def23eb"),
+        ciphertext: &hex!("ec8e05a0471d6b43a59ca5335f"),
+        tag: &hex!("113ddeafc62373cac2f5951bb9165249"),
     }];*/
 
     fn to_params(test: &TestVector<[u8; 32], [u8; 12]>) -> AesGcmParams<'_, 256, U12> {
@@ -782,7 +959,7 @@ mod tests {
             let ciphertext = output.freeze();
             assert_eq!(ciphertext.to_vec().as_slice(), test.ciphertext);
             assert_eq!(tag.0.as_slice(), test.tag.as_slice());
-            //println!("{}", hex::encode(test.key.as_slice()));
+            println!("{}", hex::encode(test.key.as_slice()));
         }
         Ok(())
     }
@@ -805,7 +982,73 @@ mod tests {
     #[test]
     fn readwrite_roundtrip() -> anyhow::Result<()> {
         let mut plaintext_reader = Cursor::new(ONE_MB);
-        let mut ciphertext = vec![0u8; ONE_MB.len()];
+        let mut ciphertext = Vec::with_capacity(ONE_MB.len());
+        let key = AesKey::try_from_bytes(hex!(
+            "1fded32d5999de4a76e0f8082108823aef60417e1896cf4218a2fa90f632ec8a"
+        ))
+        .unwrap();
+        let nonce: Nonce<U12> = hex!("1f3afa4711e9474f32e70462").try_into()?;
+        let expected_tag = Tag::try_from_bytes(hex!("67acceefeca1304b26a248dbead3ac36")).unwrap();
+        let params = AesGcmParams::new(key, nonce, b"");
+        let mut output = Cursor::new(&mut ciphertext);
+
+        let tag =
+            DefaultAesGcm::encrypt_readwrite(params.clone(), &mut plaintext_reader, &mut output)?;
+
+        assert_eq!(&tag, &expected_tag);
+
+        let mut ciphertext_reader = Cursor::new(ciphertext);
+
+        let mut plaintext = Vec::with_capacity(ONE_MB.len());
+        let mut output = Cursor::new(&mut plaintext);
+
+        DefaultAesGcm::decrypt_readwrite(params, &mut ciphertext_reader, &mut output, &tag)?;
+
+        assert_eq!(&plaintext, ONE_MB);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readwrite_async_roundtrip() -> anyhow::Result<()> {
+        let mut plaintext_reader = futures_lite::io::Cursor::new(ONE_MB);
+        let mut ciphertext = Vec::with_capacity(ONE_MB.len());
+        let key = AesKey::try_from_bytes(hex!(
+            "1fded32d5999de4a76e0f8082108823aef60417e1896cf4218a2fa90f632ec8a"
+        ))
+        .unwrap();
+        let nonce: Nonce<U12> = hex!("1f3afa4711e9474f32e70462").try_into()?;
+        let expected_tag = Tag::try_from_bytes(hex!("67acceefeca1304b26a248dbead3ac36")).unwrap();
+        let params = AesGcmParams::new(key, nonce, b"");
+        let mut output = futures_lite::io::Cursor::new(&mut ciphertext);
+
+        let tag = DefaultAesGcm::encrypt_async_readwrite(
+            params.clone(),
+            &mut plaintext_reader,
+            &mut output,
+        )
+        .await?;
+
+        assert_eq!(&tag, &expected_tag);
+
+        let mut ciphertext_reader = futures_lite::io::Cursor::new(ciphertext);
+
+        let mut plaintext = Vec::with_capacity(ONE_MB.len());
+        let mut output = futures_lite::io::Cursor::new(&mut plaintext);
+
+        DefaultAesGcm::decrypt_async_readwrite(params, &mut ciphertext_reader, &mut output, &tag)
+            .await?;
+
+        assert_eq!(&plaintext, ONE_MB);
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn seek() -> anyhow::Result<()> {
+        let mut plaintext_reader = Cursor::new(ONE_MB);
+        let mut ciphertext = Vec::with_capacity(ONE_MB.len());
         let key = AesKey::try_from_bytes(hex!(
             "1fded32d5999de4a76e0f8082108823aef60417e1896cf4218a2fa90f632ec8a"
         ))
@@ -819,13 +1062,32 @@ mod tests {
 
         let mut ciphertext_reader = Cursor::new(ciphertext);
 
-        let mut plaintext = vec![0u8; ONE_MB.len()];
-        let mut output = Cursor::new(&mut plaintext);
+        let mut decrypting_reader =
+            DefaultAesGcm::decrypting_reader(params, &mut ciphertext_reader)?;
 
-        DefaultAesGcm::decrypt_readwrite(params, &mut ciphertext_reader, &mut output, &tag)?;
+        fn seek_test<R: Read + Seek>(
+            reader: &mut R,
+            buffer: &mut [u8],
+            pos: usize,
+        ) -> anyhow::Result<()> {
+            reader.seek(SeekFrom::Start(pos as u64))?;
+            reader.read_exact(buffer)?;
+            assert_eq!(buffer, &ONE_MB[pos..pos + buffer.len()]);
+            Ok(())
+        }
 
-        assert_eq!(&plaintext, ONE_MB);
+        let len = 4096;
+        let mut buffer = vec![0u8; len];
 
+        //seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 0)?;
+        //seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 4096)?;
+        seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 25631)?;
+        //seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 8192)?;
+        //seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 55112)?;
+        //seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 256256)?;
+        //seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 1000000)?;
+
+        decrypting_reader.finalize_unauthenticated()?;
         Ok(())
     }
 }
