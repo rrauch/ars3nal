@@ -62,20 +62,23 @@ impl<'a, D: Decryptor<'a>> DecryptingCore<'a, D> {
             .ok_or(Error::new(ErrorKind::Other, "reader already closed"))?;
 
         if self.buf.remaining() > 0 {
-            let mut content = vec![0u8; self.buf.remaining()];
-            let mut output = content.as_mut_slice();
-            let out_len_start = output.len();
+            let mut content = Vec::with_capacity(self.buf.remaining());
 
-            decryptor
-                .update(&mut self.buf, &mut output)
-                .map_err(|e| Error::other(e.into()))?;
+            loop {
+                let len_start = content.len();
+                decryptor
+                    .update(&mut self.buf, &mut content)
+                    .map_err(|e| Error::other(e.into()))?;
+                let bytes_produced = content.len() - len_start;
+                if bytes_produced == 0 {
+                    break;
+                }
+            }
 
             if self.buf.has_remaining() {
                 return Err(Error::new(ErrorKind::Other, "unprocessed input remains"));
             }
 
-            let bytes_produced = out_len_start - output.len();
-            content.truncate(bytes_produced);
             Ok(Some(content))
         } else {
             Ok(None)
@@ -433,19 +436,22 @@ where
                         this.async_state = SeekState::Seeking(block_pos, offset).into()
                     )?;
                     let pos = block_pos + offset as u64;
-                    if offset == 0 {
-                        // all done
-                        this.async_state = AsyncState::None;
-                        return Poll::Ready(Ok(pos));
-                    }
 
                     this.core
                         .borrow_decryptor()?
                         .seek(block_pos)
                         .map_err(|e| Error::other(e.into()))?;
 
-                    this.async_state =
-                        AsyncState::Seeking(SeekState::Discard(HeapCircularBuffer::new(offset), pos));
+                    if offset == 0 {
+                        // all done
+                        this.async_state = AsyncState::None;
+                        return Poll::Ready(Ok(pos));
+                    }
+
+                    this.async_state = AsyncState::Seeking(SeekState::Discard(
+                        HeapCircularBuffer::new(offset),
+                        pos,
+                    ));
                     continue;
                 }
                 AsyncState::Seeking(SeekState::Discard(mut discard, pos)) => {
