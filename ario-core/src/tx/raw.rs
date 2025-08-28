@@ -3,7 +3,9 @@ use crate::blob::Blob;
 use crate::crypto::hash::HashableExt;
 use crate::crypto::hash::Sha256;
 use crate::json::JsonSource;
+use crate::tag::{Tag, TagName, TagValue};
 use crate::tx::{Format, SignatureType};
+use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, Validator};
 use crate::{JsonError, JsonValue};
 use bigdecimal::{BigDecimal, Zero};
@@ -110,6 +112,24 @@ pub(super) struct RawTag<'a> {
 impl<'a> RawTag<'a> {
     fn byte_len(&self) -> usize {
         self.name.len() + self.value.len()
+    }
+}
+
+impl<'a> From<RawTag<'a>> for Tag<'a> {
+    fn from(raw: RawTag<'a>) -> Self {
+        Self {
+            name: TagName::from_inner(raw.name),
+            value: TagValue::from_inner(raw.value),
+        }
+    }
+}
+
+impl<'a> From<Tag<'a>> for RawTag<'a> {
+    fn from(value: Tag<'a>) -> Self {
+        Self {
+            name: value.name.into_inner(),
+            value: value.value.into_inner(),
+        }
     }
 }
 

@@ -2,12 +2,13 @@ use crate::blob::AsBlob;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha384};
 use crate::json::JsonSource;
+use crate::tag::Tag;
 use crate::tx::CommonTxDataError::MissingOwner;
-use crate::tx::raw::{RawTxData, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::pss::PssSignatureData;
+use crate::tx::raw::{RawTxData, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::{
     CommonData, CommonTxDataError, EmbeddedData, Format, LastTx, Quantity, Reward, SignatureType,
-    Tag, TxDeepHash, TxError, TxHash, TxId, TxShallowHash,
+    TxDeepHash, TxError, TxHash, TxId, TxShallowHash,
 };
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};

@@ -9,6 +9,7 @@ use crate::crypto::signature;
 use crate::crypto::signature::SigningError;
 use crate::json::JsonSource;
 use crate::money::{Money, MoneyError, Winston};
+use crate::tag::Tag;
 use crate::tx::CommonTxDataError::MissingOwner;
 use crate::tx::Format::V2;
 use crate::tx::ecdsa::EcdsaSignatureData;
@@ -16,7 +17,7 @@ use crate::tx::pss::PssSignatureData;
 use crate::tx::raw::{RawTx, RawTxData, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::{
     CommonData, CommonTxDataError, ExternalData, Format, Owner, Quantity, Reward, Signature,
-    SignatureType, Tag, TxAnchor, TxDeepHash, TxError, TxHash, TxId, TxSignature,
+    SignatureType, TxAnchor, TxDeepHash, TxError, TxHash, TxId, TxSignature,
 };
 use crate::tx::{RewardError, Transfer};
 use crate::typed::FromInner;

@@ -25,6 +25,7 @@ mod json;
 pub mod jwk;
 pub mod money;
 pub mod network;
+pub mod tag;
 pub mod typed;
 mod validation;
 pub mod wallet;

@@ -1,5 +1,5 @@
 use ario_core::blob::Blob;
-use ario_core::tx::{Tag, TagName, TagValue};
+use ario_core::tag::{Tag, TagName, TagValue};
 use serde::de::{Error as DeError, IntoDeserializer};
 use serde::ser::Error as SerError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
