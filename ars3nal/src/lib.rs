@@ -1,4 +1,4 @@
-use ario_core::*;
+use ario_core::tx::TxId;
 use std::str::FromStr;
 
 pub fn foo() {

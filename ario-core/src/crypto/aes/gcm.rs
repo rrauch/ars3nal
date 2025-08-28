@@ -1,25 +1,21 @@
-use crate::buffer::{BufError, BufExt, BufMutExt, CircularBuffer, StackCircularBuffer};
+use crate::buffer::BufError;
 use crate::confidential::RevealExt;
-use crate::crypto::aes::{Aes, AesCipher, AesKey};
-use crate::crypto::encryption;
+use crate::crypto::aes::ctr::AesCtrCore;
+use crate::crypto::aes::{Aes, AesCipher, AesKey, Block, BlockFragment, Nonce, Op};
 use crate::crypto::encryption::hazmat::{
     FinalizeDecryptionWithoutAuthentication, SeekableDecryptor,
 };
 use crate::crypto::encryption::{Decryptor, Encryptor, Scheme};
 use aes::cipher::typenum::U16;
-use aes::cipher::{
-    BlockCipherEncrypt, InOutBuf, InnerIvInit, KeyInit, StreamCipherCore, crypto_common,
-};
+use aes::cipher::{BlockCipherEncrypt, InnerIvInit, KeyInit, StreamCipherCore, crypto_common};
 use bytes::{Buf, BufMut};
 use crypto_common::BlockSizeUser;
-use ctr::cipher::StreamCipherSeekCore;
 use ghash::GHash;
 use ghash::universal_hash::UniversalHash;
 use hybrid_array::typenum::U12;
 use hybrid_array::{Array, ArraySize};
 use maybe_owned::MaybeOwned;
 use std::borrow::Cow;
-use std::cmp::min;
 use std::marker::PhantomData;
 use thiserror::Error;
 use zeroize::Zeroize;
@@ -33,6 +29,9 @@ const P_MAX: u64 = 1 << 36;
 /// Maximum length of ciphertext.
 const C_MAX: u64 = (1 << 36) + 16;
 
+type CtrFlavour = ctr::flavors::Ctr32BE;
+type Ctr<const BIT: usize> = super::ctr::CoreCtr<BIT, CtrFlavour>;
+
 pub type DefaultAesGcm<const BIT: usize> = AesGcm<BIT, U16, U12>;
 
 pub struct AesGcm<const BIT: usize, TagSize, NonceSize>
@@ -42,23 +41,16 @@ where
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
-    ctr: Ctr<BIT>,
+    core: AesCtrCore<BIT, CtrFlavour, NonceSize, P_MAX, C_MAX, 1>,
     ghash: GHash,
     mask: Block<BIT>,
     aad_len: u64,
-    pos: u64,
-    _marker: PhantomData<(TagSize, NonceSize)>,
+    _marker: PhantomData<TagSize>,
 }
 
 pub trait SupportedAesCiphers<const BIT: usize> {}
 
 impl SupportedAesCiphers<256> for aes::Aes256 {}
-
-type Ctr<const BIT: usize> = ctr::CtrCore<<Aes<BIT> as AesCipher>::Cipher, ctr::flavors::Ctr32BE>;
-type Block<const BIT: usize> =
-    Array<u8, <<Aes<BIT> as AesCipher>::Cipher as BlockSizeUser>::BlockSize>;
-
-pub type Nonce<NonceSize> = Array<u8, NonceSize>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -104,31 +96,25 @@ where
 
         ghash.update_padded(aad);
 
+        let core = AesCtrCore::new(ctr, 0);
+
         Ok(Self {
-            ctr,
+            core,
             mask,
             ghash,
             aad_len: aad.len() as u64,
-            pos: 0,
             _marker: PhantomData,
         })
     }
 
+    #[inline]
+    fn position(&self) -> u64 {
+        self.core.position()
+    }
+
+    #[inline]
     fn seek(&mut self, pos: u64) -> Result<(), Error> {
-        let block_size = <Aes<BIT> as AesCipher>::Cipher::block_size() as u64;
-
-        if pos % block_size != 0 {
-            return Err(Error::InvalidSeekPosition(pos));
-        }
-
-        self.ctr.set_block_pos(
-            <Ctr<BIT> as StreamCipherSeekCore>::Counter::try_from((pos / block_size) + 1) // payload starts at counter 1
-                .map_err(|_| Error::InvalidSeekPosition(pos))?,
-        );
-
-        self.pos = pos;
-
-        Ok(())
+        Ok(self.core.seek(pos)?)
     }
 
     /// Taken from https://github.com/RustCrypto/AEADs/blob/master/aes-gcm/src/lib.rs
@@ -169,75 +155,33 @@ where
         (ctr, tag_mask)
     }
 
-    fn process_incremental(
-        &mut self,
-        input: &[u8],
-        output: &mut [u8],
-        op: Op,
-    ) -> Result<u64, Error> {
-        assert_eq!(input.len(), output.len());
-
-        let len = input.len() as u64;
-        assert!(len > 0);
-
-        if self.pos + len > C_MAX {
-            return Err(Error::CiphertextTooLong);
-        }
-
-        if self.pos + len > P_MAX {
-            return Err(Error::PlaintextTooLong);
-        }
-
-        let (mut blocks, tail) = InOutBuf::new(input, output).unwrap().into_chunks();
-
-        if !tail.is_empty() {
-            panic!("input must be multiple of block size");
-        }
-
-        self.ctr.apply_keystream_blocks_inout(blocks.reborrow());
-        let buf = match op {
-            Op::Enc => blocks.get_out(),
-            Op::Dec => blocks.get_in(),
-        };
-        self.ghash.update(buf);
-
-        self.pos += len;
-
-        Ok(len)
+    #[inline]
+    fn update(&mut self, input: &[u8], output: &mut [u8], op: Op) -> Result<u64, Error> {
+        Ok(self.core.update(
+            input,
+            output,
+            |blocks| {
+                self.ghash.update(blocks);
+            },
+            op,
+        )?)
     }
 
-    fn process_finalize(
-        mut self,
-        input: &[u8],
-        output: &mut [u8],
-        op: Op,
-    ) -> Result<Tag<TagSize>, Error> {
-        assert_eq!(input.len(), output.len());
+    #[inline]
+    fn finalize(mut self, input: &[u8], output: &mut [u8], op: Op) -> Result<Tag<TagSize>, Error> {
+        let pos = self.core.finalize(
+            input,
+            output,
+            |buf| {
+                self.ghash.update_padded(buf);
+            },
+            op,
+        )?;
 
-        if !input.is_empty() {
-            let len = input.len();
-            if self.pos + len as u64 > C_MAX {
-                return Err(Error::CiphertextTooLong);
-            }
-
-            if self.pos + len as u64 > P_MAX {
-                return Err(Error::PlaintextTooLong);
-            }
-
-            let len = input.len();
-            let mut buf = InOutBuf::new(input, output).unwrap();
-            self.ctr.apply_keystream_partial(buf.reborrow());
-            let buf = match op {
-                Op::Enc => buf.get_out(),
-                Op::Dec => buf.get_in(),
-            };
-            self.ghash.update_padded(&buf[..len]);
-
-            self.pos += len as u64;
-        }
+        // generate tag
 
         let aad_len_bits = self.aad_len * 8;
-        let input_len_bits = self.pos * 8;
+        let input_len_bits = pos * 8;
 
         let mut block = Block::default();
         block[..8].copy_from_slice(&aad_len_bits.to_be_bytes());
@@ -256,12 +200,6 @@ where
 
         Ok(Tag(Array::try_from(tag_value).unwrap()))
     }
-}
-
-#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
-enum Op {
-    Enc,
-    Dec,
 }
 
 pub trait ValidTagSize: private::SealedTagSize {}
@@ -285,6 +223,8 @@ mod private {
 pub enum Error {
     #[error(transparent)]
     BufError(#[from] BufError),
+    #[error(transparent)]
+    CtrError(#[from] super::ctr::Error),
     #[error("associated data exceeds maximum length")]
     AssociatedDataTooLong,
     #[error("ciphertext exceeds maximum allowed length")]
@@ -297,9 +237,12 @@ pub enum Error {
     DecryptionError,
 }
 
-impl Into<encryption::Error> for Error {
-    fn into(self) -> encryption::Error {
-        encryption::Error::Other(self.to_string())
+impl From<Error> for super::ctr::Error {
+    fn from(value: Error) -> Self {
+        match value {
+            Error::CtrError(e) => e,
+            other => super::ctr::Error::Other(other.to_string()),
+        }
     }
 }
 
@@ -345,7 +288,7 @@ where
     type EncryptionParams<'a> = AesGcmParams<'a, BIT, NonceSize>;
     type Decryptor<'a> = AesGcmDecryptor<'a, BIT, TagSize, NonceSize>;
     type DecryptionParams<'a> = AesGcmParams<'a, BIT, NonceSize>;
-    type Error = Error;
+    type Error = super::ctr::Error;
 
     fn new_encryptor<'a>(
         params: Self::EncryptionParams<'a>,
@@ -390,18 +333,6 @@ where
     block_fragment: BlockFragment<BIT>,
 }
 
-impl<'a, const BIT: usize, TagSize, NonceSize> AesGcmEncryptor<'a, BIT, TagSize, NonceSize>
-where
-    TagSize: ValidTagSize,
-    NonceSize: ArraySize,
-    Aes<BIT>: AesCipher,
-    <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
-{
-    fn block_size() -> usize {
-        <Aes<BIT> as AesCipher>::Cipher::block_size()
-    }
-}
-
 impl<'a, const BIT: usize, TagSize, NonceSize> Encryptor<'a>
     for AesGcmEncryptor<'a, BIT, TagSize, NonceSize>
 where
@@ -410,12 +341,12 @@ where
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
-    type Error = Error;
+    type Error = super::ctr::Error;
     type AuthenticationTag = Tag<TagSize>;
     type Alignment = <<Aes<BIT> as AesCipher>::Cipher as BlockSizeUser>::BlockSize;
 
     fn position(&self) -> u64 {
-        self.aes_gcm.pos
+        self.aes_gcm.position()
     }
 
     fn update<I: Buf, O: BufMut>(
@@ -437,9 +368,7 @@ where
         Ok(process_finalize(
             self.block_fragment,
             |plaintext, ciphertext| {
-                let tag = self
-                    .aes_gcm
-                    .process_finalize(plaintext, ciphertext, Op::Enc)?;
+                let tag = self.aes_gcm.finalize(plaintext, ciphertext, Op::Enc)?;
                 Ok(tag)
             },
         )?)
@@ -465,10 +394,6 @@ where
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
-    fn block_size() -> usize {
-        <Aes<BIT> as AesCipher>::Cipher::block_size()
-    }
-
     fn finalize_maybe_authenticated(
         self,
         tag: Option<&Tag<TagSize>>,
@@ -476,9 +401,7 @@ where
         use subtle::ConstantTimeEq;
 
         process_finalize(self.block_fragment, |ciphertext, plaintext| {
-            let generated_tag = self
-                .aes_gcm
-                .process_finalize(ciphertext, plaintext, Op::Dec)?;
+            let generated_tag = self.aes_gcm.finalize(ciphertext, plaintext, Op::Dec)?;
             if let Some(tag) = tag {
                 if tag.0.ct_eq(&generated_tag.0).into() {
                     Ok(())
@@ -501,12 +424,12 @@ where
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
-    type Error = Error;
+    type Error = super::ctr::Error;
     type AuthenticationTag = Tag<TagSize>;
     type Alignment = <<Aes<BIT> as AesCipher>::Cipher as BlockSizeUser>::BlockSize;
 
     fn position(&self) -> u64 {
-        self.aes_gcm.pos
+        self.aes_gcm.position()
     }
 
     fn update<I: Buf, O: BufMut>(
@@ -525,7 +448,7 @@ where
     }
 
     fn finalize(self, tag: &Self::AuthenticationTag) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.finalize_maybe_authenticated(Some(tag))
+        Ok(self.finalize_maybe_authenticated(Some(tag))?)
     }
 }
 
@@ -538,7 +461,7 @@ where
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
     fn finalize_unauthenticated(self) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.finalize_maybe_authenticated(None)
+        Ok(self.finalize_maybe_authenticated(None)?)
     }
 }
 
@@ -551,7 +474,7 @@ where
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
     fn seek(&mut self, position: u64) -> Result<(), Self::Error> {
-        let current_pos = self.aes_gcm.pos;
+        let current_pos = self.aes_gcm.position();
         if position == current_pos {
             return Ok(());
         }
@@ -559,37 +482,6 @@ where
         self.aes_gcm.seek(position)?;
         self.block_fragment.clear();
         Ok(())
-    }
-}
-
-struct BlockFragment<const BIT: usize>
-where
-    Aes<BIT>: AesCipher,
-    <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
-{
-    in_buf: CircularBuffer<Block<BIT>>,
-    out_buf: CircularBuffer<Block<BIT>>,
-}
-
-impl<const BIT: usize> BlockFragment<BIT>
-where
-    Aes<BIT>: AesCipher,
-    <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
-{
-    fn new() -> Self {
-        Self {
-            in_buf: StackCircularBuffer::new(),
-            out_buf: StackCircularBuffer::new(),
-        }
-    }
-
-    fn clear(&mut self) {
-        self.in_buf.reset();
-        self.out_buf.reset();
-    }
-
-    fn block_size() -> usize {
-        <Aes<BIT> as AesCipher>::Cipher::block_size()
     }
 }
 
@@ -606,130 +498,23 @@ where
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
-    assert!(input.has_remaining() || output.has_remaining_mut());
-    let block_size = BlockFragment::<BIT>::block_size();
-
-    loop {
-        // make sure we don't get stuck
-        if !input.has_remaining() && !output.has_remaining_mut() {
-            return Ok(());
-        }
-
-        // deal with partials & unflushed buffers first
-
-        // 1. return any remaining bytes in the output buffer first
-        if !block_fragment.out_buf.is_empty() {
-            output.transfer_from_buf(&mut block_fragment.out_buf);
-            return Ok(());
-        }
-
-        // 2. fill partial block if there is one
-        if !block_fragment.in_buf.is_empty() {
-            block_fragment.in_buf.transfer_from_buf(input);
-        }
-
-        // 3. if partial block is full, process now
-        if block_fragment.in_buf.is_full() {
-            debug_assert!(block_fragment.out_buf.is_empty());
-            // buffered block ready to be processed
-            let n = aes_gcm.process_incremental(
-                block_fragment.in_buf.chunk(),
-                unsafe { block_fragment.out_buf.chunk_mut_slice_unsafe() },
-                op,
-            )? as usize;
-
-            block_fragment.in_buf.advance(n);
-            unsafe { block_fragment.out_buf.advance_mut(n) };
-            continue;
-        }
-
-        // 4. handle input chunk that is < block_size
-        let chunk = input.chunk();
-        if chunk.has_remaining() && chunk.remaining() < block_size {
-            block_fragment
-                .in_buf
-                .transfer_exact_from_buf(input, chunk.len())
-                .map_err(|_| BufError::Other)?;
-            continue;
-        }
-
-        // 5. handle output that is < block_size
-        if output.chunk_mut().len() < block_size {
-            // attempt to fill in_buf
-            let len = min(block_fragment.in_buf.remaining_mut(), input.remaining());
-            block_fragment
-                .in_buf
-                .transfer_from_buf(&mut input.limit_buf(len));
-            if block_fragment.in_buf.is_full() {
-                // managed to fill a block
-                continue;
-            }
-            // unable to fill a full block
-            // cannot produce any output at this time
-            return Ok(());
-        }
-
-        // main processing section
-
-        let input_chunk = input.chunk();
-        // SAFETY: used solely for writing initialized bytes
-        let output_chunk = unsafe { output.chunk_mut_slice_unsafe() };
-
-        let num_bytes_processable = min(input_chunk.len(), output_chunk.len());
-        if num_bytes_processable == 0 {
-            // processed everything we can
-            return Ok(());
-        }
-        assert!(num_bytes_processable >= block_size);
-
-        // align to block size
-        let num_bytes_processable = num_bytes_processable / block_size * block_size;
-
-        let n = aes_gcm.process_incremental(
-            &input_chunk[..num_bytes_processable],
-            &mut output_chunk[..num_bytes_processable],
-            op,
-        )? as usize;
-
-        input.advance(n);
-        unsafe { output.advance_mut(n) };
-    }
+    Ok(super::process(
+        input,
+        output,
+        block_fragment,
+        |input, output| aes_gcm.update(input, output, op).map(|n| n as usize),
+    )?)
 }
 
 fn process_finalize<T, const BIT: usize>(
-    mut block_fragment: BlockFragment<BIT>,
+    block_fragment: BlockFragment<BIT>,
     handler: impl FnOnce(&[u8], &mut [u8]) -> Result<T, Error>,
 ) -> Result<(T, Option<Vec<u8>>), Error>
 where
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
-    let residual_len = block_fragment.in_buf.remaining() + block_fragment.out_buf.remaining();
-    let mut out = Vec::with_capacity(residual_len);
-
-    out.transfer_from_buf(&mut block_fragment.out_buf);
-
-    let input = if block_fragment.in_buf.has_remaining() {
-        Cow::Borrowed(block_fragment.in_buf.make_contiguous())
-    } else {
-        Cow::Owned(vec![])
-    };
-
-    let out_buf = if out.capacity() != out.len() {
-        // SAFETY: used solely for writing initialized bytes
-        unsafe { out.chunk_mut_slice_unsafe() }
-    } else {
-        &mut []
-    };
-
-    let t = handler(input.as_ref(), out_buf)?;
-
-    let len = out_buf.len();
-    unsafe { out.advance_mut(len) }
-
-    let out = if out.is_empty() { None } else { Some(out) };
-
-    Ok((t, out))
+    Ok(super::process_finalize(block_fragment, handler)?)
 }
 
 #[cfg(test)]
