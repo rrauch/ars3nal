@@ -15,6 +15,7 @@ use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature::SignSigExt;
 use crate::crypto::signature::VerifySigExt;
 use crate::crypto::signature::{Scheme as SignatureScheme, SupportsSignatures};
+use crate::entity::{ArEntityHash, ArEntitySignature, ToSignPrehash};
 use crate::jwk::Jwk;
 use crate::tx::v2::TxDraft;
 use crate::tx::{TxError, TxHash, TxSignature, ValidatedTx};
@@ -210,12 +211,15 @@ impl<S: SignatureScheme, PK: WalletPublicKey<SigScheme = S>> WalletPk<PK>
 where
     for<'a> S: SignatureScheme<Message<'a> = &'a Sha256Hash>,
 {
-    pub(crate) fn verify_tx_hash(
+    pub(crate) fn verify_entity_hash<T: ArEntityHash>(
         &self,
-        tx_hash: &TxHash,
-        sig: &TxSignature<S>,
-    ) -> Result<(), String> {
-        let prehash = tx_hash.to_sign_prehash();
+        hash: &T,
+        sig: &ArEntitySignature<T, S>,
+    ) -> Result<(), String>
+    where
+        T: ToSignPrehash<Hasher = Sha256>,
+    {
+        let prehash = hash.to_sign_prehash();
         self.verify_sig(&prehash, sig)
             .map_err(|e| e.into().to_string())
     }

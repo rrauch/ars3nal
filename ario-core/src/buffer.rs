@@ -1,6 +1,6 @@
 use bytes::buf::UninitSlice;
 use bytes::{Buf, BufMut};
-use futures_lite::{AsyncRead, AsyncWrite, ready};
+use futures_lite::{AsyncRead, AsyncReadExt, AsyncWrite, ready};
 use hybrid_array::ArraySize;
 use std::cmp::min;
 use std::io::{Cursor, ErrorKind, Read, Write};
@@ -65,7 +65,7 @@ impl<'a, W: AsyncWrite + 'a + Unpin, B: Buf + Unpin> Future for WriteBufFut<'a, 
     }
 }
 
-pub struct LimitedBuf<'a, B: Buf + ?Sized> {
+pub struct LimitedBuf<'a, B: ?Sized> {
     buf: &'a mut B,
     remaining: usize,
 }
@@ -74,6 +74,15 @@ impl<'a, B: Buf + ?Sized> LimitedBuf<'a, B> {
     fn new(buf: &'a mut B, limit: usize) -> Self {
         Self {
             remaining: min(buf.remaining(), limit),
+            buf,
+        }
+    }
+}
+
+impl<'a, B: BufMut + ?Sized> LimitedBuf<'a, B> {
+    fn new_mut(buf: &'a mut B, limit: usize) -> Self {
+        Self {
+            remaining: min(buf.remaining_mut(), limit),
             buf,
         }
     }
@@ -97,6 +106,29 @@ impl<'a, B: Buf> Buf for LimitedBuf<'a, B> {
     fn advance(&mut self, cnt: usize) {
         self.remaining = self.remaining.saturating_sub(cnt);
         self.buf.advance(cnt);
+    }
+}
+
+unsafe impl<'a, B: BufMut> BufMut for LimitedBuf<'a, B> {
+    fn remaining_mut(&self) -> usize {
+        self.remaining
+    }
+
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        self.remaining = self.remaining.saturating_sub(cnt);
+        unsafe {
+            self.buf.advance_mut(cnt);
+        }
+    }
+
+    fn chunk_mut(&mut self) -> &mut UninitSlice {
+        if self.remaining == 0 {
+            return UninitSlice::new(&mut []);
+        };
+
+        let chunk = self.buf.chunk_mut();
+        let len = min(chunk.len(), self.remaining);
+        &mut chunk[..len]
     }
 }
 
@@ -159,11 +191,17 @@ pub(crate) trait BufMutExt<B: BufMut> {
         }
         Ok(())
     }
+    fn limit_mut(&mut self, limit: usize) -> LimitedBuf<'_, B>;
 
     fn transfer_from_buf(&mut self, input: &mut impl Buf) -> u64;
 
     fn fill<R: Read>(&mut self, reader: R) -> io::Result<usize>;
     //unsafe fn chunk_mut_slice_unsafe(&mut self) -> &mut [u8];
+
+    fn fill_async<R: AsyncRead + Unpin>(
+        &mut self,
+        reader: R,
+    ) -> impl Future<Output = io::Result<usize>>;
 
     fn read_fut<'a, R: AsyncRead + 'a>(&'a mut self, reader: R) -> ReadBufFut<'a, R, B>;
     unsafe fn chunk_mut_slice_unsafe(&mut self) -> &mut [u8];
@@ -260,8 +298,38 @@ impl<T: BufMut> BufMutExt<T> for T {
         Ok(read)
     }
 
+    async fn fill_async<R: AsyncRead + Unpin>(
+        &mut self,
+        mut reader: R,
+    ) -> io::Result<usize> {
+        let mut read = 0;
+        while self.has_remaining_mut() {
+            let chunk = unsafe {
+                let maybe_uninit = self.chunk_mut().as_uninit_slice_mut();
+                std::slice::from_raw_parts_mut(
+                    maybe_uninit.as_mut_ptr() as *mut _,
+                    maybe_uninit.len(),
+                )
+            };
+            let n = reader.read(chunk).await?;
+            if n > 0 {
+                read += n;
+                unsafe {
+                    self.advance_mut(n);
+                }
+                continue;
+            }
+            return Ok(read);
+        }
+        Ok(read)
+    }
+
     fn read_fut<'a, R: AsyncRead + 'a>(&'a mut self, reader: R) -> ReadBufFut<'a, R, T> {
         ReadBufFut::new(reader, self)
+    }
+
+    fn limit_mut(&mut self, limit: usize) -> LimitedBuf<'_, T> {
+        LimitedBuf::new_mut(self, limit)
     }
 }
 

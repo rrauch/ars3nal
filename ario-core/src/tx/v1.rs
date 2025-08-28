@@ -1,19 +1,19 @@
 use crate::blob::AsBlob;
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256, Sha384};
+use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
+use crate::entity::pss::PssSignatureData;
 use crate::json::JsonSource;
 use crate::tag::Tag;
 use crate::tx::CommonTxDataError::MissingOwner;
-use crate::tx::pss::PssSignatureData;
 use crate::tx::raw::{RawTxData, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::{
-    CommonData, CommonTxDataError, EmbeddedData, Format, LastTx, Quantity, Reward, SignatureType,
-    TxDeepHash, TxError, TxHash, TxId, TxShallowHash,
+    CommonData, CommonTxDataError, EmbeddedDataItem, Format, LastTx, Quantity, Reward,
+    SignatureType, TxDeepHash, TxError, TxHash, TxId, TxShallowHash,
 };
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
 use crate::wallet::WalletAddress;
-use crate::{JsonError, JsonValue};
+use crate::{JsonError, JsonValue, entity};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,8 +47,8 @@ impl<'a> From<ValidatedV1Tx<'a>> for ValidatedRawTx<'a> {
             quantity: v1.quantity.map(|q| q.into_inner().into()),
             data_tree: vec![],
             data_root: None,
-            data_size: v1.data.as_ref().map(|d| d.len() as u64).unwrap_or(0),
-            data: v1.data.map(|d| d.into_inner()),
+            data_size: v1.data_item.as_ref().map(|d| d.len() as u64).unwrap_or(0),
+            data: v1.data_item.map(|d| d.into_inner()),
             reward: v1.reward.into_inner().into(),
             signature: v1.signature_data.signature().as_blob().into_owned(),
             signature_type: None,
@@ -104,7 +104,7 @@ impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
     }
 }
 
-pub(super) type V1SignatureData = PssSignatureData;
+pub(super) type V1SignatureData = PssSignatureData<TxHash>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct V1TxData<'a> {
@@ -113,7 +113,7 @@ pub(super) struct V1TxData<'a> {
     pub tags: Vec<Tag<'a>>,
     pub target: Option<WalletAddress>,
     pub quantity: Option<Quantity>,
-    pub data: Option<EmbeddedData<'a>>,
+    pub data_item: Option<EmbeddedDataItem<'a>>,
     pub reward: Reward,
     pub signature_data: V1SignatureData,
     pub denomination: Option<u32>,
@@ -122,7 +122,7 @@ pub(super) struct V1TxData<'a> {
 impl<'a> V1TxData<'a> {
     pub fn tx_hash(&self) -> TxHash {
         if self.denomination.is_some() {
-            TxHash::DeepHash(TxDeepHash::from_inner(self.deep_hash::<Sha384>()))
+            TxHash::DeepHash(TxDeepHash::from_inner(self.deep_hash()))
         } else {
             let mut hasher = Sha256::new();
             self.feed(&mut hasher);
@@ -137,7 +137,7 @@ impl<'a> V1TxData<'a> {
             tags: self.tags.into_iter().map(|t| t.into_owned()).collect(),
             target: self.target,
             quantity: self.quantity,
-            data: self.data.map(|d| d.into_owned()),
+            data_item: self.data_item.map(|d| d.into_owned()),
             reward: self.reward,
             signature_data: self.signature_data,
             denomination: self.denomination,
@@ -154,7 +154,7 @@ impl DeepHashable for V1TxData<'_> {
         elements.extend([
             self.signature_data.deep_hash(),
             self.target.deep_hash(),
-            self.data.deep_hash(),
+            self.data_item.deep_hash(),
             self.quantity.deep_hash(),
             self.reward.deep_hash(),
             self.last_tx.deep_hash(),
@@ -168,7 +168,7 @@ impl Hashable for V1TxData<'_> {
     fn feed<H: Hasher>(&self, hasher: &mut H) {
         self.signature_data.feed(hasher);
         self.target.feed(hasher);
-        self.data.feed(hasher);
+        self.data_item.feed(hasher);
         self.quantity.feed(hasher);
         self.reward.feed(hasher);
         self.last_tx.feed(hasher);
@@ -182,6 +182,8 @@ pub enum V1TxDataError {
     IncorrectFormat(Format),
     #[error(transparent)]
     Common(#[from] CommonTxDataError),
+    #[error(transparent)]
+    Entity(#[from] entity::Error),
     #[error("v1 transactions only support RSA_PSS signatures, found: '{0}")]
     NonRsaSignatureType(SignatureType),
     #[error("data_size '{expected}' does not correspond to actual data size '{actual}'")]
@@ -208,7 +210,7 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
         let last_tx = LastTx::try_from(raw.last_tx)
             .map_err(|e| CommonTxDataError::InvalidLastTx(e.to_string()))?;
 
-        let data = raw.data.map(|b| EmbeddedData::from_inner(b));
+        let data = raw.data.map(|b| EmbeddedDataItem::from_inner(b));
 
         match (
             data.as_ref().map(|d| d.len() as u64).unwrap_or(0),
@@ -238,7 +240,7 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
             tags: common_data.tags,
             target: common_data.target,
             quantity: common_data.quantity,
-            data,
+            data_item: data,
             reward: common_data.reward,
             signature_data,
             denomination: common_data.denomination,
@@ -259,9 +261,10 @@ impl Validator<V1TxData<'_>> for V1TxValidator {
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
+    use crate::entity;
     use crate::tx::raw::ValidatedRawTx;
     use crate::tx::v1::{TxError, UnvalidatedV1Tx, V1SignatureData, V1TxDataError};
-    use crate::tx::{CommonTxDataError, Format, Quantity, Reward};
+    use crate::tx::{Format, Quantity, Reward};
     use crate::validation::ValidateExt;
     use std::ops::Deref;
     use std::sync::LazyLock;
@@ -346,7 +349,7 @@ mod tests {
     fn v1_verify_invalid() -> anyhow::Result<()> {
         let tx = UnvalidatedV1Tx::from_json(TX_V1_INVALID_SIG)?;
         match tx.validate() {
-            Err((_, V1TxDataError::Common(CommonTxDataError::InvalidSignature(_)))) => {
+            Err((_, V1TxDataError::Entity(entity::Error::InvalidSignature(_)))) => {
                 // ok
             }
             _ => unreachable!("signature validation failure expected"),
@@ -379,7 +382,7 @@ mod tests {
         assert!(tx_data.target.is_none());
         assert!(tx_data.denomination.is_none());
         assert_eq!(tx_data.quantity.as_ref().unwrap(), ZERO_QUANTITY.deref(),);
-        assert_eq!(tx_data.data.as_ref().unwrap().len(), 1033478);
+        assert_eq!(tx_data.data_item.as_ref().unwrap().len(), 1033478);
         //todo: verify data value
         assert_eq!(&tx_data.reward, &Reward::try_from("124145681682")?);
         Ok(())

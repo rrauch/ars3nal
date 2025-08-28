@@ -23,6 +23,7 @@ futures-lite = { workspace = true, features = ["futures-io"] }
 ghash = { version = "0.6.0-rc.1", features = ["zeroize"] }
 hkdf = "0.13.0-rc.0"
 hybrid-array = { version = "0.3", features = ["serde", "zeroize", "bytemuck"] }
+itertools = "0.14"
 k256 = { version = "0.14.0-pre.9", features = ["jwk"] }
 maybe-async = "0.2"
 maybe-owned = { workspace = true }
@@ -32,6 +33,7 @@ rangemap = "1.6"
 ringbuf = "0.4"
 rsa = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_avro_fast = "2.0"
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_repr = "0.1"
 serde_with = { workspace = true, features = ["base64"] }

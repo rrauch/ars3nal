@@ -3,27 +3,27 @@ use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::ec::{Curve, EcPublicKey, EcSecretKey};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384};
-use crate::crypto::merkle::DefaultMerkleRoot;
 use crate::crypto::rsa::{Rsa, RsaPrivateKey, SupportedRsaKeySize};
 use crate::crypto::signature;
 use crate::crypto::signature::SigningError;
+use crate::data::DataRoot;
+use crate::entity::ecdsa::EcdsaSignatureData;
+use crate::entity::pss::PssSignatureData;
 use crate::json::JsonSource;
 use crate::money::{Money, MoneyError, Winston};
 use crate::tag::Tag;
 use crate::tx::CommonTxDataError::MissingOwner;
 use crate::tx::Format::V2;
-use crate::tx::ecdsa::EcdsaSignatureData;
-use crate::tx::pss::PssSignatureData;
 use crate::tx::raw::{RawTx, RawTxData, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::{
-    CommonData, CommonTxDataError, ExternalData, Format, Owner, Quantity, Reward, Signature,
+    CommonData, CommonTxDataError, ExternalDataItem, Format, Owner, Quantity, Reward, Signature,
     SignatureType, TxAnchor, TxDeepHash, TxError, TxHash, TxId, TxSignature,
 };
 use crate::tx::{RewardError, Transfer};
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
 use crate::wallet::{WalletAddress, WalletPk, WalletSk};
-use crate::{JsonError, JsonValue};
+use crate::{JsonError, JsonValue, entity};
 use anyhow::anyhow;
 use bon::Builder;
 use maybe_owned::MaybeOwned;
@@ -35,9 +35,6 @@ pub(crate) struct V2Tx<'a, const VALIDATED: bool = false>(V2TxData<'a>);
 
 pub(crate) type UnvalidatedV2Tx<'a> = V2Tx<'a, false>;
 pub(crate) type ValidatedV2Tx<'a> = V2Tx<'a, true>;
-
-pub type DataRoot = DefaultMerkleRoot;
-pub type MaybeOwnedDataRoot<'a> = MaybeOwned<'a, DataRoot>;
 
 impl<'a, const VALIDATED: bool> V2Tx<'a, VALIDATED> {
     pub(super) fn as_inner(&self) -> &V2TxData<'a> {
@@ -125,8 +122,8 @@ impl<'a> SupportsValidation for UnvalidatedV2Tx<'a> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum V2SignatureData {
-    Pss(PssSignatureData),
-    Ecdsa(EcdsaSignatureData),
+    Pss(PssSignatureData<TxHash>),
+    Ecdsa(EcdsaSignatureData<TxHash>),
 }
 
 impl V2SignatureData {
@@ -144,7 +141,7 @@ impl V2SignatureData {
         }
     }
 
-    pub(super) fn signature(&self) -> Signature<'_> {
+    pub(super) fn signature(&self) -> Signature<'_, TxHash> {
         match self {
             Self::Pss(pss) => pss.signature(),
             Self::Ecdsa(ecdsa) => ecdsa.signature(),
@@ -394,6 +391,8 @@ pub enum V2TxDataError {
     IncorrectFormat(Format),
     #[error(transparent)]
     Common(#[from] CommonTxDataError),
+    #[error(transparent)]
+    Entity(#[from] entity::Error),
     #[error("data size set  to '{0}' but data root is empty")]
     DataSizeWithoutDataRoot(u64),
     #[error("data root is set but data size is '0'")]
@@ -440,7 +439,7 @@ where
 
 impl<C: Curve> TxSigner for WalletSk<EcSecretKey<C>>
 where
-    (WalletPk<EcPublicKey<C>>, TxSignature<Ecdsa<C>>): Into<EcdsaSignatureData>,
+    (WalletPk<EcPublicKey<C>>, TxSignature<Ecdsa<C>>): Into<EcdsaSignatureData<TxHash>>,
 {
     fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError> {
         let tx_hash = TxHashBuilder::from(data).tx_hash();
@@ -476,7 +475,7 @@ pub struct TxDraft<'a> {
     tags: Vec<Tag<'a>>,
     tx_anchor: TxAnchor,
     transfer: Option<Transfer>,
-    data_upload: Option<&'a ExternalData<'a>>,
+    data_upload: Option<&'a ExternalDataItem<'a>>,
 }
 
 impl<'a> From<&'a TxDraft<'a>> for TxHashBuilder<'a> {
@@ -540,10 +539,11 @@ impl<'a> TxDraft<'a> {
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
+    use crate::entity;
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::raw::ValidatedRawTx;
     use crate::tx::v2::{UnvalidatedV2Tx, V2TxDataError};
-    use crate::tx::{CommonTxDataError, Quantity, Reward};
+    use crate::tx::{Quantity, Reward};
     use crate::validation::ValidateExt;
     use std::ops::Deref;
     use std::sync::LazyLock;
@@ -674,7 +674,7 @@ mod tests {
     fn tx_invalid_sig() -> anyhow::Result<()> {
         let tx = UnvalidatedV2Tx::from_json(TX_V2_INVALID)?;
         match tx.validate() {
-            Err((_, V2TxDataError::Common(CommonTxDataError::InvalidSignature(_)))) => {
+            Err((_, V2TxDataError::Entity(entity::Error::InvalidSignature(_)))) => {
                 // ok
             }
             _ => unreachable!("signature validation failure expected"),

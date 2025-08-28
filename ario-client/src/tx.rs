@@ -6,7 +6,8 @@ use crate::api::{
 use crate::routemaster::Handle;
 use crate::{Client, api};
 use ario_core::blob::Blob;
-use ario_core::data::{Data, MaybeOwnedExternalData, VerifiableData};
+use ario_core::data::Verifier;
+use ario_core::data::{DataItem, ExternalDataItemVerifier, MaybeOwnedExternalDataItem};
 use ario_core::tx::{LastTx, Tx, TxAnchor, TxId, UnvalidatedTx, ValidatedTx};
 use ario_core::{BlockNumber, Gateway, JsonValue};
 use async_stream::try_stream;
@@ -256,8 +257,8 @@ impl TxSubmission<Prepared> {
 
         let tx_id = tx.id().clone();
 
-        Ok(match tx.data() {
-            Some(Data::External(external)) => {
+        Ok(match tx.data_item() {
+            Some(DataItem::External(external)) => {
                 Submission::AwaitingChunks(TxSubmission(AwaitingData {
                     gw_handle,
                     client,
@@ -283,7 +284,7 @@ struct AwaitingData<'a> {
     tx_id: TxId,
     client: Client,
     created: SystemTime,
-    data: MaybeOwnedExternalData<'a>,
+    data: MaybeOwnedExternalDataItem<'a>,
 }
 
 impl<'a> TxSubmission<AwaitingData<'a>> {
@@ -297,21 +298,21 @@ impl<'a> TxSubmission<AwaitingData<'a>> {
 
     pub fn data<'b>(
         self,
-        data: &'b VerifiableData<'b>,
+        verifier: &'b ExternalDataItemVerifier<'b>,
     ) -> Result<TxSubmission<UploadChunks<'b>>, (Self, super::Error)> {
         // make sure the external data matches the tx data
-        if self.0.data.as_ref() != data.external_data() {
+        if self.0.data.as_ref() != verifier.data_item() {
             return Err((self, TxSubmissionError::IncorrectExternalData.into()));
         }
 
-        let chunks = data.chunks().map(|c| c.clone()).collect_vec();
+        let chunks = verifier.chunks().map(|c| c.clone()).collect_vec();
 
         Ok(TxSubmission(UploadChunks {
             gw_handle: self.0.gw_handle,
             tx_id: self.0.tx_id,
             client: self.0.client,
             created: self.0.created,
-            data,
+            data: verifier,
             chunks,
         }))
     }
@@ -323,7 +324,7 @@ struct UploadChunks<'a> {
     tx_id: TxId,
     client: Client,
     created: SystemTime,
-    data: &'a VerifiableData<'a>,
+    data: &'a ExternalDataItemVerifier<'a>,
     chunks: Vec<Range<u64>>,
 }
 
@@ -537,7 +538,7 @@ mod tests {
     use anyhow::bail;
     use ario_core::Gateway;
     use ario_core::crypto::hash::{Hasher, HasherExt, Sha256};
-    use ario_core::data::VerifiableData;
+    use ario_core::data::{ExternalDataItemVerifier, Verifier};
     use ario_core::jwk::Jwk;
     use ario_core::network::Network;
     use ario_core::tx::{Transfer, TxBuilder, TxId};
@@ -686,14 +687,14 @@ mod tests {
         let wallet = Wallet::from_jwk(&jwk)?;
 
         let file = tokio::fs::File::open(ONE_MB_PATH).await?;
-        let verifiable = VerifiableData::try_from_async_reader(&mut file.compat()).await?;
+        let verifier = ExternalDataItemVerifier::try_from_async_reader(&mut file.compat()).await?;
 
         let tx_sub = client.tx_begin().await?;
 
         let tx_draft = TxBuilder::v2()
             .reward("12")?
             .tx_anchor(tx_sub.tx_anchor().clone())
-            .data_upload(verifiable.external_data())
+            .data_upload(verifier.data_item())
             .draft();
 
         let tx = wallet.sign_tx_draft(tx_draft)?;
@@ -703,7 +704,7 @@ mod tests {
             _ => unreachable!(),
         };
 
-        let tx_sub = tx_sub.data(&verifiable).map_err(|(_, err)| err)?;
+        let tx_sub = tx_sub.data(&verifier).map_err(|(_, err)| err)?;
 
         let file = tokio::fs::File::open(ONE_MB_PATH).await?;
         let file_len = file.metadata().await?.len();
@@ -729,7 +730,7 @@ mod tests {
         }
         let mut hasher = Sha256::new();
         let tx_offset = client.tx_offset(tx_sub.tx_id()).await?;
-        let data_root = verifiable.external_data().root();
+        let data_root = verifier.data_item().root();
         let mut total = 0;
         while let Some(chunk) = client
             .download_chunk(tx_offset.absolute(total), total, data_root)

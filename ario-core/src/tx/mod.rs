@@ -1,24 +1,17 @@
-mod ecdsa;
-mod pss;
 mod raw;
 pub mod v1;
 pub mod v2;
 
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
-use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{
-    Digest, Hashable, HashableExt, Hasher, HasherExt, Sha256Hash, TypedDigest,
-};
+use crate::crypto::hash::{Digest, Hashable, HashableExt, Hasher, HasherExt, TypedDigest};
 use crate::crypto::hash::{Sha256, Sha384};
-use crate::crypto::keys::{PublicKey, SecretKey};
-use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
-use crate::crypto::signature::TypedSignature;
-use crate::crypto::{keys, signature};
-use crate::data::{Data, EmbeddedData, ExternalData};
+use crate::crypto::signature;
+use crate::data::{DataItem, EmbeddedDataItem, ExternalDataItem};
+use crate::entity::{ArEntity, ArEntityHash, ArEntitySignature, Owner, Signature, ToSignPrehash};
 use crate::json::JsonSource;
 use crate::money::{CurrencyExt, Money, MoneyError, TypedMoney, Winston};
 use crate::tag::Tag;
@@ -27,8 +20,8 @@ use crate::tx::v1::{UnvalidatedV1Tx, V1Tx, V1TxDataError};
 use crate::tx::v2::{TxDraft, UnvalidatedV2Tx, V2Tx, V2TxBuilder, V2TxDataError};
 use crate::typed::{FromInner, Typed};
 use crate::validation::ValidateExt;
-use crate::wallet::{WalletAddress, WalletKind, WalletPk};
-use crate::{JsonError, JsonValue, blob};
+use crate::wallet::WalletAddress;
+use crate::{JsonError, JsonValue, blob, entity};
 use bigdecimal::BigDecimal;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
@@ -44,7 +37,16 @@ static ZERO_WINSTON: LazyLock<Money<Winston>> = LazyLock::new(|| Winston::zero()
 
 #[derive(Debug, Clone, PartialEq)]
 #[repr(transparent)]
-pub struct Tx<'a, const VALIDATED: bool = false>(TxInner<'a, VALIDATED>);
+pub struct Tx<'a, const VALIDATED: bool>(TxInner<'a, VALIDATED>);
+
+impl<'a, const VALIDATED: bool> ArEntity for Tx<'a, VALIDATED> {
+    type Id = TxId;
+    type Hash = TxHash;
+
+    fn id(&self) -> &Self::Id {
+        self.id()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum TxInner<'a, const VALIDATED: bool> {
@@ -156,16 +158,18 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
         }
     }
 
-    pub fn data(&'a self) -> Option<Data<'a>> {
+    pub fn data_item(&'a self) -> Option<DataItem<'a>> {
         match &self.0 {
             TxInner::V1(tx) => tx
                 .as_inner()
-                .data
+                .data_item
                 .as_ref()
-                .map(|d| Data::Embedded(d.into())),
+                .map(|d| DataItem::Embedded(d.into())),
 
             TxInner::V2(tx) => tx.as_inner().data_root().map(|dr| {
-                Data::External(ExternalData::new(dr.clone(), tx.as_inner().data_size()).into())
+                DataItem::External(
+                    ExternalDataItem::new(dr.clone(), tx.as_inner().data_size()).into(),
+                )
             }),
         }
     }
@@ -177,7 +181,7 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
         }
     }
 
-    pub fn signature(&'a self) -> Signature<'a> {
+    pub fn signature(&'a self) -> Signature<'a, TxHash> {
         match &self.0 {
             TxInner::V1(tx) => tx.as_inner().signature_data.signature(),
             TxInner::V2(tx) => tx.as_inner().signature_data().signature(),
@@ -294,39 +298,7 @@ impl Display for TxId {
     }
 }
 
-pub enum Owner<'a> {
-    Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
-    Rsa2048(MaybeOwned<'a, WalletPk<RsaPublicKey<2048>>>),
-    Secp256k1(MaybeOwned<'a, WalletPk<EcPublicKey<Secp256k1>>>),
-}
-
-impl<'a> Owner<'a> {
-    pub fn address(&self) -> WalletAddress {
-        match self {
-            Self::Rsa4096(inner) => inner.derive_address(),
-            Self::Rsa2048(inner) => inner.derive_address(),
-            Self::Secp256k1(inner) => inner.derive_address(),
-        }
-    }
-}
-
-impl AsBlob for Owner<'_> {
-    fn as_blob(&self) -> Blob<'_> {
-        match self {
-            Self::Rsa4096(rsa) => rsa.as_blob(),
-            Self::Rsa2048(rsa) => rsa.as_blob(),
-            Self::Secp256k1(ec) => ec.as_blob(),
-        }
-    }
-}
-
-pub enum Signature<'a> {
-    Rsa4096(MaybeOwned<'a, TxSignature<RsaPss<4096>>>),
-    Rsa2048(MaybeOwned<'a, TxSignature<RsaPss<2048>>>),
-    Secp256k1(MaybeOwned<'a, TxSignature<Ecdsa<Secp256k1>>>),
-}
-
-impl<'a> Signature<'a> {
+impl<'a> Signature<'a, TxHash> {
     pub fn signature_type(&self) -> SignatureType {
         match self {
             Self::Rsa4096(_) => SignatureType::RsaPss,
@@ -344,22 +316,19 @@ impl<'a> Signature<'a> {
     }
 }
 
-impl AsBlob for Signature<'_> {
-    fn as_blob(&self) -> Blob<'_> {
-        match self {
-            Self::Rsa4096(pss) => pss.as_blob(),
-            Self::Rsa2048(pss) => pss.as_blob(),
-            Self::Secp256k1(ecdsa) => ecdsa.as_blob(),
-        }
-    }
+pub(crate) trait TxSignatureScheme:
+    entity::SignatureScheme + SupportedSignatureScheme
+{
 }
 
-pub trait TxSignatureScheme: signature::Scheme {
-    type Signer: SecretKey;
-    type Verifier: PublicKey;
-}
+impl<T> TxSignatureScheme for T where T: entity::SignatureScheme + SupportedSignatureScheme {}
 
-pub type TxSignature<S: TxSignatureScheme> = TypedSignature<TxHash, WalletKind, S>;
+trait SupportedSignatureScheme {}
+impl SupportedSignatureScheme for Ecdsa<Secp256k1> {}
+impl SupportedSignatureScheme for RsaPss<4096> {}
+impl SupportedSignatureScheme for RsaPss<2048> {}
+
+pub type TxSignature<S: TxSignatureScheme> = ArEntitySignature<TxHash, S>;
 pub type TxDeepHash = TypedDigest<TxKind, Sha384>;
 pub type TxShallowHash = TypedDigest<TxKind, Sha256>;
 
@@ -376,8 +345,14 @@ impl TxHash {
             Self::Shallow(h) => h.as_slice(),
         }
     }
+}
 
-    pub(crate) fn to_sign_prehash(&self) -> MaybeOwned<'_, Sha256Hash> {
+impl ArEntityHash for TxHash {}
+
+impl ToSignPrehash for TxHash {
+    type Hasher = Sha256;
+
+    fn to_sign_prehash(&self) -> MaybeOwned<'_, Digest<Self::Hasher>> {
         match self {
             TxHash::DeepHash(deep_hash) => deep_hash.digest().into(),
             TxHash::Shallow(shallow) => MaybeOwned::Borrowed(shallow),
@@ -423,10 +398,6 @@ pub enum CommonTxDataError {
     QuantityError(#[from] QuantityError),
     #[error(transparent)]
     RewardError(#[from] RewardError),
-    #[error("invalid signature: {0}")]
-    InvalidSignature(String),
-    #[error(transparent)]
-    InvalidKey(#[from] keys::KeyError),
     #[error("invalid signature type: {0}")]
     InvalidSignatureType(String),
 }
@@ -754,13 +725,12 @@ mod tests {
     use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
     use crate::crypto::keys::SupportedSecretKey;
     use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
-    use crate::data::VerifiableData;
+    use crate::data::{DataRoot, ExternalDataItemVerifier, Verifier};
     use crate::jwk::Jwk;
     use crate::money::{CurrencyExt, Winston};
-    use crate::tx::v2::DataRoot;
     use crate::tx::{
-        Data, ExternalData, Format, Quantity, Reward, SignatureType, Transfer, Tx, TxAnchor,
-        TxBuilder, UnvalidatedTx,
+        DataItem, ExternalDataItem, Format, Quantity, Reward, SignatureType, Transfer, Tx,
+        TxAnchor, TxBuilder, UnvalidatedTx,
     };
     use crate::typed::FromInner;
     use crate::wallet::{Wallet, WalletAddress, WalletSk};
@@ -801,14 +771,14 @@ mod tests {
             "_qa4arkdjK2X9SjechexnWzTtbOKcPkBPhrDDej6lI8"
         );
 
-        match validated.data() {
-            Some(Data::Embedded(data)) => {
+        match validated.data_item() {
+            Some(DataItem::Embedded(data)) => {
                 assert_eq!(data.len(), 1033478);
             }
             _ => panic!("invalid data"),
         }
 
-        assert_eq!(validated.data().unwrap().size(), 1033478);
+        assert_eq!(validated.data_item().unwrap().size(), 1033478);
 
         Ok(())
     }
@@ -848,8 +818,8 @@ mod tests {
             "OK_m2Tk41N94KZLl5WQSx_-iNWbvcp8EMfrYsel_QeQ"
         );
 
-        match validated.data() {
-            Some(Data::External(data)) => {
+        match validated.data_item() {
+            Some(DataItem::External(data)) => {
                 assert_eq!(data.size(), 128355);
             }
             _ => panic!("invalid data"),
@@ -883,7 +853,7 @@ mod tests {
         let data_root = DataRoot::try_from(Blob::from([0u8; 32]))?;
         let data_size = 32u64;
 
-        let data = ExternalData::new(data_root.clone(), data_size);
+        let data = ExternalDataItem::new(data_root.clone(), data_size);
 
         let draft = TxBuilder::v2()
             .reward(1234)?
@@ -913,8 +883,8 @@ mod tests {
             Some(Quantity::try_from(Winston::from_str("101")?)?).as_ref()
         );
 
-        let data = match valid_tx.data() {
-            Some(Data::External(data)) => data,
+        let data = match valid_tx.data_item() {
+            Some(DataItem::External(data)) => data,
             _ => panic!("invalid data"),
         };
 
@@ -966,7 +936,7 @@ mod tests {
             Some(Quantity::try_from(Winston::from_str("2101")?)?).as_ref()
         );
 
-        assert!(valid_tx.data().is_none());
+        assert!(valid_tx.data_item().is_none());
 
         Ok(())
     }
@@ -975,28 +945,40 @@ mod tests {
     fn upload_pss() -> anyhow::Result<()> {
         let wallet = Wallet::from_jwk(&Jwk::from_json(WALLET_RSA_JWK)?)?;
 
-        let data = VerifiableData::from_single_value(UPLOAD_DATA);
+        let data = ExternalDataItemVerifier::from_single_value(UPLOAD_DATA);
 
         let draft = TxBuilder::v2()
             .reward(12345)?
             .tx_anchor(TxAnchor::from_inner([0u8; 48]))
-            .data_upload(data.external_data())
+            .data_upload(data.data_item())
             .draft();
 
         let valid_tx = wallet.sign_tx_draft(draft)?;
 
-        assert_eq!(valid_tx.data().unwrap().size(), 683821);
+        assert_eq!(valid_tx.data_item().unwrap().size(), 683821);
         assert_eq!(
-            valid_tx.data().unwrap().data_root().unwrap().to_base64(),
+            valid_tx
+                .data_item()
+                .unwrap()
+                .data()
+                .data_root()
+                .unwrap()
+                .to_base64(),
             "ikHHDmOhqnZ5qsNZ7SOoofuaG66A5yRLsTvacad2NMg"
         );
 
         let json = valid_tx.to_json_string()?;
         let valid_tx = Tx::from_json(&json)?.validate().map_err(|(_, err)| err)?;
 
-        assert_eq!(valid_tx.data().unwrap().size(), 683821);
+        assert_eq!(valid_tx.data_item().unwrap().size(), 683821);
         assert_eq!(
-            valid_tx.data().unwrap().data_root().unwrap().to_base64(),
+            valid_tx
+                .data_item()
+                .unwrap()
+                .data()
+                .data_root()
+                .unwrap()
+                .to_base64(),
             "ikHHDmOhqnZ5qsNZ7SOoofuaG66A5yRLsTvacad2NMg"
         );
 

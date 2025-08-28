@@ -17,6 +17,7 @@ pub mod tx;
 pub mod base64;
 pub mod blob;
 pub mod buffer;
+pub mod bundle;
 mod chunking;
 pub mod confidential;
 pub mod crypto;
@@ -29,6 +30,7 @@ pub mod tag;
 pub mod typed;
 mod validation;
 pub mod wallet;
+mod entity;
 
 pub struct AddressKind<T>(PhantomData<T>);
 pub type Address<T> = TypedDigest<AddressKind<T>, Sha256>;

@@ -8,8 +8,7 @@ use ario_core::Gateway;
 use ario_core::base64::OptionalBase64As;
 use ario_core::blob::{AsBlob, Blob};
 use ario_core::crypto::merkle::{DefaultProof, ProofError};
-use ario_core::data::VerifiableData;
-use ario_core::tx::v2::DataRoot;
+use ario_core::data::{DataRoot, ExternalDataItemVerifier, Verifier};
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
@@ -74,19 +73,18 @@ impl Api {
 impl Client {
     pub async fn upload_chunk(
         &self,
-        verifiable: &VerifiableData<'_>,
+        verifier: &ExternalDataItemVerifier<'_>,
         offset: &Range<u64>,
         data: Blob<'_>,
     ) -> Result<(), super::Error> {
         let gw = self.0.routemaster.gateway().await?;
-        self.upload_chunk_with_gw(&gw, verifiable, offset, data)
-            .await
+        self.upload_chunk_with_gw(&gw, verifier, offset, data).await
     }
 
     pub(crate) async fn upload_chunk_with_gw(
         &self,
         gw_handle: &Handle<Gateway>,
-        verifiable: &VerifiableData<'_>,
+        verifier: &ExternalDataItemVerifier<'_>,
         offset: &Range<u64>,
         data: Blob<'_>,
     ) -> Result<(), super::Error> {
@@ -102,21 +100,21 @@ impl Client {
             .into());
         }
 
-        let proof = verifiable
+        let proof = verifier
             .proof(offset)
             .ok_or(UploadError::ProofNotFound(offset.start))?;
 
         // verify data against merkle tree
-        verifiable
-            .external_data()
+        verifier
+            .data_item()
             .root()
             .verify_data(&mut Cursor::new(&data), &proof)
             .map_err(|e| UploadError::ProofError(e.into()))?;
 
         // looking good, create upload json
         let upload_chunk = UploadChunk {
-            data_root: verifiable.external_data().root().as_blob(),
-            data_size: verifiable.external_data().size(),
+            data_root: verifier.data_item().root().as_blob(),
+            data_size: verifier.data_item().size(),
             data_path: proof.as_blob(),
             offset: offset.start,
             chunk: data,
@@ -247,7 +245,8 @@ mod tests {
             .validate()
             .map_err(|(_, e)| e)?;
 
-        let data = tx.data().unwrap();
+        let data_item = tx.data_item().unwrap();
+        let data = data_item.data();
         let data_root = data.data_root().unwrap();
 
         let tx_offset = client.tx_offset(tx.id()).await?;
@@ -259,12 +258,12 @@ mod tests {
             .await?
         {
             total += chunk.len() as u64;
-            if total >= data.size() {
+            if total >= data_item.size() {
                 break;
             }
         }
 
-        assert_eq!(total, data.size());
+        assert_eq!(total, data_item.size());
 
         Ok(())
     }
@@ -293,7 +292,8 @@ mod tests {
             .validate()
             .map_err(|(_, e)| e)?;
 
-        let data = tx.data().unwrap();
+        let data_item = tx.data_item().unwrap();
+        let data = data_item.data();
         let data_root = data.data_root().unwrap();
 
         let tx_offset = client.tx_offset(tx.id()).await?;
@@ -305,12 +305,12 @@ mod tests {
             .await?
         {
             total += chunk.len() as u64;
-            if total >= data.size() {
+            if total >= data_item.size() {
                 break;
             }
         }
 
-        assert_eq!(total, data.size());
+        assert_eq!(total, data_item.size());
 
         Ok(())
     }

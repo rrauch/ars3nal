@@ -1,6 +1,9 @@
 use crate::blob::Blob;
 use crate::crypto::hash::{Digest, Hasher, HasherExt};
 use bytes::Bytes;
+use futures_lite::AsyncRead;
+use futures_lite::AsyncReadExt;
+use std::io::Read;
 use uuid::Uuid;
 
 pub(crate) trait DeepHashable {
@@ -19,6 +22,53 @@ pub(crate) trait DeepHashable {
         }
         acc_digest
     }
+}
+
+pub(crate) fn from_reader<H: Hasher, R: Read, const BUF_SIZE: usize>(
+    reader: &mut R,
+) -> Result<Digest<H>, std::io::Error> {
+    assert!(BUF_SIZE > 0);
+    let mut buf = vec![0u8; BUF_SIZE];
+    let mut data_digest = H::new();
+    let mut len = 0u64;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        len += n as u64;
+        let data = &buf[..n];
+        data_digest.update(data);
+    }
+    Ok(from_data_digest(&data_digest.finalize(), len))
+}
+
+pub(crate) async fn from_async_reader<
+    H: Hasher + Send,
+    R: AsyncRead + Unpin + Send,
+    const BUF_SIZE: usize,
+>(
+    reader: &mut R,
+) -> Result<Digest<H>, std::io::Error> {
+    assert!(BUF_SIZE > 0);
+    let mut buf = vec![0u8; BUF_SIZE];
+    let mut data_digest = H::new();
+    let mut len = 0u64;
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        len += n as u64;
+        let data = &buf[..n];
+        data_digest.update(data);
+    }
+    Ok(from_data_digest(&data_digest.finalize(), len))
+}
+
+pub(crate) fn from_data_digest<H: Hasher>(data_digest: &Digest<H>, len: u64) -> Digest<H> {
+    let tag_digest = H::digest(format!("blob{}", len).as_bytes());
+    H::digest_from_iter(vec![tag_digest.as_slice(), data_digest.as_slice()].into_iter())
 }
 
 impl<'a> DeepHashable for Blob<'a> {
@@ -76,6 +126,12 @@ where
         } else {
             Self::blob(&[])
         }
+    }
+}
+
+impl DeepHashable for () {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        Self::blob(&[])
     }
 }
 
