@@ -6,19 +6,12 @@ use bytes::{Buf, BufMut};
 use futures_lite::AsyncRead;
 use itertools::Either;
 use std::io::{Cursor, Read};
-use std::time::{Duration, Instant};
 use thiserror::Error;
 
 type Result<T> = core::result::Result<T, Error>;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error(
-        "timeout reached; maximum: '{} ms', actual: '{} ms'",
-        max.as_millis(),
-        actual.as_millis()
-    )]
-    Timeout { max: Duration, actual: Duration },
     #[error(transparent)]
     BundleError(#[from] super::Error),
     #[error(transparent)]
@@ -27,13 +20,9 @@ pub enum Error {
     IoError(#[from] std::io::Error),
 }
 
-pub struct StateMachine<Ctx, S> {
+pub struct IncrementalInputProcessor<Ctx, S> {
     ctx: Ctx,
     state: S,
-    started: Instant,
-    last_progress: Instant,
-    max_inactivity: Duration,
-    max_duration: Duration,
 }
 
 pub enum PollResult<Next> {
@@ -50,8 +39,7 @@ pub trait Flow: Sized {
     fn required_bytes(&self) -> usize;
     fn buffer(&mut self) -> Self::Buf<'_>;
 
-    fn progress(&mut self, now: Instant) -> Result<()>;
-    fn try_process(self, now: Instant) -> Result<Either<Self, Self::Output>>;
+    fn try_process(self) -> Result<Either<Self, Self::Output>>;
 }
 
 pub trait FlowExt: Sized {
@@ -73,7 +61,7 @@ impl<T: Flow> FlowExt for T {
                 let mut buf = this.buffer();
                 buf.fill(&mut reader)?;
             }
-            match this.try_process(Instant::now())? {
+            match this.try_process()? {
                 Either::Left(l) => this = l,
                 Either::Right(out) => return Ok(out),
             }
@@ -87,7 +75,7 @@ impl<T: Flow> FlowExt for T {
                 let mut buf = this.buffer();
                 buf.fill_async(&mut reader).await?;
             }
-            match this.try_process(Instant::now())? {
+            match this.try_process()? {
                 Either::Left(l) => this = l,
                 Either::Right(out) => return Ok(out),
             }
@@ -103,62 +91,20 @@ pub trait Step<Ctx> {
     fn poll(&mut self, ctx: &mut Ctx) -> Result<PollResult<Self::Next>>;
 }
 
-impl<Ctx: Context, S: Step<Ctx>> StateMachine<Ctx, S> {
-    fn new(
-        ctx: Ctx,
-        state: S,
-        now: Instant,
-        max_inactivity: Duration,
-        max_duration: Duration,
-    ) -> StateMachine<Ctx, S> {
-        Self {
-            ctx,
-            state,
-            started: now,
-            last_progress: now,
-            max_inactivity,
-            max_duration,
-        }
+impl<Ctx: Context, S: Step<Ctx>> IncrementalInputProcessor<Ctx, S> {
+    fn new(ctx: Ctx, state: S) -> IncrementalInputProcessor<Ctx, S> {
+        Self { ctx, state }
     }
 }
 
-impl<Ctx: Context, S: Step<Ctx>> StateMachine<Ctx, S> {
-    pub fn progress(&mut self, now: Instant) -> Result<()> {
-        self.check_timeout(now)?;
-        self.last_progress = now;
-        Ok(())
-    }
-
-    fn check_timeout(&self, now: Instant) -> Result<()> {
-        let last_activity = now.saturating_duration_since(self.last_progress);
-        if last_activity > self.max_inactivity {
-            return Err(Error::Timeout {
-                max: self.max_inactivity,
-                actual: last_activity,
-            });
-        }
-
-        let duration = now.saturating_duration_since(self.started);
-        if duration > self.max_duration {
-            return Err(Error::Timeout {
-                max: self.max_duration,
-                actual: duration,
-            });
-        }
-        Ok(())
-    }
-
+impl<Ctx: Context, S: Step<Ctx>> IncrementalInputProcessor<Ctx, S> {
     fn transition_to<NextState: Step<Ctx>>(
         self,
         next_state: NextState,
-    ) -> StateMachine<Ctx, NextState> {
-        StateMachine {
+    ) -> IncrementalInputProcessor<Ctx, NextState> {
+        IncrementalInputProcessor {
             ctx: self.ctx,
             state: next_state,
-            started: self.started,
-            last_progress: self.last_progress,
-            max_inactivity: self.max_inactivity,
-            max_duration: self.max_duration,
         }
     }
 
@@ -172,15 +118,14 @@ impl<Ctx: Context, S: Step<Ctx>> StateMachine<Ctx, S> {
     }
 }
 
-impl<Ctx: Context, S: Step<Ctx>> StateMachine<Ctx, S>
+impl<Ctx: Context, S: Step<Ctx>> IncrementalInputProcessor<Ctx, S>
 where
     <S as Step<Ctx>>::Next: Step<Ctx>,
 {
     fn transition(
         mut self,
-        now: Instant,
-    ) -> Result<Either<StateMachine<Ctx, S>, StateMachine<Ctx, S::Next>>> {
-        self.progress(now)?;
+    ) -> Result<Either<IncrementalInputProcessor<Ctx, S>, IncrementalInputProcessor<Ctx, S::Next>>>
+    {
         if self.state.required_bytes(&self.ctx) > 0 {
             return Ok(Either::Left(self));
         }
@@ -191,9 +136,8 @@ where
     }
 }
 
-impl<Ctx: Context, S: Step<Ctx>> StateMachine<Ctx, S> {
-    fn finalize(mut self, now: Instant) -> Result<Either<StateMachine<Ctx, S>, S::Next>> {
-        self.progress(now)?;
+impl<Ctx: Context, S: Step<Ctx>> IncrementalInputProcessor<Ctx, S> {
+    fn finalize(mut self) -> Result<Either<IncrementalInputProcessor<Ctx, S>, S::Next>> {
         if self.state.required_bytes(&self.ctx) > 0 {
             return Ok(Either::Left(self));
         }
@@ -251,7 +195,6 @@ mod tests {
     use crate::bundle::read::item::ItemReader;
     use futures_lite::AsyncSeekExt;
     use std::io::SeekFrom;
-    use std::time::{Duration, Instant};
 
     static BUNDLE_1: &'static [u8] =
         include_bytes!("../../../testdata/nxoCcgVXf1A3yrMMEXAJpa0YUfgl9EONIKNVR6nr-50.bundle");
@@ -265,8 +208,6 @@ mod tests {
             let mut input = futures_lite::io::Cursor::new(bundle);
 
             let index = IndexReader::builder()
-                .now(Instant::now())
-                .max_inactivity(Duration::from_secs(30))
                 .build()
                 .process_async(&mut input)
                 .await?;
@@ -274,7 +215,6 @@ mod tests {
             for entry in index.entries {
                 input.seek(SeekFrom::Start(entry.offset)).await?;
                 let bundle_item_data = ItemReader::builder()
-                    .now(Instant::now())
                     .len(entry.len)
                     .build()
                     .process_async(&mut input)

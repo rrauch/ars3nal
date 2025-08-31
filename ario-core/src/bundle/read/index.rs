@@ -2,19 +2,18 @@ use crate::blob::Blob;
 use crate::buffer::HeapCircularBuffer;
 use crate::bundle::Error as BundleError;
 use crate::bundle::read::{
-    Context, Flow, PollResult, Result, StateMachine, Step, parse_u16, parse_u64,
+    Context, Flow, IncrementalInputProcessor, PollResult, Result, Step, parse_u16, parse_u64,
 };
 use crate::bundle::{
     BundleItemId, MAX_BUNDLE_SIZE, MAX_ITEM_COUNT, MAX_ITEM_SIZE, V2Entry, V2Index,
 };
 use bon::bon;
-use bytes::{BufMut};
+use bytes::BufMut;
 use itertools::Either;
-use std::time::{Duration, Instant};
 
 pub enum IndexReader {
-    Header(StateMachine<IndexReaderCtx, Header>),
-    Entries(StateMachine<IndexReaderCtx, Entries>),
+    Header(IncrementalInputProcessor<IndexReaderCtx, Header>),
+    Entries(IncrementalInputProcessor<IndexReaderCtx, Entries>),
 }
 
 impl Flow for IndexReader {
@@ -35,20 +34,13 @@ impl Flow for IndexReader {
         }
     }
 
-    fn progress(&mut self, now: Instant) -> crate::bundle::read::Result<()> {
-        match self {
-            Self::Header(s) => s.progress(now),
-            Self::Entries(s) => s.progress(now),
-        }
-    }
-
-    fn try_process(self, now: Instant) -> crate::bundle::read::Result<Either<Self, Self::Output>> {
+    fn try_process(self) -> crate::bundle::read::Result<Either<Self, Self::Output>> {
         Ok(match self {
-            Self::Header(s) => match s.transition(now)? {
+            Self::Header(s) => match s.transition()? {
                 Either::Left(header) => Either::Left(Self::Header(header)),
                 Either::Right(entries) => Either::Left(Self::Entries(entries)),
             },
-            Self::Entries(s) => match s.finalize(now)? {
+            Self::Entries(s) => match s.finalize()? {
                 Either::Left(entries) => Either::Left(Self::Entries(entries)),
                 Either::Right(index) => Either::Right(index),
             },
@@ -59,21 +51,11 @@ impl Flow for IndexReader {
 #[bon]
 impl IndexReader {
     #[builder]
-    pub fn new(
-        now: Instant,
-        #[builder(default = Duration::from_secs(5))] max_inactivity: Duration,
-        #[builder(default = Duration::from_secs(60))] max_duration: Duration,
-    ) -> Self {
+    pub fn new(#[builder(default = 2048)] buffer_capacity: usize) -> Self {
         let ctx = IndexReaderCtx {
-            buf: HeapCircularBuffer::new(2048),
+            buf: HeapCircularBuffer::new(buffer_capacity),
         };
-        Self::Header(StateMachine::new(
-            ctx,
-            Header,
-            now,
-            max_inactivity,
-            max_duration,
-        ))
+        Self::Header(IncrementalInputProcessor::new(ctx, Header))
     }
 }
 

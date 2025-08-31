@@ -8,16 +8,15 @@ use crate::bundle::V2BundleItemData;
 use crate::bundle::read::item::data::Data;
 use crate::bundle::read::item::header::Header;
 use crate::bundle::read::item::tags::Tags;
-use crate::bundle::read::{Context, StateMachine, Step};
+use crate::bundle::read::{Context, IncrementalInputProcessor};
 use bon::bon;
 use bytes::BufMut;
 use itertools::Either;
-use std::time::{Duration, Instant};
 
 pub(crate) enum ItemReader {
-    Header(StateMachine<ItemReaderCtx, Header>),
-    Tags(StateMachine<ItemReaderCtx, Tags>),
-    Data(StateMachine<ItemReaderCtx, Data>),
+    Header(IncrementalInputProcessor<ItemReaderCtx, Header>),
+    Tags(IncrementalInputProcessor<ItemReaderCtx, Tags>),
+    Data(IncrementalInputProcessor<ItemReaderCtx, Data>),
 }
 
 impl Flow for ItemReader {
@@ -39,26 +38,17 @@ impl Flow for ItemReader {
             Self::Data(s) => Box::new(s.buffer()),
         }
     }
-
-    fn progress(&mut self, now: Instant) -> Result<()> {
-        match self {
-            Self::Header(s) => s.progress(now),
-            Self::Tags(s) => s.progress(now),
-            Self::Data(s) => s.progress(now),
-        }
-    }
-
-    fn try_process(self, now: Instant) -> Result<Either<Self, Self::Output>> {
+    fn try_process(self) -> Result<Either<Self, Self::Output>> {
         Ok(match self {
-            Self::Header(s) => match s.transition(now)? {
+            Self::Header(s) => match s.transition()? {
                 Either::Left(header) => Either::Left(Self::Header(header)),
                 Either::Right(tags) => Either::Left(Self::Tags(tags)),
             },
-            Self::Tags(s) => match s.transition(now)? {
+            Self::Tags(s) => match s.transition()? {
                 Either::Left(tags) => Either::Left(Self::Tags(tags)),
                 Either::Right(data) => Either::Left(Self::Data(data)),
             },
-            Self::Data(s) => match s.finalize(now)? {
+            Self::Data(s) => match s.finalize()? {
                 Either::Left(data) => Either::Left(Self::Data(data)),
                 Either::Right(out) => Either::Right(out),
             },
@@ -69,24 +59,13 @@ impl Flow for ItemReader {
 #[bon]
 impl ItemReader {
     #[builder]
-    pub fn new(
-        len: u64,
-        now: Instant,
-        #[builder(default = Duration::from_secs(60))] max_inactivity: Duration,
-        #[builder(default = Duration::from_secs(3600))] max_duration: Duration,
-    ) -> Self {
+    pub fn new(len: u64, #[builder(default = 64 * 1024)] buffer_capacity: usize) -> Self {
         let ctx = ItemReaderCtx {
             len,
             pos: 0,
-            buf: HeapCircularBuffer::new(1024 * 64),
+            buf: HeapCircularBuffer::new(buffer_capacity),
         };
-        Self::Header(StateMachine::new(
-            ctx,
-            Header::new(),
-            now,
-            max_inactivity,
-            max_duration,
-        ))
+        Self::Header(IncrementalInputProcessor::new(ctx, Header::new()))
     }
 }
 
