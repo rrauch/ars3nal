@@ -45,6 +45,7 @@ pub(crate) trait ToSignPrehash {
     fn to_sign_prehash(&self) -> MaybeOwned<'_, Digest<Self::Hasher>>;
 }
 
+#[derive(Debug)]
 pub enum Owner<'a> {
     Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
     Rsa2048(MaybeOwned<'a, WalletPk<RsaPublicKey<2048>>>),
@@ -71,6 +72,7 @@ impl AsBlob for Owner<'_> {
     }
 }
 
+#[derive(Debug)]
 pub enum Signature<'a, T: ArEntityHash> {
     Rsa4096(MaybeOwned<'a, ArEntitySignature<T, RsaPss<4096>>>),
     Rsa2048(MaybeOwned<'a, ArEntitySignature<T, RsaPss<2048>>>),

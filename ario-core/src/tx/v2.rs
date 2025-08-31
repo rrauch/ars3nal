@@ -129,22 +129,31 @@ pub(super) enum V2SignatureData {
 impl V2SignatureData {
     pub(super) fn owner(&self) -> Owner<'_> {
         match self {
-            Self::Pss(pss) => pss.owner(),
-            Self::Ecdsa(ecdsa) => ecdsa.owner(),
+            Self::Pss(pss) => pss.owner().try_into().expect("owner conversion to succeed"),
+            Self::Ecdsa(ecdsa) => ecdsa
+                .owner()
+                .try_into()
+                .expect("owner conversion to succeed"),
         }
     }
 
     pub(super) fn tx_owner(&self) -> Option<Owner<'_>> {
         match self {
-            Self::Pss(pss) => Some(pss.owner()),
+            Self::Pss(pss) => Some(pss.owner().try_into().expect("owner conversion to succeed")),
             Self::Ecdsa(_) => None,
         }
     }
 
-    pub(super) fn signature(&self) -> Signature<'_, TxHash> {
+    pub(super) fn signature(&self) -> Signature<'_> {
         match self {
-            Self::Pss(pss) => pss.signature(),
-            Self::Ecdsa(ecdsa) => ecdsa.signature(),
+            Self::Pss(pss) => pss
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
+            Self::Ecdsa(ecdsa) => ecdsa
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
         }
     }
 

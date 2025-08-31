@@ -2,17 +2,22 @@ mod read;
 
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
+use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, HashableExt, Hasher, HasherExt, Sha256, Sha384, TypedDigest};
+use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature::TypedSignature;
 use crate::entity::ecdsa::EcdsaSignatureData;
 use crate::entity::pss::PssSignatureData;
-use crate::entity::{ArEntity, ArEntityHash, Owner, Signature, ToSignPrehash};
+use crate::entity::{
+    ArEntity, ArEntityHash, ArEntitySignature, Owner as EntityOwner, Signature as EntitySignature,
+    ToSignPrehash,
+};
 use crate::tag::Tag;
 use crate::typed::{FromInner, Typed};
-use crate::wallet::{WalletAddress, WalletKind};
+use crate::wallet::{WalletAddress, WalletKind, WalletPk};
 use crate::{blob, entity};
 use bytemuck::TransparentWrapper;
 use k256::Secp256k1;
@@ -90,6 +95,51 @@ pub enum TagError {
     IncorrectTagCount { expected: usize, actual: usize },
     #[error(transparent)]
     AvroDeError(#[from] serde_avro_fast::de::DeError),
+}
+
+#[derive(Debug)]
+pub enum Owner<'a> {
+    Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
+    Secp256k1(MaybeOwned<'a, WalletPk<EcPublicKey<Secp256k1>>>),
+}
+
+impl<'a> From<Owner<'a>> for EntityOwner<'a> {
+    fn from(value: Owner<'a>) -> Self {
+        match value {
+            Owner::Rsa4096(o) => Self::Rsa4096(o),
+            Owner::Secp256k1(o) => Self::Secp256k1(o),
+        }
+    }
+}
+
+impl<'a> TryFrom<EntityOwner<'a>> for Owner<'a> {
+    type Error = EntityOwner<'a>;
+
+    fn try_from(value: EntityOwner<'a>) -> Result<Self, Self::Error> {
+        match value {
+            EntityOwner::Rsa4096(o) => Ok(Self::Rsa4096(o)),
+            EntityOwner::Secp256k1(o) => Ok(Self::Secp256k1(o)),
+            other => Err(other),
+        }
+    }
+}
+
+impl<'a> Owner<'a> {
+    pub fn address(&self) -> WalletAddress {
+        match self {
+            Self::Rsa4096(inner) => inner.derive_address(),
+            Self::Secp256k1(inner) => inner.derive_address(),
+        }
+    }
+}
+
+impl AsBlob for Owner<'_> {
+    fn as_blob(&self) -> Blob<'_> {
+        match self {
+            Self::Rsa4096(rsa) => rsa.as_blob(),
+            Self::Secp256k1(ec) => ec.as_blob(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -195,7 +245,6 @@ impl<T> BundleItemSignatureScheme for T where T: entity::SignatureScheme + Suppo
 trait SupportedSignatureScheme {}
 impl SupportedSignatureScheme for Ecdsa<Secp256k1> {}
 impl SupportedSignatureScheme for RsaPss<4096> {}
-impl SupportedSignatureScheme for RsaPss<2048> {}
 
 pub type BundleItemDeepHash = TypedDigest<BundleItemKind, Sha384>;
 
@@ -364,15 +413,24 @@ enum V2SignatureData {
 impl V2SignatureData {
     pub(super) fn owner(&self) -> Owner<'_> {
         match self {
-            Self::Pss(pss) => pss.owner(),
-            Self::Ecdsa(ecdsa) => ecdsa.owner(),
+            Self::Pss(pss) => pss.owner().try_into().expect("owner conversion to succeed"),
+            Self::Ecdsa(ecdsa) => ecdsa
+                .owner()
+                .try_into()
+                .expect("owner conversion to succeed"),
         }
     }
 
-    pub(super) fn signature(&self) -> Signature<'_, BundleItemHash> {
+    pub(super) fn signature(&self) -> Signature<'_> {
         match self {
-            Self::Pss(pss) => pss.signature(),
-            Self::Ecdsa(ecdsa) => ecdsa.signature(),
+            Self::Pss(pss) => pss
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
+            Self::Ecdsa(ecdsa) => ecdsa
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
         }
     }
 
@@ -391,11 +449,46 @@ impl V2SignatureData {
     }
 }
 
-impl<'a> Signature<'a, BundleItemHash> {
+#[derive(Debug)]
+pub enum Signature<'a> {
+    Rsa4096(MaybeOwned<'a, ArEntitySignature<BundleItemHash, RsaPss<4096>>>),
+    Secp256k1(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ecdsa<Secp256k1>>>),
+}
+
+impl<'a> From<Signature<'a>> for EntitySignature<'a, BundleItemHash> {
+    fn from(value: Signature<'a>) -> Self {
+        match value {
+            Signature::Rsa4096(o) => Self::Rsa4096(o),
+            Signature::Secp256k1(o) => Self::Secp256k1(o),
+        }
+    }
+}
+
+impl<'a> TryFrom<EntitySignature<'a, BundleItemHash>> for Signature<'a> {
+    type Error = EntitySignature<'a, BundleItemHash>;
+
+    fn try_from(value: EntitySignature<'a, BundleItemHash>) -> Result<Self, Self::Error> {
+        match value {
+            EntitySignature::Rsa4096(o) => Ok(Self::Rsa4096(o)),
+            EntitySignature::Secp256k1(o) => Ok(Self::Secp256k1(o)),
+            other => Err(other),
+        }
+    }
+}
+
+impl AsBlob for Signature<'_> {
+    fn as_blob(&self) -> Blob<'_> {
+        match self {
+            Self::Rsa4096(pss) => pss.as_blob(),
+            Self::Secp256k1(ecdsa) => ecdsa.as_blob(),
+        }
+    }
+}
+
+impl<'a> Signature<'a> {
     pub fn signature_type(&self) -> SignatureType {
         match self {
             Self::Rsa4096(_) => SignatureType::RsaPss,
-            Self::Rsa2048(_) => SignatureType::RsaPss,
             Self::Secp256k1(_) => SignatureType::EcdsaSecp256k1,
         }
     }
@@ -403,7 +496,6 @@ impl<'a> Signature<'a, BundleItemHash> {
     pub fn digest(&self) -> BundleItemId {
         match self {
             Self::Rsa4096(pss) => pss.digest(),
-            Self::Rsa2048(pss) => pss.digest(),
             Self::Secp256k1(ecdsa) => ecdsa.digest(),
         }
     }

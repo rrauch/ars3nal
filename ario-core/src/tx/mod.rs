@@ -4,14 +4,19 @@ pub mod v2;
 
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
+use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, HashableExt, Hasher, HasherExt, TypedDigest};
 use crate::crypto::hash::{Sha256, Sha384};
+use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature;
 use crate::data::{DataItem, EmbeddedDataItem, ExternalDataItem};
-use crate::entity::{ArEntity, ArEntityHash, ArEntitySignature, Owner, Signature, ToSignPrehash};
+use crate::entity::{
+    ArEntity, ArEntityHash, ArEntitySignature, Owner as EntityOwner, Signature as EntitySignature,
+    ToSignPrehash,
+};
 use crate::json::JsonSource;
 use crate::money::{CurrencyExt, Money, MoneyError, TypedMoney, Winston};
 use crate::tag::Tag;
@@ -20,7 +25,7 @@ use crate::tx::v1::{UnvalidatedV1Tx, V1Tx, V1TxDataError};
 use crate::tx::v2::{TxDraft, UnvalidatedV2Tx, V2Tx, V2TxBuilder, V2TxDataError};
 use crate::typed::{FromInner, Typed};
 use crate::validation::ValidateExt;
-use crate::wallet::WalletAddress;
+use crate::wallet::{WalletAddress, WalletPk};
 use crate::{JsonError, JsonValue, blob, entity};
 use bigdecimal::BigDecimal;
 use k256::Secp256k1;
@@ -108,6 +113,96 @@ impl<'a, const VALIDATED: bool> TryFrom<Tx<'a, VALIDATED>> for V2Tx<'a, VALIDATE
     }
 }
 
+#[derive(Debug)]
+pub enum Owner<'a> {
+    Rsa2048(MaybeOwned<'a, WalletPk<RsaPublicKey<2048>>>),
+    Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
+    Secp256k1(MaybeOwned<'a, WalletPk<EcPublicKey<Secp256k1>>>),
+}
+
+impl<'a> From<Owner<'a>> for EntityOwner<'a> {
+    fn from(value: Owner<'a>) -> Self {
+        match value {
+            Owner::Rsa2048(o) => Self::Rsa2048(o),
+            Owner::Rsa4096(o) => Self::Rsa4096(o),
+            Owner::Secp256k1(o) => Self::Secp256k1(o),
+        }
+    }
+}
+
+impl<'a> TryFrom<EntityOwner<'a>> for Owner<'a> {
+    type Error = EntityOwner<'a>;
+
+    fn try_from(value: EntityOwner<'a>) -> Result<Self, Self::Error> {
+        match value {
+            EntityOwner::Rsa2048(o) => Ok(Self::Rsa2048(o)),
+            EntityOwner::Rsa4096(o) => Ok(Self::Rsa4096(o)),
+            EntityOwner::Secp256k1(o) => Ok(Self::Secp256k1(o)),
+            //other => Err(other),
+        }
+    }
+}
+
+impl<'a> Owner<'a> {
+    pub fn address(&self) -> WalletAddress {
+        match self {
+            Self::Rsa2048(inner) => inner.derive_address(),
+            Self::Rsa4096(inner) => inner.derive_address(),
+            Self::Secp256k1(inner) => inner.derive_address(),
+        }
+    }
+}
+
+impl AsBlob for Owner<'_> {
+    fn as_blob(&self) -> Blob<'_> {
+        match self {
+            Self::Rsa2048(rsa) => rsa.as_blob(),
+            Self::Rsa4096(rsa) => rsa.as_blob(),
+            Self::Secp256k1(ec) => ec.as_blob(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum Signature<'a> {
+    Rsa2048(MaybeOwned<'a, ArEntitySignature<TxHash, RsaPss<2048>>>),
+    Rsa4096(MaybeOwned<'a, ArEntitySignature<TxHash, RsaPss<4096>>>),
+    Secp256k1(MaybeOwned<'a, ArEntitySignature<TxHash, Ecdsa<Secp256k1>>>),
+}
+
+impl<'a> From<Signature<'a>> for EntitySignature<'a, TxHash> {
+    fn from(value: Signature<'a>) -> Self {
+        match value {
+            Signature::Rsa2048(o) => Self::Rsa2048(o),
+            Signature::Rsa4096(o) => Self::Rsa4096(o),
+            Signature::Secp256k1(o) => Self::Secp256k1(o),
+        }
+    }
+}
+
+impl<'a> TryFrom<EntitySignature<'a, TxHash>> for Signature<'a> {
+    type Error = EntitySignature<'a, TxHash>;
+
+    fn try_from(value: EntitySignature<'a, TxHash>) -> Result<Self, Self::Error> {
+        match value {
+            EntitySignature::Rsa2048(o) => Ok(Self::Rsa2048(o)),
+            EntitySignature::Rsa4096(o) => Ok(Self::Rsa4096(o)),
+            EntitySignature::Secp256k1(o) => Ok(Self::Secp256k1(o)),
+            //other => Err(other),
+        }
+    }
+}
+
+impl AsBlob for Signature<'_> {
+    fn as_blob(&self) -> Blob<'_> {
+        match self {
+            Self::Rsa2048(pss) => pss.as_blob(),
+            Self::Rsa4096(pss) => pss.as_blob(),
+            Self::Secp256k1(ecdsa) => ecdsa.as_blob(),
+        }
+    }
+}
+
 impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
     pub fn format(&self) -> Format {
         match &self.0 {
@@ -132,8 +227,18 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
 
     pub fn owner(&self) -> Owner<'_> {
         match &self.0 {
-            TxInner::V1(tx) => tx.as_inner().signature_data.owner(),
-            TxInner::V2(tx) => tx.as_inner().signature_data().owner(),
+            TxInner::V1(tx) => tx
+                .as_inner()
+                .signature_data
+                .owner()
+                .try_into()
+                .expect("owner conversion to succeed"),
+            TxInner::V2(tx) => tx
+                .as_inner()
+                .signature_data()
+                .owner()
+                .try_into()
+                .expect("owner conversion to succeed"),
         }
     }
 
@@ -181,10 +286,20 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
         }
     }
 
-    pub fn signature(&'a self) -> Signature<'a, TxHash> {
+    pub fn signature(&'a self) -> Signature<'a> {
         match &self.0 {
-            TxInner::V1(tx) => tx.as_inner().signature_data.signature(),
-            TxInner::V2(tx) => tx.as_inner().signature_data().signature(),
+            TxInner::V1(tx) => tx
+                .as_inner()
+                .signature_data
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
+            TxInner::V2(tx) => tx
+                .as_inner()
+                .signature_data()
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
         }
     }
 
@@ -298,7 +413,7 @@ impl Display for TxId {
     }
 }
 
-impl<'a> Signature<'a, TxHash> {
+impl<'a> Signature<'a> {
     pub fn signature_type(&self) -> SignatureType {
         match self {
             Self::Rsa4096(_) => SignatureType::RsaPss,
