@@ -77,7 +77,7 @@ impl<T: ArEntityHash> EcdsaSignatureData<T>
 where
     T: ToSignPrehash<Hasher = Sha256>,
 {
-    pub(crate) fn from_raw(raw_signature: Blob, hash: &T) -> Result<Self, Error> {
+    pub(crate) fn recover_from_raw(raw_signature: Blob, hash: &T) -> Result<Self, Error> {
         let signature = EcdsaSignature::<Secp256k1>::try_from(raw_signature)
             .map_err(|e| InvalidSignature(e.to_string()))?;
         let prehash = hash.to_sign_prehash();

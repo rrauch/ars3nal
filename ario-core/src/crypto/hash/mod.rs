@@ -47,6 +47,7 @@ impl<H: Hasher> AsBlob for Digest<H> {
 }
 
 impl<H: Hasher> Digest<H> {
+    #[inline]
     pub fn as_slice(&self) -> &[u8] {
         self.0.as_ref()
     }

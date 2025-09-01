@@ -4,11 +4,11 @@ mod tags;
 
 use super::{Flow, Result};
 use crate::buffer::HeapCircularBuffer;
-use crate::bundle::V2BundleItemData;
-use crate::bundle::read::item::data::Data;
-use crate::bundle::read::item::header::Header;
-use crate::bundle::read::item::tags::Tags;
-use crate::bundle::read::{Context, IncrementalInputProcessor};
+use crate::bundle::v2::RawBundleItem;
+use crate::bundle::v2::reader::item::data::Data;
+use crate::bundle::v2::reader::item::header::Header;
+use crate::bundle::v2::reader::item::tags::Tags;
+use crate::bundle::v2::reader::{Context, IncrementalInputProcessor};
 use bon::bon;
 use bytes::BufMut;
 use itertools::Either;
@@ -20,7 +20,7 @@ pub(crate) enum ItemReader {
 }
 
 impl Flow for ItemReader {
-    type Output = V2BundleItemData<'static>;
+    type Output = RawBundleItem<'static>;
     type Buf<'a> = Box<dyn BufMut + 'a>;
 
     fn required_bytes(&self) -> usize {
@@ -69,7 +69,7 @@ impl ItemReader {
     }
 }
 
-pub struct ItemReaderCtx {
+pub(super) struct ItemReaderCtx {
     len: u64,
     pos: u64,
     buf: HeapCircularBuffer,

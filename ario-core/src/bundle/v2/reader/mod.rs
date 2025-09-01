@@ -1,5 +1,5 @@
-mod index;
-mod item;
+pub(super) mod bundle;
+pub(super) mod item;
 
 use crate::buffer::BufMutExt;
 use bytes::{Buf, BufMut};
@@ -13,11 +13,21 @@ type Result<T> = core::result::Result<T, Error>;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error(transparent)]
-    BundleError(#[from] super::Error),
+    BundleError(#[from] super::super::Error),
     #[error(transparent)]
     BundleItemError(#[from] super::BundleItemError),
     #[error(transparent)]
     IoError(#[from] std::io::Error),
+}
+
+impl From<Error> for super::super::Error {
+    fn from(value: Error) -> Self {
+        match value {
+            Error::BundleError(e) => e,
+            Error::BundleItemError(e) => Self::BundleItemError(e),
+            Error::IoError(e) => Self::IoError(e),
+        }
+    }
 }
 
 pub struct IncrementalInputProcessor<Ctx, S> {
@@ -186,43 +196,4 @@ fn parse_u64(value: &[u8]) -> Option<u64> {
 #[inline]
 fn all_zeroes(value: &[u8]) -> bool {
     value.iter().all(|&b| b == 0)
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::bundle::read::FlowExt;
-    use crate::bundle::read::index::IndexReader;
-    use crate::bundle::read::item::ItemReader;
-    use futures_lite::AsyncSeekExt;
-    use std::io::SeekFrom;
-
-    static BUNDLE_1: &'static [u8] =
-        include_bytes!("../../../testdata/nxoCcgVXf1A3yrMMEXAJpa0YUfgl9EONIKNVR6nr-50.bundle");
-
-    static BUNDLE_2: &'static [u8] =
-        include_bytes!("../../../testdata/Gz9dZaqN2I7AWT0vWGZWi5wlMjbImh13SOIomthyB6M.bundle");
-
-    #[tokio::test]
-    async fn deserialize_bundle() -> anyhow::Result<()> {
-        for bundle in [BUNDLE_1] {
-            let mut input = futures_lite::io::Cursor::new(bundle);
-
-            let index = IndexReader::builder()
-                .build()
-                .process_async(&mut input)
-                .await?;
-
-            for entry in index.entries {
-                input.seek(SeekFrom::Start(entry.offset)).await?;
-                let bundle_item_data = ItemReader::builder()
-                    .len(entry.len)
-                    .build()
-                    .process_async(&mut input)
-                    .await?;
-                println!("");
-            }
-        }
-
-        Ok(())
-    }
 }

@@ -1,39 +1,34 @@
-mod read;
+mod v2;
 
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
+use crate::bundle::v2::{
+    Bundle as V2Bundle, BundleEntry as V2BundleEntry, BundleItem as V2BundleItem, V2BundleItemHash,
+};
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
-use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, HashableExt, Hasher, HasherExt, Sha256, Sha384, TypedDigest};
+use crate::crypto::hash::{Digest, HashableExt, HasherExt, Sha256, Sha384, TypedDigest};
 use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature::TypedSignature;
-use crate::entity::ecdsa::EcdsaSignatureData;
-use crate::entity::pss::PssSignatureData;
 use crate::entity::{
     ArEntity, ArEntityHash, ArEntitySignature, Owner as EntityOwner, Signature as EntitySignature,
     ToSignPrehash,
 };
 use crate::tag::Tag;
+use crate::tx::TxId;
 use crate::typed::{FromInner, Typed};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk};
 use crate::{blob, entity};
-use bytemuck::TransparentWrapper;
+use futures_lite::AsyncRead;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
+use std::io::Read;
 use std::ops::Deref;
 use std::str::FromStr;
 use thiserror::Error;
-
-const MAX_ITEM_COUNT: u16 = 4096;
-const MAX_ITEM_SIZE: u64 = 1024 * 1024 * 1024 * 50;
-const MAX_BUNDLE_SIZE: u64 = 1024 * 1024 * 1024 * 250;
-const MAX_TAG_COUNT: u16 = 128;
-const MAX_TAG_KEY_SIZE: usize = 1024;
-const MAX_TAG_VALUE_SIZE: usize = 3072;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -55,6 +50,8 @@ pub enum Error {
     BundleExceedsMaxSize { max: u64, actual: u64 },
     #[error(transparent)]
     BundleItemError(#[from] BundleItemError),
+    #[error(transparent)]
+    IoError(#[from] std::io::Error),
 }
 
 #[derive(Error, Debug)]
@@ -73,8 +70,8 @@ pub enum BundleItemError {
     InvalidWalletAddress(String),
     #[error("invalid anchor: {0}")]
     InvalidAnchor(String),
-    #[error("tag count '{0}' exceeds maximum '{max}'", max = MAX_TAG_COUNT)]
-    MaxTagCountExceeded(u16),
+    #[error("tag count '{actual}' exceeds maximum '{max}'")]
+    MaxTagCountExceeded { max: u16, actual: u16 },
     #[error("tag size '{0}' out of bounds")]
     TagSizeOutOfBounds(u64),
     #[error(transparent)]
@@ -87,64 +84,221 @@ pub enum BundleItemError {
 
 #[derive(Error, Debug)]
 pub enum TagError {
-    #[error("tag key size '{0}' exceeds maximum '{max}'", max = MAX_TAG_KEY_SIZE)]
-    MaxKeySizeExceeded(usize),
-    #[error("tag value size '{0}' exceeds maximum '{max}'", max = MAX_TAG_VALUE_SIZE)]
-    MaxValueSizeExceeded(usize),
+    #[error("tag key size '{actual}' exceeds maximum '{max}'")]
+    MaxKeySizeExceeded { max: usize, actual: usize },
+    #[error("tag value size '{actual}' exceeds maximum '{max}'")]
+    MaxValueSizeExceeded { max: usize, actual: usize },
     #[error("incorrect tag count; expected '{expected}', actual: '{actual}'")]
     IncorrectTagCount { expected: usize, actual: usize },
+    #[error(transparent)]
+    AvroSerError(#[from] serde_avro_fast::ser::SerError),
     #[error(transparent)]
     AvroDeError(#[from] serde_avro_fast::de::DeError),
 }
 
-#[derive(Debug)]
-pub enum Owner<'a> {
-    Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
-    Secp256k1(MaybeOwned<'a, WalletPk<EcPublicKey<Secp256k1>>>),
-}
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct Bundle(BundleInner);
 
-impl<'a> From<Owner<'a>> for EntityOwner<'a> {
-    fn from(value: Owner<'a>) -> Self {
-        match value {
-            Owner::Rsa4096(o) => Self::Rsa4096(o),
-            Owner::Secp256k1(o) => Self::Secp256k1(o),
+pub type BundleId = TxId;
+
+impl Bundle {
+    #[inline]
+    pub fn read<R: Read>(
+        reader: R,
+        bundle_type: BundleType,
+        bundle_id: BundleId,
+    ) -> Result<Self, Error> {
+        match bundle_type {
+            BundleType::V2 => Ok(Bundle(BundleInner::V2(V2Bundle::read(reader, bundle_id)?))),
+        }
+    }
+
+    #[inline]
+    pub async fn read_async<R: AsyncRead + Unpin>(
+        reader: R,
+        bundle_type: BundleType,
+        bundle_id: BundleId,
+    ) -> Result<Self, Error> {
+        match bundle_type {
+            BundleType::V2 => Ok(Bundle(BundleInner::V2(
+                V2Bundle::read_async(reader, bundle_id).await?,
+            ))),
+        }
+    }
+
+    #[inline]
+    pub fn id(&self) -> &BundleId {
+        match &self.0 {
+            BundleInner::V2(b) => b.id(),
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        match &self.0 {
+            BundleInner::V2(b) => b.len(),
+        }
+    }
+
+    #[inline]
+    pub fn total_size(&self) -> u64 {
+        match &self.0 {
+            BundleInner::V2(b) => b.total_size(),
+        }
+    }
+
+    #[inline]
+    pub fn entries(&self) -> impl Iterator<Item = BundleEntry<'_>> {
+        match &self.0 {
+            BundleInner::V2(b) => b
+                .entries()
+                .into_iter()
+                .map(|e| BundleEntry(BundleEntryInner::V2(e.into()).into())),
+        }
+    }
+
+    #[inline]
+    pub fn bundle_type(&self) -> BundleType {
+        match &self.0 {
+            BundleInner::V2(_) => BundleType::V2,
         }
     }
 }
 
-impl<'a> TryFrom<EntityOwner<'a>> for Owner<'a> {
-    type Error = EntityOwner<'a>;
+#[derive(Debug, Clone)]
+enum BundleInner {
+    V2(V2Bundle),
+}
 
-    fn try_from(value: EntityOwner<'a>) -> Result<Self, Self::Error> {
-        match value {
-            EntityOwner::Rsa4096(o) => Ok(Self::Rsa4096(o)),
-            EntityOwner::Secp256k1(o) => Ok(Self::Secp256k1(o)),
-            other => Err(other),
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct BundleEntry<'a>(MaybeOwned<'a, BundleEntryInner<'a>>);
+
+impl BundleEntry<'_> {
+    #[inline]
+    fn id(&self) -> &BundleItemId {
+        match self.0.deref() {
+            BundleEntryInner::V2(e) => &e.id,
         }
+    }
+
+    #[inline]
+    fn len(&self) -> u64 {
+        match self.0.deref() {
+            BundleEntryInner::V2(e) => e.len,
+        }
+    }
+
+    #[inline]
+    fn offset(&self) -> u64 {
+        match self.0.deref() {
+            BundleEntryInner::V2(e) => e.offset,
+        }
+    }
+
+    #[inline]
+    fn into_owned(self) -> BundleEntry<'static> {
+        BundleEntry(match self.0.into_owned() {
+            BundleEntryInner::V2(e) => BundleEntryInner::V2(e.into_owned().into()).into(),
+        })
     }
 }
 
-impl<'a> Owner<'a> {
-    pub fn address(&self) -> WalletAddress {
+#[derive(Debug, Clone)]
+enum BundleEntryInner<'a> {
+    V2(MaybeOwned<'a, V2BundleEntry>),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum BundleType {
+    V2 = 2,
+}
+
+impl BundleType {
+    /// Detects the `BundleType` based on the supplied transaction `Tag`s.
+    ///
+    /// Returns: `None` if not a supported bundle type
+    pub fn from_tags<'a>(tags: impl IntoIterator<Item = &'a Tag<'a>>) -> Option<BundleType> {
+        let mut is_v2 = false;
+        let mut is_binary = false;
+        tags.into_iter()
+            .for_each(|tag| match (tag.name.as_str(), tag.value.as_str()) {
+                (Some("Bundle-Version"), Some("2.0.0")) => {
+                    is_v2 = true;
+                }
+                (Some("Bundle-Format"), Some("binary")) => {
+                    is_binary = true;
+                }
+                _ => {}
+            });
+
+        if is_v2 && is_binary {
+            Some(BundleType::V2)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn as_u8(&self) -> u8 {
         match self {
-            Self::Rsa4096(inner) => inner.derive_address(),
-            Self::Secp256k1(inner) => inner.derive_address(),
+            Self::V2 => 2,
         }
     }
 }
 
-impl AsBlob for Owner<'_> {
-    fn as_blob(&self) -> Blob<'_> {
-        match self {
-            Self::Rsa4096(rsa) => rsa.as_blob(),
-            Self::Secp256k1(ec) => ec.as_blob(),
-        }
+impl Display for BundleType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_u8())
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 #[repr(transparent)]
 pub struct BundleItem<'a, const VALIDATED: bool = false>(BundleItemInner<'a, VALIDATED>);
+
+pub type UnvalidatedBundleItem<'a> = BundleItem<'a, false>;
+pub type ValidatedBundleItem<'a> = BundleItem<'a, true>;
+
+impl UnvalidatedBundleItem<'static> {
+    fn from_inner(
+        inner: BundleItemInner<'static, false>,
+        expected_id: &BundleItemId,
+    ) -> Result<Self, Error> {
+        if inner.id() != expected_id {
+            return Err(BundleItemError::IdError(BundleItemIdError::IdMismatch {
+                expected: expected_id.clone(),
+                actual: inner.id().clone(),
+            }))?;
+        }
+        Ok(Self(inner))
+    }
+
+    pub fn read<R: Read>(reader: R, entry: &BundleEntry<'_>) -> Result<Self, Error> {
+        Self::from_inner(
+            match entry.0.deref() {
+                BundleEntryInner::V2(e) => BundleItemInner::V2(V2BundleItem::read(reader, e.len)?),
+            },
+            entry.id(),
+        )
+    }
+
+    pub async fn read_async<R: AsyncRead + Unpin>(
+        reader: R,
+        entry: &BundleEntry<'_>,
+    ) -> Result<Self, Error> {
+        Self::from_inner(
+            match entry.0.deref() {
+                BundleEntryInner::V2(e) => {
+                    BundleItemInner::V2(V2BundleItem::read_async(reader, e.len).await?)
+                }
+            },
+            entry.id(),
+        )
+    }
+}
 
 impl<'a, const VALIDATED: bool> ArEntity for BundleItem<'a, VALIDATED> {
     type Id = BundleItemId;
@@ -167,22 +321,11 @@ enum BundleItemInner<'a, const VALIDATED: bool> {
 }
 
 impl<'a, const VALIDATED: bool> BundleItemInner<'a, VALIDATED> {
+    #[inline]
     fn id(&self) -> &BundleItemId {
         match self {
             Self::V2(v2) => v2.id(),
         }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct V2BundleItem<'a, const VALIDATED: bool = false> {
-    id: BundleItemId,
-    inner: V2BundleItemData<'a>,
-}
-
-impl<'a, const VALIDATED: bool> V2BundleItem<'a, VALIDATED> {
-    fn id(&self) -> &BundleItemId {
-        &self.id
     }
 }
 
@@ -196,6 +339,11 @@ pub enum BundleItemIdError {
     Base64Error(#[from] TryFromBase64Error<Infallible>),
     #[error(transparent)]
     BlobError(#[from] blob::Error),
+    #[error("id mismatch; expected: '{expected}', actual '{actual}'")]
+    IdMismatch {
+        expected: BundleItemId,
+        actual: BundleItemId,
+    },
 }
 
 impl FromStr for BundleItemId {
@@ -213,17 +361,24 @@ impl Display for BundleItemId {
     }
 }
 
-pub(crate) type V2BundleItemHash = TypedDigest<BundleItemKind, Sha384>;
+#[derive(Clone, Debug, PartialEq)]
+pub enum BundleItemHash {
+    V2(V2BundleItemHash),
+}
 
-#[derive(Clone, Debug, PartialEq, TransparentWrapper)]
-#[repr(transparent)]
-pub struct BundleItemHash(V2BundleItemHash);
+impl From<V2BundleItemHash> for BundleItemHash {
+    fn from(value: V2BundleItemHash) -> Self {
+        Self::V2(value)
+    }
+}
 
 impl ToSignPrehash for BundleItemHash {
     type Hasher = Sha256;
 
     fn to_sign_prehash(&self) -> MaybeOwned<'_, Digest<Self::Hasher>> {
-        self.0.digest().into()
+        match self {
+            Self::V2(v2) => v2.digest().into(),
+        }
     }
 }
 
@@ -231,7 +386,9 @@ impl ArEntityHash for BundleItemHash {}
 
 impl BundleItemHash {
     pub(crate) fn as_slice(&self) -> &[u8] {
-        self.0.as_slice()
+        match self {
+            Self::V2(v2) => v2.as_slice(),
+        }
     }
 }
 
@@ -266,185 +423,51 @@ impl Display for BundleAnchor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct V2BundleItemData<'a> {
-    //id: BundleItemId,
-    pub anchor: Option<BundleAnchor>,
-    pub tags: Vec<Tag<'a>>,
-    pub target: Option<WalletAddress>,
-    pub data_size: u64,
-    //signature_data: V2SignatureData,
-    //hash: Option<V2BundleItemHash>,
-    pub data_deep_hash: DataDeepHash,
+#[derive(Debug)]
+pub enum Owner<'a> {
+    Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
+    Secp256k1(MaybeOwned<'a, WalletPk<EcPublicKey<Secp256k1>>>),
 }
 
-struct BundleItemDataKind;
-type DataDeepHash = TypedDigest<BundleItemDataKind, Sha384>;
-
-impl<'a> V2BundleItemData<'a> {
-    pub fn hash<H: Hasher>(&self) -> V2BundleItemHash {
-        let elements = [
-            "dataitem".deep_hash(),
-            "1".deep_hash(),
-            //self.signature_data.signature_type().deep_hash(),
-            //self.signature_data.owner().address().deep_hash(),
-            self.target.deep_hash(),
-            self.anchor.deep_hash(),
-            self.tags.deep_hash(),
-            self.data_deep_hash.deref().clone(),
-        ];
-        V2BundleItemHash::from_inner(<() as DeepHashable>::list(elements))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
-#[repr(u8)]
-pub enum Format {
-    V2 = 2,
-}
-
-impl Format {
-    fn as_u8(&self) -> u8 {
-        match self {
-            Self::V2 => 2,
-        }
-    }
-}
-
-impl Display for Format {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_u8())
-    }
-}
-
-impl DeepHashable for Format {
-    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
-        Self::blob(match self {
-            Self::V2 => b"2",
-        })
-    }
-}
-
-//
-// 1: ArweaveSigner
-// 2: Curve25519
-// 3: EthereumSigner
-// 4: HexInjectedSolanaSigner
-// 5: InjectedAptosSigner
-// 6: MultiSignatureAptosSigner
-// 7: TypedEthereumSigner
-//
-#[derive(Copy, Clone, Debug, PartialEq)]
-#[repr(u16)]
-pub enum SignatureType {
-    RsaPss = 1,
-    EcdsaSecp256k1 = 3,
-}
-
-impl SignatureType {
-    fn len(&self) -> usize {
-        match self {
-            Self::RsaPss => 512,
-            Self::EcdsaSecp256k1 => 65,
-        }
-    }
-
-    fn verifier_len(&self) -> usize {
-        match self {
-            Self::RsaPss => 512,
-            Self::EcdsaSecp256k1 => 65,
-        }
-    }
-}
-
-impl Default for SignatureType {
-    fn default() -> Self {
-        Self::RsaPss
-    }
-}
-
-impl AsRef<str> for SignatureType {
-    fn as_ref(&self) -> &str {
-        match self {
-            Self::RsaPss => "1",
-            Self::EcdsaSecp256k1 => "3",
-        }
-    }
-}
-
-impl From<SignatureType> for u16 {
-    fn from(sig_type: SignatureType) -> Self {
-        sig_type as u16
-    }
-}
-
-impl Display for SignatureType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_ref())
-    }
-}
-
-impl TryFrom<u16> for SignatureType {
-    type Error = BundleItemError;
-
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
+impl<'a> From<Owner<'a>> for EntityOwner<'a> {
+    #[inline]
+    fn from(value: Owner<'a>) -> Self {
         match value {
-            1 => Ok(SignatureType::RsaPss),
-            3 => Ok(SignatureType::EcdsaSecp256k1),
-            invalid => Err(BundleItemError::InvalidOrUnsupportedSignatureType(
-                invalid.to_string(),
-            )),
+            Owner::Rsa4096(o) => Self::Rsa4096(o),
+            Owner::Secp256k1(o) => Self::Secp256k1(o),
         }
     }
 }
 
-impl DeepHashable for SignatureType {
-    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
-        self.as_ref().deep_hash()
+impl<'a> TryFrom<EntityOwner<'a>> for Owner<'a> {
+    type Error = EntityOwner<'a>;
+
+    #[inline]
+    fn try_from(value: EntityOwner<'a>) -> Result<Self, Self::Error> {
+        match value {
+            EntityOwner::Rsa4096(o) => Ok(Self::Rsa4096(o)),
+            EntityOwner::Secp256k1(o) => Ok(Self::Secp256k1(o)),
+            other => Err(other),
+        }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum V2SignatureData {
-    Pss(PssSignatureData<BundleItemHash>),
-    Ecdsa(EcdsaSignatureData<BundleItemHash>),
+impl<'a> Owner<'a> {
+    #[inline]
+    pub fn address(&self) -> WalletAddress {
+        match self {
+            Self::Rsa4096(inner) => inner.derive_address(),
+            Self::Secp256k1(inner) => inner.derive_address(),
+        }
+    }
 }
 
-impl V2SignatureData {
-    pub(super) fn owner(&self) -> Owner<'_> {
+impl AsBlob for Owner<'_> {
+    #[inline]
+    fn as_blob(&self) -> Blob<'_> {
         match self {
-            Self::Pss(pss) => pss.owner().try_into().expect("owner conversion to succeed"),
-            Self::Ecdsa(ecdsa) => ecdsa
-                .owner()
-                .try_into()
-                .expect("owner conversion to succeed"),
-        }
-    }
-
-    pub(super) fn signature(&self) -> Signature<'_> {
-        match self {
-            Self::Pss(pss) => pss
-                .signature()
-                .try_into()
-                .expect("signature conversion to succeed"),
-            Self::Ecdsa(ecdsa) => ecdsa
-                .signature()
-                .try_into()
-                .expect("signature conversion to succeed"),
-        }
-    }
-
-    fn verify_sig(&self, hash: &V2BundleItemHash) -> Result<(), BundleItemError> {
-        match self {
-            Self::Pss(pss) => Ok(pss.verify_sig(BundleItemHash::wrap_ref(hash))?),
-            Self::Ecdsa(ecdsa) => Ok(ecdsa.verify_sig(BundleItemHash::wrap_ref(hash))?),
-        }
-    }
-
-    fn signature_type(&self) -> SignatureType {
-        match self {
-            Self::Pss(_) => SignatureType::RsaPss,
-            Self::Ecdsa(EcdsaSignatureData::Secp256k1 { .. }) => SignatureType::EcdsaSecp256k1,
+            Self::Rsa4096(rsa) => rsa.as_blob(),
+            Self::Secp256k1(ec) => ec.as_blob(),
         }
     }
 }
@@ -456,6 +479,7 @@ pub enum Signature<'a> {
 }
 
 impl<'a> From<Signature<'a>> for EntitySignature<'a, BundleItemHash> {
+    #[inline]
     fn from(value: Signature<'a>) -> Self {
         match value {
             Signature::Rsa4096(o) => Self::Rsa4096(o),
@@ -467,6 +491,7 @@ impl<'a> From<Signature<'a>> for EntitySignature<'a, BundleItemHash> {
 impl<'a> TryFrom<EntitySignature<'a, BundleItemHash>> for Signature<'a> {
     type Error = EntitySignature<'a, BundleItemHash>;
 
+    #[inline]
     fn try_from(value: EntitySignature<'a, BundleItemHash>) -> Result<Self, Self::Error> {
         match value {
             EntitySignature::Rsa4096(o) => Ok(Self::Rsa4096(o)),
@@ -477,6 +502,7 @@ impl<'a> TryFrom<EntitySignature<'a, BundleItemHash>> for Signature<'a> {
 }
 
 impl AsBlob for Signature<'_> {
+    #[inline]
     fn as_blob(&self) -> Blob<'_> {
         match self {
             Self::Rsa4096(pss) => pss.as_blob(),
@@ -486,13 +512,7 @@ impl AsBlob for Signature<'_> {
 }
 
 impl<'a> Signature<'a> {
-    pub fn signature_type(&self) -> SignatureType {
-        match self {
-            Self::Rsa4096(_) => SignatureType::RsaPss,
-            Self::Secp256k1(_) => SignatureType::EcdsaSecp256k1,
-        }
-    }
-
+    #[inline]
     pub fn digest(&self) -> BundleItemId {
         match self {
             Self::Rsa4096(pss) => pss.digest(),
@@ -513,51 +533,3 @@ impl BundledDataItem {
 }
 
 pub type MaybeOwnedBundledDataItem<'a> = MaybeOwned<'a, BundledDataItem>;
-
-pub struct V2Index {
-    entries: Vec<V2Entry>,
-}
-
-impl V2Index {
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn total_size(&self) -> u64 {
-        self.entries.last().map(|e| e.offset + e.len).unwrap_or(0)
-    }
-}
-
-impl FromIterator<(BundleItemId, u64)> for V2Index {
-    fn from_iter<T: IntoIterator<Item = (BundleItemId, u64)>>(iter: T) -> Self {
-        //let mut idx = 0usize;
-        let mut size = 0u64;
-        let mut entries = iter
-            .into_iter()
-            .map(|(id, len)| {
-                size = size.saturating_add(len);
-                V2Entry {
-                    id,
-                    offset: size.saturating_sub(len),
-                    len,
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let header_len = (32 + (entries.len() * 64)) as u64;
-
-        entries
-            .iter_mut()
-            .for_each(|e| e.offset = e.offset.saturating_add(header_len));
-
-        // todo: validate
-
-        V2Index { entries }
-    }
-}
-
-struct V2Entry {
-    id: BundleItemId,
-    offset: u64,
-    len: u64,
-}

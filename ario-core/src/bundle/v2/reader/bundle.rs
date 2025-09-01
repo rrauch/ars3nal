@@ -1,23 +1,22 @@
 use crate::blob::Blob;
 use crate::buffer::HeapCircularBuffer;
 use crate::bundle::Error as BundleError;
-use crate::bundle::read::{
+use crate::bundle::v2::reader::{
     Context, Flow, IncrementalInputProcessor, PollResult, Result, Step, parse_u16, parse_u64,
 };
-use crate::bundle::{
-    BundleItemId, MAX_BUNDLE_SIZE, MAX_ITEM_COUNT, MAX_ITEM_SIZE, V2Entry, V2Index,
-};
+use crate::bundle::v2::{Bundle, BundleEntry, MAX_BUNDLE_SIZE, MAX_ITEM_COUNT, MAX_ITEM_SIZE};
+use crate::bundle::{BundleId, BundleItemId};
 use bon::bon;
 use bytes::BufMut;
 use itertools::Either;
 
-pub enum IndexReader {
-    Header(IncrementalInputProcessor<IndexReaderCtx, Header>),
-    Entries(IncrementalInputProcessor<IndexReaderCtx, Entries>),
+pub(crate) enum BundleReader {
+    Header(IncrementalInputProcessor<BundleReaderCtx, Header>),
+    Entries(IncrementalInputProcessor<BundleReaderCtx, Entries>),
 }
 
-impl Flow for IndexReader {
-    type Output = V2Index;
+impl Flow for BundleReader {
+    type Output = Bundle;
     type Buf<'a> = Box<dyn BufMut + 'a>;
 
     fn required_bytes(&self) -> usize {
@@ -34,7 +33,7 @@ impl Flow for IndexReader {
         }
     }
 
-    fn try_process(self) -> crate::bundle::read::Result<Either<Self, Self::Output>> {
+    fn try_process(self) -> crate::bundle::v2::reader::Result<Either<Self, Self::Output>> {
         Ok(match self {
             Self::Header(s) => match s.transition()? {
                 Either::Left(header) => Either::Left(Self::Header(header)),
@@ -42,28 +41,30 @@ impl Flow for IndexReader {
             },
             Self::Entries(s) => match s.finalize()? {
                 Either::Left(entries) => Either::Left(Self::Entries(entries)),
-                Either::Right(index) => Either::Right(index),
+                Either::Right(bundle) => Either::Right(bundle),
             },
         })
     }
 }
 
 #[bon]
-impl IndexReader {
+impl BundleReader {
     #[builder]
-    pub fn new(#[builder(default = 2048)] buffer_capacity: usize) -> Self {
-        let ctx = IndexReaderCtx {
+    pub fn new(id: BundleId, #[builder(default = 2048)] buffer_capacity: usize) -> Self {
+        let ctx = BundleReaderCtx {
+            id,
             buf: HeapCircularBuffer::new(buffer_capacity),
         };
         Self::Header(IncrementalInputProcessor::new(ctx, Header))
     }
 }
 
-pub struct IndexReaderCtx {
+pub(super) struct BundleReaderCtx {
+    id: BundleId,
     buf: HeapCircularBuffer,
 }
 
-impl Context for IndexReaderCtx {
+impl Context for BundleReaderCtx {
     type Buf = HeapCircularBuffer;
 
     fn buffer(&mut self) -> &mut Self::Buf {
@@ -73,13 +74,13 @@ impl Context for IndexReaderCtx {
 
 pub struct Header;
 
-impl Step<IndexReaderCtx> for Header {
+impl Step<BundleReaderCtx> for Header {
     type Next = Entries;
-    fn required_bytes(&self, ctx: &IndexReaderCtx) -> usize {
+    fn required_bytes(&self, ctx: &BundleReaderCtx) -> usize {
         32usize.saturating_sub(ctx.buf.remaining())
     }
 
-    fn poll(&mut self, ctx: &mut IndexReaderCtx) -> Result<PollResult<Self::Next>> {
+    fn poll(&mut self, ctx: &mut BundleReaderCtx) -> Result<PollResult<Self::Next>> {
         Ok(if self.required_bytes(ctx) > 0 {
             PollResult::NeedMoreData
         } else {
@@ -89,7 +90,7 @@ impl Step<IndexReaderCtx> for Header {
 }
 
 impl Header {
-    fn parse_item_count(ctx: &mut IndexReaderCtx) -> Result<u16> {
+    fn parse_item_count(ctx: &mut BundleReaderCtx) -> Result<u16> {
         let item_count =
             parse_u16(&ctx.buf.make_contiguous()[..32]).ok_or(BundleError::InvalidHeader)?;
         if item_count == 0 {
@@ -111,17 +112,17 @@ pub struct Entries {
     entries: Vec<(BundleItemId, u64)>,
 }
 
-impl Step<IndexReaderCtx> for Entries {
-    type Next = V2Index;
+impl Step<BundleReaderCtx> for Entries {
+    type Next = Bundle;
 
-    fn required_bytes(&self, ctx: &IndexReaderCtx) -> usize {
+    fn required_bytes(&self, ctx: &BundleReaderCtx) -> usize {
         if self.is_full() {
             return 0;
         }
         64usize.saturating_sub(ctx.buf.remaining())
     }
 
-    fn poll(&mut self, ctx: &mut IndexReaderCtx) -> Result<PollResult<Self::Next>> {
+    fn poll(&mut self, ctx: &mut BundleReaderCtx) -> Result<PollResult<Self::Next>> {
         loop {
             if !self.is_full() {
                 let bytes_required = self.required_bytes(ctx);
@@ -131,7 +132,7 @@ impl Step<IndexReaderCtx> for Entries {
                 self.parse_entry(ctx)?;
                 ctx.buf.reset();
             } else {
-                return Ok(PollResult::Continue(self.finalize()?));
+                return Ok(PollResult::Continue(self.finalize(&ctx.id)?));
             }
         }
     }
@@ -149,7 +150,7 @@ impl Entries {
         self.entries.len() >= self.item_count as usize
     }
 
-    fn finalize(&mut self) -> Result<V2Index> {
+    fn finalize(&mut self, id: &BundleId) -> Result<Bundle> {
         if !self.is_full() {
             return Err(BundleError::InsufficientItems {
                 required: self.item_count,
@@ -163,7 +164,7 @@ impl Entries {
             .drain(..)
             .map(|(id, len)| {
                 size = size.saturating_add(len);
-                V2Entry {
+                BundleEntry {
                     id,
                     offset: size.saturating_sub(len),
                     len,
@@ -177,18 +178,21 @@ impl Entries {
             .iter_mut()
             .for_each(|e| e.offset = e.offset.saturating_add(header_len));
 
-        let index = V2Index { entries };
-        let total_size = index.total_size();
+        let bundle = Bundle {
+            id: id.clone(),
+            entries,
+        };
+        let total_size = bundle.total_size();
         if total_size > MAX_BUNDLE_SIZE {
             return Err(BundleError::BundleExceedsMaxSize {
                 max: MAX_BUNDLE_SIZE,
                 actual: total_size,
             })?;
         }
-        Ok(index)
+        Ok(bundle)
     }
 
-    fn parse_entry(&mut self, ctx: &mut IndexReaderCtx) -> Result<()> {
+    fn parse_entry(&mut self, ctx: &mut BundleReaderCtx) -> Result<()> {
         if self.is_full() {
             // all expected entries parsed already
             return Err(BundleError::InvalidHeader)?;

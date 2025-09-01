@@ -1,17 +1,14 @@
-use crate::blob::{AsBlob, Blob, OwnedBlob};
-use crate::bundle::read::item::ItemReaderCtx;
-use crate::bundle::read::item::tags::Tags;
-use crate::bundle::read::{PollResult, Result, Step, parse_u16, parse_u64};
-use crate::bundle::{
-    BundleAnchor, BundleItemError, MAX_TAG_COUNT, MAX_TAG_KEY_SIZE, MAX_TAG_VALUE_SIZE,
-    SignatureType, V2SignatureData,
-};
-use crate::wallet::WalletAddress;
+use crate::blob::{Blob, OwnedBlob};
+use crate::bundle::BundleItemError;
+use crate::bundle::v2::reader::item::ItemReaderCtx;
+use crate::bundle::v2::reader::item::tags::Tags;
+use crate::bundle::v2::reader::{PollResult, Result, Step, parse_u16, parse_u64};
+use crate::bundle::v2::{MAX_TAG_COUNT, MAX_TAG_KEY_SIZE, MAX_TAG_VALUE_SIZE, SignatureType};
 
 enum Field {
     SignatureType,
     Signature(SignatureType),
-    Owner(OwnedBlob, SignatureType),
+    Owner(SignatureType),
     Target,
     MaybeAnchor,
     Anchor,
@@ -21,9 +18,11 @@ enum Field {
 
 pub(crate) struct Header {
     next_field: Field,
-    signature_data: Option<V2SignatureData>,
-    target: Option<WalletAddress>,
-    anchor: Option<BundleAnchor>,
+    owner: Option<OwnedBlob>,
+    signature: Option<OwnedBlob>,
+    signature_type: Option<SignatureType>,
+    target: Option<OwnedBlob>,
+    anchor: Option<OwnedBlob>,
     tag_count: u16,
     tag_size: u64,
 }
@@ -35,8 +34,8 @@ impl Step<ItemReaderCtx> for Header {
         let len = match &self.next_field {
             Field::SignatureType => 2,
             Field::Signature(sig_type) => sig_type.len(),
-            Field::Owner(_, sig_type) => sig_type.verifier_len() + 1, // next field presence byte
-            Field::Target => 32 + 1,                                  // next field presence byte
+            Field::Owner(sig_type) => sig_type.verifier_len() + 1, // next field presence byte
+            Field::Target => 32 + 1,                               // next field presence byte
             Field::MaybeAnchor => 1,
             Field::Anchor => 32,
             Field::TagCount => 8,
@@ -64,7 +63,9 @@ impl Header {
     pub(super) fn new() -> Self {
         Self {
             next_field: Field::SignatureType,
-            signature_data: None,
+            owner: None,
+            signature: None,
+            signature_type: None,
             target: None,
             anchor: None,
             tag_count: 0,
@@ -74,6 +75,18 @@ impl Header {
 
     fn transition(&mut self, ctx: &ItemReaderCtx) -> Result<Tags> {
         //todo: additional verification
+        let (owner, signature, signature_type) = match (
+            self.owner.take(),
+            self.signature.take(),
+            self.signature_type.take(),
+        ) {
+            (Some(owner), Some(signature), Some(signature_type)) => {
+                (owner, signature, signature_type)
+            }
+            _ => {
+                return Err(BundleItemError::Other("signature data missing".to_string()))?;
+            }
+        };
         if self.tag_size > ctx.remaining() {
             return Err(BundleItemError::TagSizeOutOfBounds(self.tag_size))?;
         }
@@ -81,6 +94,9 @@ impl Header {
             self.tag_size as usize,
             ctx.buf.capacity(),
             self.tag_count as usize,
+            owner,
+            signature,
+            signature_type,
             self.target.take(),
             self.anchor.take(),
         )?)
@@ -93,11 +109,13 @@ impl Header {
             }
             Field::Signature(sig_type) => {
                 let sig_type = *sig_type;
-                self.next_field = Field::Owner(parse_signature_blob(buf, sig_type)?, sig_type);
+                self.signature_type = Some(sig_type);
+                self.signature = Some(Blob::from(buf).into_owned());
+                self.next_field = Field::Owner(sig_type);
             }
-            Field::Owner(owner, sig_type) => {
-                //todo: V2SignatureData
+            Field::Owner(_) => {
                 let (content, has_target_field) = buf.split_at(buf.len() - 1);
+                self.owner = Some(Blob::from(content).into_owned());
                 self.next_field = if parse_presence_byte(has_target_field)? {
                     // target present byte set
                     Field::Target
@@ -108,7 +126,7 @@ impl Header {
             }
             Field::Target => {
                 let (content, has_anchor_field) = buf.split_at(buf.len() - 1);
-                self.target = Some(parse_target(content)?);
+                self.target = Some(Blob::from(content).into_owned());
                 self.next_field = if parse_presence_byte(has_anchor_field)? {
                     // anchor present byte set
                     Field::Anchor
@@ -125,7 +143,7 @@ impl Header {
                 };
             }
             Field::Anchor => {
-                self.anchor = Some(parse_anchor(buf)?);
+                self.anchor = Some(Blob::from(buf).into_owned());
                 self.next_field = Field::TagCount;
             }
             Field::TagCount => {
@@ -152,50 +170,15 @@ fn parse_signature_type(buf: &[u8]) -> Result<SignatureType> {
 }
 
 #[inline]
-fn parse_signature_blob(buf: &[u8], sig_type: SignatureType) -> Result<OwnedBlob> {
-    if buf.len() != sig_type.len() {
-        return Err(BundleItemError::IncorrectSignatureLength {
-            expected: sig_type.len(),
-            actual: buf.len(),
-        })?;
-    }
-    Ok(Blob::from(buf).into_owned())
-}
-
-#[inline]
-fn parse_signature_owner(
-    buf: &[u8],
-    sig_type: SignatureType,
-    sig_blob: OwnedBlob,
-) -> Result<V2SignatureData> {
-    if buf.len() != sig_type.verifier_len() {
-        return Err(BundleItemError::IncorrectOwnerLength {
-            expected: sig_type.verifier_len(),
-            actual: buf.len(),
-        })?;
-    }
-    todo!()
-}
-
-#[inline]
-fn parse_target(buf: &[u8]) -> Result<WalletAddress> {
-    Ok(WalletAddress::try_from(buf.as_blob())
-        .map_err(|e| BundleItemError::InvalidWalletAddress(e.to_string()))?)
-}
-
-#[inline]
-fn parse_anchor(buf: &[u8]) -> Result<BundleAnchor> {
-    Ok(BundleAnchor::try_from(buf.as_blob())
-        .map_err(|e| BundleItemError::InvalidAnchor(e.to_string()))?)
-}
-
-#[inline]
 fn parse_tag_count(buf: &[u8]) -> Result<u16> {
     let tag_count = parse_u16(buf).ok_or(BundleItemError::Other(
         "invalid tag count value".to_string(),
     ))?;
     if tag_count > MAX_TAG_COUNT {
-        return Err(BundleItemError::MaxTagCountExceeded(tag_count))?;
+        return Err(BundleItemError::MaxTagCountExceeded {
+            max: MAX_TAG_COUNT,
+            actual: tag_count,
+        })?;
     }
     Ok(tag_count)
 }

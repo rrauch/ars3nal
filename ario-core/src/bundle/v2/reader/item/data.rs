@@ -1,27 +1,35 @@
-use crate::bundle::read::item::ItemReaderCtx;
-use crate::bundle::read::{PollResult, Result, Step};
-use crate::bundle::{BundleAnchor, BundleItemError, DataDeepHash, V2BundleItemData};
+use crate::blob::OwnedBlob;
+use crate::bundle::BundleItemError;
+use crate::bundle::v2::reader::item::ItemReaderCtx;
+use crate::bundle::v2::reader::{PollResult, Result, Step};
+use crate::bundle::v2::{DataDeepHash, RawBundleItem, SignatureType};
 use crate::crypto::hash::{Hasher, Sha384, deep_hash};
-use crate::tag::Tag;
-use crate::wallet::WalletAddress;
 use bytes::Buf;
 use std::cmp::min;
 
 pub(crate) struct Data {
     len: u64,
     processed: u64,
-    target: Option<WalletAddress>,
-    anchor: Option<BundleAnchor>,
-    tags: Vec<Tag<'static>>,
+    owner: OwnedBlob,
+    signature: OwnedBlob,
+    signature_type: SignatureType,
+    target: Option<OwnedBlob>,
+    anchor: Option<OwnedBlob>,
+    tag_data: OwnedBlob,
+    tag_count: usize,
     hasher: Option<Sha384>,
 }
 
 impl Data {
     pub(super) fn new(
         len: u64,
-        target: Option<WalletAddress>,
-        anchor: Option<BundleAnchor>,
-        tags: Vec<Tag<'static>>,
+        owner: OwnedBlob,
+        signature: OwnedBlob,
+        signature_type: SignatureType,
+        target: Option<OwnedBlob>,
+        anchor: Option<OwnedBlob>,
+        tag_data: OwnedBlob,
+        tag_count: usize,
     ) -> Result<Self> {
         if len == 0 {
             //todo: find out if data item payload can be zero-sized
@@ -31,9 +39,13 @@ impl Data {
         Ok(Self {
             len,
             processed: 0,
+            owner,
+            signature,
+            signature_type,
             target,
             anchor,
-            tags,
+            tag_data,
+            tag_count,
             hasher: Some(Sha384::new()),
         })
     }
@@ -47,7 +59,7 @@ impl Data {
         self.len.saturating_sub(self.processed)
     }
 
-    fn finalize(&mut self) -> Result<V2BundleItemData<'static>> {
+    fn finalize(&mut self) -> Result<RawBundleItem<'static>> {
         if self.processed != self.len {
             return Err(BundleItemError::Other(format!(
                 "wrong number of bytes processed: {} != {}",
@@ -57,10 +69,14 @@ impl Data {
         let hash = self.hasher.take().unwrap().finalize();
         let data_deep_hash =
             DataDeepHash::new_from_inner(deep_hash::from_data_digest(&hash, self.processed));
-        Ok(V2BundleItemData {
+        Ok(RawBundleItem {
             anchor: self.anchor.take(),
-            tags: std::mem::replace(&mut self.tags, vec![]),
+            tag_data: self.tag_data.clone(),
+            tag_count: self.tag_count,
             target: self.target.take(),
+            owner: self.owner.clone(),
+            signature: self.signature.clone(),
+            signature_type: self.signature_type,
             data_size: self.len,
             data_deep_hash,
         })
@@ -68,7 +84,7 @@ impl Data {
 }
 
 impl Step<ItemReaderCtx> for Data {
-    type Next = V2BundleItemData<'static>;
+    type Next = RawBundleItem<'static>;
 
     fn required_bytes(&self, ctx: &ItemReaderCtx) -> usize {
         min(

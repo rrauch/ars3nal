@@ -314,7 +314,7 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
                 }
                 .tx_hash();
                 (
-                    V2SignatureData::Ecdsa(EcdsaSignatureData::from_raw(raw.signature, &tx_hash)?),
+                    V2SignatureData::Ecdsa(EcdsaSignatureData::recover_from_raw(raw.signature, &tx_hash)?),
                     Some(tx_hash),
                 )
             }

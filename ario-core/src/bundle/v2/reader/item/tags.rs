@@ -1,44 +1,24 @@
-use crate::blob::OwnedBlob;
+use crate::blob::{Blob, OwnedBlob};
 use crate::buffer::{BufMutExt, HeapCircularBuffer};
-use crate::bundle::read::item::{Data, ItemReaderCtx};
-use crate::bundle::read::{PollResult, Result, Step};
-use crate::bundle::{BundleAnchor, BundleItemError, TagError};
-use crate::tag::{Tag, TagName, TagValue};
-use crate::wallet::WalletAddress;
+use crate::bundle::v2::SignatureType;
+use crate::bundle::v2::reader::item::ItemReaderCtx;
+use crate::bundle::v2::reader::item::data::Data;
+use crate::bundle::v2::reader::{PollResult, Result, Step};
+use crate::bundle::{BundleItemError, TagError};
 use bytes::Buf;
-use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-use serde_avro_fast::Schema;
 use std::cmp::max;
-use std::ops::Deref;
-use std::sync::LazyLock;
 
 const MAX_TAG_BUF_SIZE: usize = 1024 * 1024 * 4; // 4 MiB
-
-static AVRO_SCHEMA: LazyLock<Schema> = LazyLock::new(|| {
-    r#"
-{
-  "type": "array",
-  "items": {
-    "type": "record",
-    "name": "Tag",
-    "fields": [
-      { "name": "name", "type": "bytes" },
-      { "name": "value", "type": "bytes" }
-    ]
-  }
-}
-"#
-    .parse()
-    .expect("Failed to parse avro schema")
-});
 
 pub(crate) struct Tags {
     len: usize,
     buf: Option<HeapCircularBuffer>,
     count: usize,
-    target: Option<WalletAddress>,
-    anchor: Option<BundleAnchor>,
+    owner: OwnedBlob,
+    signature: OwnedBlob,
+    signature_type: SignatureType,
+    target: Option<OwnedBlob>,
+    anchor: Option<OwnedBlob>,
 }
 
 impl Tags {
@@ -46,8 +26,11 @@ impl Tags {
         len: usize,
         buf_capacity: usize,
         count: usize,
-        target: Option<WalletAddress>,
-        anchor: Option<BundleAnchor>,
+        owner: OwnedBlob,
+        signature: OwnedBlob,
+        signature_type: SignatureType,
+        target: Option<OwnedBlob>,
+        anchor: Option<OwnedBlob>,
     ) -> Result<Self> {
         // No crate with streaming avro support exists at the time this was written
         // so we have no other choice but to buffer the full tags value!
@@ -69,24 +52,12 @@ impl Tags {
             len,
             buf,
             count,
+            owner,
+            signature,
+            signature_type,
             target,
             anchor,
         })
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct AvroTag {
-    name: OwnedBlob,
-    value: OwnedBlob,
-}
-
-impl From<AvroTag> for Tag<'static> {
-    fn from(value: AvroTag) -> Self {
-        Tag::new(
-            TagName::new_from_inner(value.name),
-            TagValue::new_from_inner(value.value),
-        )
     }
 }
 
@@ -124,35 +95,27 @@ impl Step<ItemReaderCtx> for Tags {
 
 impl Tags {
     fn transition(&mut self, ctx: &mut ItemReaderCtx) -> Result<Data> {
-        let tags = self.tags(ctx).map_err(|e| BundleItemError::from(e))?;
+        let tag_data = self.tags(ctx).map_err(|e| BundleItemError::from(e))?;
         let data_size = ctx.remaining();
         Ok(Data::new(
             data_size,
+            self.owner.clone(),
+            self.signature.clone(),
+            self.signature_type,
             self.target.take(),
             self.anchor.take(),
-            tags,
+            tag_data,
+            self.count,
         )?)
     }
 
-    fn tags(
-        &mut self,
-        ctx: &mut ItemReaderCtx,
-    ) -> core::result::Result<Vec<Tag<'static>>, TagError> {
+    fn tags(&mut self, ctx: &mut ItemReaderCtx) -> core::result::Result<OwnedBlob, TagError> {
         if self.count == 0 {
-            return Ok(vec![]);
+            return Ok([].into());
         }
 
-        let avro_data = ctx.buf.make_contiguous();
-        let res = serde_avro_fast::from_datum_slice::<Vec<AvroTag>>(avro_data, AVRO_SCHEMA.deref());
+        let avro_data = Blob::from(ctx.buf.make_contiguous()).into_owned();
         ctx.buf.reset();
-        let tags = res?.into_iter().map(|t| Tag::from(t)).collect_vec();
-
-        if tags.len() != self.count {
-            return Err(TagError::IncorrectTagCount {
-                expected: self.count,
-                actual: tags.len(),
-            });
-        }
-        Ok(tags)
+        Ok(avro_data)
     }
 }
