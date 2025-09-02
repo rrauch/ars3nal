@@ -11,6 +11,8 @@ chrono = "0.4"
 derive-where = "1.6"
 derive_more = "2.0"
 ecdsa = "0.17.0-rc.5"
+ed25519 = "3.0.0-pre.0"
+ed25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek.git", rev = "44433757a07c68a2b4f453c25d69469ae2f62986" }
 elliptic-curve = { git = "https://github.com/RustCrypto/traits.git", rev = "d5355ef8a85577d9842505cf3241f6e1d011d0da" }
 futures-lite = "2.6"
 maybe-owned = "0.3"
@@ -29,4 +31,5 @@ uuid = "1"
 zeroize = "1.8"
 
 [patch.crates-io]
+ed25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek.git", rev = "44433757a07c68a2b4f453c25d69469ae2f62986" }
 elliptic-curve = { git = "https://github.com/RustCrypto/traits.git", rev = "d5355ef8a85577d9842505cf3241f6e1d011d0da" }

@@ -1,9 +1,11 @@
 pub mod ecdsa;
+pub mod eddsa;
 pub mod pss;
 
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
+use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
 use crate::crypto::hash::{Digest, Hasher};
 use crate::crypto::keys::{PublicKey, SecretKey};
 use crate::crypto::rsa::RsaPublicKey;
@@ -40,9 +42,23 @@ pub trait ArEntity {
     fn id(&self) -> &Self::Id;
 }
 
-pub(crate) trait ToSignPrehash {
-    type Hasher: Hasher;
-    fn to_sign_prehash(&self) -> MaybeOwned<'_, Digest<Self::Hasher>>;
+pub(crate) trait PrehashFor<H: Hasher> {
+    fn prehash(&self) -> MaybeOwned<'_, Digest<H>>;
+}
+
+pub(super) trait ToSignPrehash {
+    fn to_sign_prehash<H: Hasher>(&self) -> MaybeOwned<'_, Digest<H>>
+    where
+        Self: PrehashFor<H>;
+}
+
+impl<T: ?Sized> ToSignPrehash for T {
+    fn to_sign_prehash<H: Hasher>(&self) -> MaybeOwned<'_, Digest<H>>
+    where
+        Self: PrehashFor<H>,
+    {
+        self.prehash()
+    }
 }
 
 #[derive(Debug)]
@@ -50,6 +66,7 @@ pub enum Owner<'a> {
     Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
     Rsa2048(MaybeOwned<'a, WalletPk<RsaPublicKey<2048>>>),
     Secp256k1(MaybeOwned<'a, WalletPk<EcPublicKey<Secp256k1>>>),
+    Ed25519(MaybeOwned<'a, WalletPk<Ed25519VerifyingKey>>),
 }
 
 impl<'a> Owner<'a> {
@@ -58,6 +75,7 @@ impl<'a> Owner<'a> {
             Self::Rsa4096(inner) => inner.derive_address(),
             Self::Rsa2048(inner) => inner.derive_address(),
             Self::Secp256k1(inner) => inner.derive_address(),
+            Self::Ed25519(inner) => inner.derive_address(),
         }
     }
 }
@@ -68,6 +86,7 @@ impl AsBlob for Owner<'_> {
             Self::Rsa4096(rsa) => rsa.as_blob(),
             Self::Rsa2048(rsa) => rsa.as_blob(),
             Self::Secp256k1(ec) => ec.as_blob(),
+            Self::Ed25519(ed25519) => ed25519.as_blob(),
         }
     }
 }
@@ -77,6 +96,7 @@ pub enum Signature<'a, T: ArEntityHash> {
     Rsa4096(MaybeOwned<'a, ArEntitySignature<T, RsaPss<4096>>>),
     Rsa2048(MaybeOwned<'a, ArEntitySignature<T, RsaPss<2048>>>),
     Secp256k1(MaybeOwned<'a, ArEntitySignature<T, Ecdsa<Secp256k1>>>),
+    Ed25519(MaybeOwned<'a, ArEntitySignature<T, Ed25519>>),
 }
 
 impl<T: ArEntityHash> AsBlob for Signature<'_, T> {
@@ -85,6 +105,7 @@ impl<T: ArEntityHash> AsBlob for Signature<'_, T> {
             Self::Rsa4096(pss) => pss.as_blob(),
             Self::Rsa2048(pss) => pss.as_blob(),
             Self::Secp256k1(ecdsa) => ecdsa.as_blob(),
+            Self::Ed25519(ed25519) => ed25519.as_blob(),
         }
     }
 }

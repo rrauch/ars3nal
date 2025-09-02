@@ -2,10 +2,11 @@ pub mod deep_hash;
 
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob};
-use crate::crypto::Output;
+use crate::crypto::{Output, OutputLen};
 use crate::typed::Typed;
 use bytes::Bytes;
 use derive_where::derive_where;
+use digest::FixedOutputReset;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use uuid::Uuid;
@@ -16,6 +17,9 @@ pub type Sha256Hash = Digest<Sha256>;
 pub type Sha384 = sha2::Sha384;
 pub type Sha384Hash = Digest<Sha384>;
 
+pub type Sha512 = sha2::Sha512;
+pub type Sha512Hash = Digest<Sha512>;
+
 pub type TypedDigest<T, H: Hasher> = Typed<T, Digest<H>>;
 
 #[derive_where(Clone, PartialEq, Hash)]
@@ -25,6 +29,9 @@ pub struct Digest<H: Hasher>(H::Output);
 impl<H: Hasher> Digest<H> {
     pub(crate) fn from_inner(inner: H::Output) -> Self {
         Self(inner)
+    }
+    pub(crate) fn as_wrapped_digest(&self) -> DigestWrapper<H> {
+        DigestWrapper(&self)
     }
 }
 
@@ -68,6 +75,75 @@ impl<'a, H: Hasher> TryFrom<Blob<'a>> for Digest<H> {
 impl<H: Hasher> AsRef<[u8]> for Digest<H> {
     fn as_ref(&self) -> &[u8] {
         self.as_slice()
+    }
+}
+
+pub(crate) struct DigestWrapper<'a, H: Hasher>(&'a Digest<H>);
+
+impl<H: Hasher<Output = digest::Output<H>> + digest::OutputSizeUser> digest::OutputSizeUser
+    for DigestWrapper<'_, H>
+where
+    <H as digest::OutputSizeUser>::OutputSize: OutputLen,
+{
+    type OutputSize = <H as digest::OutputSizeUser>::OutputSize;
+}
+
+impl<H: Hasher<Output = digest::Output<H>> + digest::OutputSizeUser> digest::Digest
+    for DigestWrapper<'_, H>
+where
+    <H as digest::OutputSizeUser>::OutputSize: OutputLen,
+{
+    fn new() -> Self {
+        unimplemented!("do not use!")
+    }
+
+    fn new_with_prefix(_: impl AsRef<[u8]>) -> Self {
+        unimplemented!("do not use!")
+    }
+
+    fn update(&mut self, _: impl AsRef<[u8]>) {
+        unimplemented!("do not use!")
+    }
+
+    fn chain_update(self, _: impl AsRef<[u8]>) -> Self {
+        unimplemented!("do not use!")
+    }
+
+    fn finalize(self) -> digest::Output<Self> {
+        self.0.0.clone()
+    }
+
+    fn finalize_into(self, out: &mut digest::Output<Self>) {
+        out.copy_from_slice(self.0.as_slice())
+    }
+
+    fn finalize_reset(&mut self) -> digest::Output<Self>
+    where
+        Self: FixedOutputReset,
+    {
+        self.0.0.as_slice().try_into().expect("slice len to be correct")
+    }
+
+    fn finalize_into_reset(&mut self, out: &mut digest::Output<Self>)
+    where
+        Self: FixedOutputReset,
+    {
+        out.copy_from_slice(self.0.as_slice())
+    }
+
+    fn reset(&mut self)
+    where
+        Self: digest::Reset,
+    {
+        // do nothing
+    }
+
+    fn output_size() -> usize {
+        <Self as digest::OutputSizeUser>::output_size()
+    }
+
+    fn digest(_: impl AsRef<[u8]>) -> digest::Output<Self> {
+        unimplemented!("do not use!")
     }
 }
 

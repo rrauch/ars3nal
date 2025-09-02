@@ -10,7 +10,7 @@ use ecdsa::Signature as ExternalSignature;
 use ecdsa::signature::hazmat::PrehashVerifier;
 use hybrid_array::typenum::Unsigned;
 use std::marker::PhantomData;
-use std::ops::Add;
+use std::ops::{Add, Range};
 use thiserror::Error;
 
 pub struct Ecdsa<C: Curve>(PhantomData<C>);
@@ -18,7 +18,7 @@ pub struct Ecdsa<C: Curve>(PhantomData<C>);
 #[derive_where(Clone, Debug, PartialEq)]
 pub struct EcdsaSignature<C: Curve> {
     inner: ExternalSignature<C>,
-    rec_id: RecoveryId,
+    rec_id: Option<RecoveryId>,
 }
 
 impl<C: Curve> EcdsaSignature<C> {
@@ -26,20 +26,26 @@ impl<C: Curve> EcdsaSignature<C> {
         &self,
         msg: <Ecdsa<C> as Scheme>::Message<'_>,
     ) -> Result<<Ecdsa<C> as Scheme>::Verifier, EcdsaError> {
-        Ok(EcPublicKey(elliptic_curve::PublicKey::<C>::from(
-            ecdsa::VerifyingKey::recover_from_prehash_noverify(
-                msg.as_slice(),
-                &self.inner,
-                self.rec_id,
-            )?,
-        )))
+        if let Some(rec_id) = self.rec_id {
+            Ok(EcPublicKey(elliptic_curve::PublicKey::<C>::from(
+                ecdsa::VerifyingKey::recover_from_prehash_noverify(
+                    msg.as_slice(),
+                    &self.inner,
+                    rec_id,
+                )?,
+            )))
+        } else {
+            Err(EcdsaError::NonRecoverableSignature)
+        }
     }
 }
 
 impl<C: Curve> AsBlob for EcdsaSignature<C> {
     fn as_blob(&self) -> Blob<'_> {
         let mut bytes = self.inner.to_vec();
-        bytes.push(self.rec_id.to_byte()); // rec_id is stored at the end
+        if let Some(rec_id) = self.rec_id {
+            bytes.push(rec_id.to_byte()); // rec_id is stored at the end
+        }
         Blob::from(bytes)
     }
 }
@@ -48,21 +54,27 @@ impl<C: Curve> TryFrom<Blob<'_>> for EcdsaSignature<C> {
     type Error = EcdsaError;
 
     fn try_from(value: Blob<'_>) -> Result<Self, Self::Error> {
-        let expected =
-            <<C as elliptic_curve::Curve>::FieldBytesSize as Add>::Output::to_usize() + 1;
+        let expected = <<C as elliptic_curve::Curve>::FieldBytesSize as Add>::Output::to_usize();
+        let with_recovery = expected + 1;
+
         let bytes = value.bytes();
 
-        if bytes.len() != expected || expected < 2 {
+        if ![expected, with_recovery].contains(&bytes.len()) || expected < 2 {
             return Err(EcdsaError::UnexpectedInputLength {
-                expected,
+                expected: expected..with_recovery + 1,
                 actual: value.len(),
             });
         }
 
-        let (sig_bytes, rec_id) = bytes.split_at(bytes.len() - 1);
-        let rec_id = match RecoveryId::from_byte(rec_id[0]) {
-            Some(r) => r,
-            None => return Err(EcdsaError::InvalidRecoveryId),
+        let (sig_bytes, rec_id) = if bytes.len() == with_recovery {
+            let (sig_bytes, rec_id) = bytes.split_at(bytes.len() - 1);
+            let rec_id = match RecoveryId::from_byte(rec_id[0]) {
+                Some(r) => r,
+                None => return Err(EcdsaError::InvalidRecoveryId),
+            };
+            (sig_bytes, Some(rec_id))
+        } else {
+            (bytes, None)
         };
 
         let sig = ExternalSignature::<C>::from_slice(sig_bytes)?;
@@ -81,10 +93,19 @@ pub enum EcdsaError {
     ExternalError(#[from] ecdsa::Error),
     #[error(transparent)]
     EcError(#[from] elliptic_curve::Error),
-    #[error("unexpected input length: expected: '{expected}', actual: '{actual}'")]
-    UnexpectedInputLength { expected: usize, actual: usize },
+    #[error(
+        "unexpected input length: expected: '{}-{}', actual: '{actual}'",
+        expected.start,
+        expected.end
+    )]
+    UnexpectedInputLength {
+        expected: Range<usize>,
+        actual: usize,
+    },
     #[error("invalid recovery id")]
     InvalidRecoveryId,
+    #[error("signature does not support key recovery")]
+    NonRecoverableSignature,
     #[error("recovered key does not match expected public key")]
     PublicKeyMismatch,
 }
@@ -119,7 +140,10 @@ impl<C: Curve> Scheme for Ecdsa<C> {
         let (sig, rec_id) = ecdsa::SigningKey::from(signer.inner.reveal())
             .sign_prehash_recoverable(msg.as_slice())?;
 
-        Ok(Signature::from_inner(EcdsaSignature { inner: sig, rec_id }))
+        Ok(Signature::from_inner(EcdsaSignature {
+            inner: sig,
+            rec_id: Some(rec_id),
+        }))
     }
 
     fn verify(

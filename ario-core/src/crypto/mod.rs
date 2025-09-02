@@ -1,14 +1,15 @@
 use crate::blob::{AsBlob, Blob};
 use hybrid_array::{Array, ArraySize};
 
+mod aes;
 pub mod ec;
+pub mod edwards;
 pub mod encryption;
 pub mod hash;
 pub mod keys;
 pub mod merkle;
 pub mod rsa;
 pub mod signature;
-mod aes;
 
 pub trait OutputLen: ArraySize + Send + Sync {}
 impl<T> OutputLen for T where T: ArraySize + Send + Sync {}

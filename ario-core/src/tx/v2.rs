@@ -26,6 +26,7 @@ use crate::wallet::{WalletAddress, WalletPk, WalletSk};
 use crate::{JsonError, JsonValue, entity};
 use anyhow::anyhow;
 use bon::Builder;
+use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use thiserror::Error;
 
@@ -314,7 +315,10 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
                 }
                 .tx_hash();
                 (
-                    V2SignatureData::Ecdsa(EcdsaSignatureData::recover_from_raw(raw.signature, &tx_hash)?),
+                    V2SignatureData::Ecdsa(EcdsaSignatureData::recover_from_raw::<Secp256k1>(
+                        raw.signature,
+                        &tx_hash,
+                    )?),
                     Some(tx_hash),
                 )
             }
@@ -436,7 +440,7 @@ where
         let tx_hash = tx_hash_builder.tx_hash();
 
         let sig = self
-            .sign_tx_hash(&tx_hash)
+            .sign_entity_hash(&tx_hash)
             .map_err(|s| TxError::Other(anyhow!("tx signing failed: {}", s)))?;
 
         Ok(V2SignatureData::Pss(
@@ -454,7 +458,7 @@ where
         let tx_hash = TxHashBuilder::from(data).tx_hash();
 
         let sig = self
-            .sign_tx_hash(&tx_hash)
+            .sign_entity_hash(&tx_hash)
             .map_err(|e| TxError::Other(anyhow!("tx signing failed: {}", e)))?;
 
         Ok(V2SignatureData::Ecdsa(EcdsaSignatureData::from_ecdsa(

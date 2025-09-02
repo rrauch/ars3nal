@@ -14,8 +14,8 @@ use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature;
 use crate::data::{DataItem, EmbeddedDataItem, ExternalDataItem};
 use crate::entity::{
-    ArEntity, ArEntityHash, ArEntitySignature, Owner as EntityOwner, Signature as EntitySignature,
-    ToSignPrehash,
+    ArEntity, ArEntityHash, ArEntitySignature, Owner as EntityOwner, PrehashFor,
+    Signature as EntitySignature,
 };
 use crate::json::JsonSource;
 use crate::money::{CurrencyExt, Money, MoneyError, TypedMoney, Winston};
@@ -138,7 +138,7 @@ impl<'a> TryFrom<EntityOwner<'a>> for Owner<'a> {
             EntityOwner::Rsa2048(o) => Ok(Self::Rsa2048(o)),
             EntityOwner::Rsa4096(o) => Ok(Self::Rsa4096(o)),
             EntityOwner::Secp256k1(o) => Ok(Self::Secp256k1(o)),
-            //other => Err(other),
+            other => Err(other),
         }
     }
 }
@@ -188,7 +188,7 @@ impl<'a> TryFrom<EntitySignature<'a, TxHash>> for Signature<'a> {
             EntitySignature::Rsa2048(o) => Ok(Self::Rsa2048(o)),
             EntitySignature::Rsa4096(o) => Ok(Self::Rsa4096(o)),
             EntitySignature::Secp256k1(o) => Ok(Self::Secp256k1(o)),
-            //other => Err(other),
+            other => Err(other),
         }
     }
 }
@@ -464,10 +464,8 @@ impl TxHash {
 
 impl ArEntityHash for TxHash {}
 
-impl ToSignPrehash for TxHash {
-    type Hasher = Sha256;
-
-    fn to_sign_prehash(&self) -> MaybeOwned<'_, Digest<Self::Hasher>> {
+impl PrehashFor<Sha256> for TxHash {
+    fn prehash(&self) -> MaybeOwned<'_, Digest<Sha256>> {
         match self {
             TxHash::DeepHash(deep_hash) => deep_hash.digest().into(),
             TxHash::Shallow(shallow) => MaybeOwned::Borrowed(shallow),
@@ -495,6 +493,8 @@ pub enum TxError {
     SignatureError(#[from] signature::Error),
     #[error(transparent)]
     ValidationError(#[from] ValidationError),
+    #[error("key type '{0}' not supported for operation")]
+    UnsupportedKeyType(String),
     #[error(transparent)]
     Other(anyhow::Error),
 }

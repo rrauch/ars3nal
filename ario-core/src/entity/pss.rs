@@ -6,7 +6,7 @@ use crate::crypto::rsa::{Rsa, RsaPublicKey, SupportedRsaKeySize};
 use crate::crypto::{keys, signature};
 use crate::entity::Error::InvalidSignature;
 use crate::entity::{
-    ArEntityHash, ArEntitySignature, Error, Owner, Signature, SignatureScheme, ToSignPrehash,
+    ArEntityHash, ArEntitySignature, Error, Owner, PrehashFor, Signature, SignatureScheme,
 };
 use crate::typed::FromInner;
 use crate::wallet::WalletPk;
@@ -41,7 +41,7 @@ pub(crate) enum PssSignatureData<T: ArEntityHash> {
 
 impl<T: ArEntityHash> PssSignatureData<T>
 where
-    T: ToSignPrehash<Hasher = Sha256>,
+    T: PrehashFor<Sha256>,
 {
     pub(crate) fn from_rsa<const BIT: usize>(
         owner: WalletPk<RsaPublicKey<BIT>>,
@@ -106,10 +106,10 @@ where
     pub(crate) fn verify_sig(&self, hash: &T) -> Result<(), Error> {
         match self {
             Self::Rsa4096 { owner, signature } => owner
-                .verify_entity_hash::<T>(hash, signature)
+                .verify_entity_hash::<T, Sha256>(hash, signature)
                 .map_err(|e| InvalidSignature(e)),
             Self::Rsa2048 { owner, signature } => owner
-                .verify_entity_hash::<T>(hash, signature)
+                .verify_entity_hash::<T, Sha256>(hash, signature)
                 .map_err(|e| InvalidSignature(e)),
         }
     }

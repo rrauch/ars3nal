@@ -3,10 +3,8 @@ use crate::crypto::ec::ecdsa::{Ecdsa, EcdsaSignature};
 use crate::crypto::ec::{Curve, EcPublicKey, EcSecretKey};
 use crate::crypto::hash::Sha256;
 use crate::crypto::signature::Signature;
-use crate::entity::Error::InvalidSignature;
-use crate::entity::{
-    ArEntityHash, ArEntitySignature, Error, Owner, SignatureScheme, ToSignPrehash,
-};
+use crate::entity::Error::{InvalidKey, InvalidSignature};
+use crate::entity::{ArEntityHash, ArEntitySignature, Error, Owner, PrehashFor, SignatureScheme};
 use crate::typed::FromInner;
 use crate::wallet::WalletPk;
 use k256::Secp256k1;
@@ -40,7 +38,7 @@ impl<T: ArEntityHash> Into<EcdsaSignatureData<T>>
 
 impl<T: ArEntityHash> EcdsaSignatureData<T>
 where
-    T: ToSignPrehash<Hasher = Sha256>,
+    T: PrehashFor<Sha256>,
 {
     pub(crate) fn from_ecdsa<C: Curve>(
         owner: WalletPk<EcPublicKey<C>>,
@@ -67,7 +65,7 @@ where
     pub(crate) fn verify_sig(&self, hash: &T) -> Result<(), Error> {
         match self {
             Self::Secp256k1 { owner, signature } => owner
-                .verify_entity_hash::<T>(hash, signature)
+                .verify_entity_hash::<T, Sha256>(hash, signature)
                 .map_err(|e| InvalidSignature(e.to_string())),
         }
     }
@@ -75,15 +73,37 @@ where
 
 impl<T: ArEntityHash> EcdsaSignatureData<T>
 where
-    T: ToSignPrehash<Hasher = Sha256>,
+    T: PrehashFor<Sha256>,
 {
-    pub(crate) fn recover_from_raw(raw_signature: Blob, hash: &T) -> Result<Self, Error> {
-        let signature = EcdsaSignature::<Secp256k1>::try_from(raw_signature)
+    pub(crate) fn recover_from_raw<C: Curve>(raw_signature: Blob, hash: &T) -> Result<Self, Error>
+    where
+        (WalletPk<EcPublicKey<C>>, ArEntitySignature<T, Ecdsa<C>>): Into<Self>,
+    {
+        let signature = EcdsaSignature::<C>::try_from(raw_signature)
             .map_err(|e| InvalidSignature(e.to_string()))?;
         let prehash = hash.to_sign_prehash();
         let owner = signature
             .recover_verifier(&prehash)
             .map_err(|e| InvalidSignature(e.to_string()))?;
+        Ok((
+            WalletPk::from_inner(owner),
+            ArEntitySignature::<T, _>::from_inner(Signature::from_inner(signature)),
+        )
+            .into())
+    }
+
+    pub(crate) fn from_raw<C: Curve>(
+        raw_signature: Blob,
+        raw_public_key: Blob,
+    ) -> Result<Self, Error>
+    where
+        (WalletPk<EcPublicKey<C>>, ArEntitySignature<T, Ecdsa<C>>): Into<Self>,
+    {
+        let signature = EcdsaSignature::<C>::try_from(raw_signature)
+            .map_err(|e| InvalidSignature(e.to_string()))?;
+
+        let owner = EcPublicKey::try_from(raw_public_key).map_err(|e| InvalidKey(e.into()))?;
+
         Ok((
             WalletPk::from_inner(owner),
             ArEntitySignature::<T, _>::from_inner(Signature::from_inner(signature)),

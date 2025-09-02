@@ -166,6 +166,8 @@ dependencies = [
  "derive-where",
  "digest 0.11.0-rc.0",
  "ecdsa 0.17.0-rc.5",
+ "ed25519",
+ "ed25519-dalek",
  "elliptic-curve 0.14.0-rc.10",
  "futures-lite",
  "ghash",
@@ -662,6 +664,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "curve25519-dalek"
+version = "5.0.0-pre.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdebdcbeb8f27a33dd326d0c6382a475a838abbb306bfd573b79d5e39be7afd3"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "curve25519-dalek-derive",
+ "digest 0.11.0-rc.0",
+ "fiat-crypto",
+ "rustc_version",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek-derive"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
+]
+
+[[package]]
 name = "cynic"
 version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -962,6 +991,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "ed25519"
+version = "3.0.0-pre.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6e01f644da45b2f83a7c40f6895ccc467ce60d6163c729d9fe4351eaa42c512"
+dependencies = [
+ "pkcs8",
+ "signature 3.0.0-rc.2",
+ "zeroize",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "3.0.0-pre.0"
+source = "git+https://github.com/dalek-cryptography/curve25519-dalek.git?rev=44433757a07c68a2b4f453c25d69469ae2f62986#44433757a07c68a2b4f453c25d69469ae2f62986"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "sha2 0.11.0-rc.0",
+ "signature 3.0.0-rc.2",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1056,6 +1109,12 @@ dependencies = [
  "rand_core 0.9.3",
  "subtle",
 ]
+
+[[package]]
+name = "fiat-crypto"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "fixedbitset"
@@ -2860,6 +2919,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
 
 [[package]]
+name = "rustc_version"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+dependencies = [
+ "semver",
+]
+
+[[package]]
 name = "rustix"
 version = "1.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3031,6 +3099,12 @@ dependencies = [
  "core-foundation-sys",
  "libc",
 ]
+
+[[package]]
+name = "semver"
+version = "1.0.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56e6fa9c48d24d85fb3de5ad847117517440f6beceb7798af16b4a87d616b8d0"
 
 [[package]]
 name = "send_wrapper"

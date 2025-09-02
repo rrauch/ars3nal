@@ -1,6 +1,8 @@
 use crate::blob::AsBlob;
 use crate::crypto::ec::KeyError as EcKeyError;
 use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
+use crate::crypto::edwards::eddsa;
+use crate::crypto::edwards::eddsa::KeyError as EddsaKeyError;
 use crate::crypto::hash::Hashable;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::rsa::KeyError as RsaKeyError;
@@ -18,6 +20,7 @@ pub type TypedSecretKey<T, SK: SecretKey> = Typed<T, SK>;
 pub enum SupportedSecretKey {
     Rsa(SupportedRsaPrivateKey),
     Ec(SupportedEcSecretKey),
+    Eddsa(eddsa::SupportedSigningKey),
 }
 
 impl TryFrom<&Jwk> for SupportedSecretKey {
@@ -27,7 +30,8 @@ impl TryFrom<&Jwk> for SupportedSecretKey {
         match jwk.key_type() {
             KeyType::Rsa => Ok(Self::from(SupportedRsaPrivateKey::try_from(jwk)?)),
             KeyType::Ec => Ok(Self::from(SupportedEcSecretKey::try_from(jwk)?)),
-            unsupported => Err(KeyError::UnsupportedKeyType(unsupported)),
+            KeyType::Okp => Ok(Self::from(eddsa::SupportedSigningKey::try_from(jwk)?)),
+            //unsupported => Err(KeyError::UnsupportedKeyType(unsupported)),
         }
     }
 }
@@ -41,6 +45,12 @@ impl From<SupportedRsaPrivateKey> for SupportedSecretKey {
 impl From<SupportedEcSecretKey> for SupportedSecretKey {
     fn from(value: SupportedEcSecretKey) -> Self {
         Self::Ec(value)
+    }
+}
+
+impl From<eddsa::SupportedSigningKey> for SupportedSecretKey {
+    fn from(value: eddsa::SupportedSigningKey) -> Self {
+        Self::Eddsa(value)
     }
 }
 
@@ -149,12 +159,15 @@ pub enum KeyError {
     #[error(transparent)]
     EcError(#[from] EcKeyError),
     #[error(transparent)]
+    EddsaError(#[from] EddsaKeyError),
+    #[error(transparent)]
     Other(anyhow::Error),
 }
 
 #[cfg(test)]
 mod tests {
     use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
+    use crate::crypto::edwards::eddsa;
     use crate::crypto::keys::SupportedSecretKey;
     use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
     use crate::jwk::Jwk;
@@ -164,6 +177,9 @@ mod tests {
 
     static JWK_EC_SK: &'static [u8] =
         include_bytes!("../../testdata/ar_wallet_tests_ES256K_fixture.json");
+
+    static JWK_ED25519_SK: &'static [u8] =
+        include_bytes!("../../testdata/ar_wallet_tests_Ed25519_fixture.json");
 
     #[test]
     fn jwk_rsa_sk() -> anyhow::Result<()> {
@@ -178,6 +194,15 @@ mod tests {
     fn jwk_ec_sk() -> anyhow::Result<()> {
         match SupportedSecretKey::try_from(&(Jwk::from_json(JWK_EC_SK)?))? {
             SupportedSecretKey::Ec(SupportedEcSecretKey::Secp256k1(_)) => {}
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn jwk_ed25519_sk() -> anyhow::Result<()> {
+        match SupportedSecretKey::try_from(&(Jwk::from_json(JWK_ED25519_SK)?))? {
+            SupportedSecretKey::Eddsa(eddsa::SupportedSigningKey::Ed25519(_)) => {}
             _ => unreachable!(),
         }
         Ok(())
