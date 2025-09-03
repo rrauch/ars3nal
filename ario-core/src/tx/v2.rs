@@ -1,14 +1,12 @@
 use crate::blob::{AsBlob, Blob};
-use crate::crypto::ec::ecdsa::Ecdsa;
-use crate::crypto::ec::{Curve, EcPublicKey, EcSecretKey};
+use crate::crypto::ec::EcSecretKey;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384};
-use crate::crypto::rsa::{Rsa, RsaPrivateKey, SupportedRsaKeySize};
-use crate::crypto::signature;
-use crate::crypto::signature::SigningError;
+use crate::crypto::rsa::RsaPrivateKey;
 use crate::data::DataRoot;
-use crate::entity::ecdsa::EcdsaSignatureData;
-use crate::entity::pss::PssSignatureData;
+use crate::entity::ecdsa::Secp256k1SignatureData;
+use crate::entity::pss;
+use crate::entity::pss::{PssSignatureData, Rsa2048SignatureData, Rsa4096SignatureData};
 use crate::json::JsonSource;
 use crate::money::{Money, MoneyError, Winston};
 use crate::tag::Tag;
@@ -17,15 +15,16 @@ use crate::tx::Format::V2;
 use crate::tx::raw::{RawTx, RawTxData, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::{
     CommonData, CommonTxDataError, ExternalDataItem, Format, Owner, Quantity, Reward, Signature,
-    SignatureType, TxAnchor, TxDeepHash, TxError, TxHash, TxId, TxSignature,
+    SignatureType, TxAnchor, TxDeepHash, TxError, TxHash, TxId,
 };
 use crate::tx::{RewardError, Transfer};
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
-use crate::wallet::{WalletAddress, WalletPk, WalletSk};
+use crate::wallet::{WalletAddress, WalletSk};
 use crate::{JsonError, JsonValue, entity};
 use anyhow::anyhow;
 use bon::Builder;
+use itertools::Either;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use thiserror::Error;
@@ -123,15 +122,17 @@ impl<'a> SupportsValidation for UnvalidatedV2Tx<'a> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum V2SignatureData {
-    Pss(PssSignatureData<TxHash>),
-    Ecdsa(EcdsaSignatureData<TxHash>),
+    Rsa4096(Rsa4096SignatureData<TxHash>),
+    Rsa2048(Rsa2048SignatureData<TxHash>),
+    Secp256k1(Secp256k1SignatureData<TxHash>),
 }
 
 impl V2SignatureData {
     pub(super) fn owner(&self) -> Owner<'_> {
         match self {
-            Self::Pss(pss) => pss.owner().try_into().expect("owner conversion to succeed"),
-            Self::Ecdsa(ecdsa) => ecdsa
+            Self::Rsa4096(pss) => pss.owner().try_into().expect("owner conversion to succeed"),
+            Self::Rsa2048(pss) => pss.owner().try_into().expect("owner conversion to succeed"),
+            Self::Secp256k1(ecdsa) => ecdsa
                 .owner()
                 .try_into()
                 .expect("owner conversion to succeed"),
@@ -140,18 +141,27 @@ impl V2SignatureData {
 
     pub(super) fn tx_owner(&self) -> Option<Owner<'_>> {
         match self {
-            Self::Pss(pss) => Some(pss.owner().try_into().expect("owner conversion to succeed")),
-            Self::Ecdsa(_) => None,
+            Self::Rsa4096(pss) => {
+                Some(pss.owner().try_into().expect("owner conversion to succeed"))
+            }
+            Self::Rsa2048(pss) => {
+                Some(pss.owner().try_into().expect("owner conversion to succeed"))
+            }
+            Self::Secp256k1(_) => None,
         }
     }
 
     pub(super) fn signature(&self) -> Signature<'_> {
         match self {
-            Self::Pss(pss) => pss
+            Self::Rsa4096(pss) => pss
                 .signature()
                 .try_into()
                 .expect("signature conversion to succeed"),
-            Self::Ecdsa(ecdsa) => ecdsa
+            Self::Rsa2048(pss) => pss
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
+            Self::Secp256k1(ecdsa) => ecdsa
                 .signature()
                 .try_into()
                 .expect("signature conversion to succeed"),
@@ -160,15 +170,16 @@ impl V2SignatureData {
 
     fn verify_sig(&self, tx_hash: &TxHash) -> Result<(), V2TxDataError> {
         match self {
-            Self::Pss(pss) => Ok(pss.verify_sig(tx_hash)?),
-            Self::Ecdsa(ecdsa) => Ok(ecdsa.verify_sig(tx_hash)?),
+            Self::Rsa4096(pss) => Ok(pss.verify_sig(tx_hash)?),
+            Self::Rsa2048(pss) => Ok(pss.verify_sig(tx_hash)?),
+            Self::Secp256k1(ecdsa) => Ok(ecdsa.verify_sig(tx_hash)?),
         }
     }
 
     fn signature_type(&self) -> SignatureType {
         match self {
-            Self::Pss(_) => SignatureType::RsaPss,
-            Self::Ecdsa(EcdsaSignatureData::Secp256k1 { .. }) => SignatureType::EcdsaSecp256k1,
+            Self::Rsa4096(_) | Self::Rsa2048(_) => SignatureType::RsaPss,
+            Self::Secp256k1(_) => SignatureType::EcdsaSecp256k1,
         }
     }
 }
@@ -295,10 +306,11 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
         let (signature_data, tx_hash) = match raw.signature_type.unwrap_or_default() {
             SignatureType::RsaPss => {
                 let raw_owner = raw.owner.ok_or(MissingOwner)?;
-                (
-                    V2SignatureData::Pss(PssSignatureData::from_raw(raw_owner, raw.signature)?),
-                    None,
-                )
+                let sig_data = match pss::from_raw_autodetect(raw_owner, raw.signature)? {
+                    Either::Left(rsa) => V2SignatureData::Rsa4096(rsa),
+                    Either::Right(rsa) => V2SignatureData::Rsa2048(rsa),
+                };
+                (sig_data, None)
             }
             SignatureType::EcdsaSecp256k1 => {
                 // ecdsa txs require the tx_hash to recover the owner
@@ -315,7 +327,7 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
                 }
                 .tx_hash();
                 (
-                    V2SignatureData::Ecdsa(EcdsaSignatureData::recover_from_raw::<Secp256k1>(
+                    V2SignatureData::Secp256k1(Secp256k1SignatureData::recover_from_raw(
                         raw.signature,
                         &tx_hash,
                     )?),
@@ -428,10 +440,7 @@ trait TxSigner {
     fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError>;
 }
 
-impl<const BIT: usize> TxSigner for WalletSk<RsaPrivateKey<BIT>>
-where
-    Rsa<BIT>: SupportedRsaKeySize,
-{
+impl TxSigner for WalletSk<RsaPrivateKey<4096>> {
     fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError> {
         let pk = self.public_key().clone();
         let pk_blob = pk.as_blob();
@@ -443,17 +452,13 @@ where
             .sign_entity_hash(&tx_hash)
             .map_err(|s| TxError::Other(anyhow!("tx signing failed: {}", s)))?;
 
-        Ok(V2SignatureData::Pss(
-            PssSignatureData::from_rsa(pk, sig)
-                .map_err(|e| signature::Error::SigningError(SigningError::Other(e.to_string())))?,
-        ))
+        Ok(V2SignatureData::Rsa4096(PssSignatureData::<_, 4096>::new(
+            pk, sig,
+        )))
     }
 }
 
-impl<C: Curve> TxSigner for WalletSk<EcSecretKey<C>>
-where
-    (WalletPk<EcPublicKey<C>>, TxSignature<Ecdsa<C>>): Into<EcdsaSignatureData<TxHash>>,
-{
+impl TxSigner for WalletSk<EcSecretKey<Secp256k1>> {
     fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError> {
         let tx_hash = TxHashBuilder::from(data).tx_hash();
 
@@ -461,7 +466,7 @@ where
             .sign_entity_hash(&tx_hash)
             .map_err(|e| TxError::Other(anyhow!("tx signing failed: {}", e)))?;
 
-        Ok(V2SignatureData::Ecdsa(EcdsaSignatureData::from_ecdsa(
+        Ok(V2SignatureData::Secp256k1(Secp256k1SignatureData::new(
             self.public_key().clone(),
             sig,
         )))

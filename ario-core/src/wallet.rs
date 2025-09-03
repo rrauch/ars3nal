@@ -1,10 +1,8 @@
 use crate::base64::{TryFromBase64, TryFromBase64Error};
 use crate::blob::Blob;
 use crate::confidential::{Confidential, NewSecretExt, OptionRevealExt, RevealExt};
+use crate::crypto::ec::EcSecretKey;
 use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
-use crate::crypto::ec::ecdsa::Ecdsa;
-use crate::crypto::ec::{Curve as EcdsaCurve, EcSecretKey};
-use crate::crypto::edwards::eddsa::Eddsa;
 use crate::crypto::edwards::{Ed25519SigningKey, eddsa};
 use crate::crypto::hash::{Digest, HashableExt, Hasher};
 use crate::crypto::keys;
@@ -13,10 +11,9 @@ use crate::crypto::keys::{
 };
 use crate::crypto::rsa::RsaPrivateKey;
 use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
-use crate::crypto::rsa::pss::RsaPss;
+use crate::crypto::signature::Scheme as SignatureScheme;
 use crate::crypto::signature::SignSigExt;
 use crate::crypto::signature::VerifySigExt;
-use crate::crypto::signature::{Scheme as SignatureScheme, SupportsSignatures};
 use crate::entity::{ArEntityHash, ArEntitySignature, PrehashFor};
 use crate::jwk::Jwk;
 use crate::tx::v2::TxDraft;
@@ -101,7 +98,9 @@ impl Wallet {
         // v2 only for now
         Ok(match &self.0.deref() {
             WalletInner::Rsa4096(rsa) => tx_draft.sign(rsa)?.into(),
-            WalletInner::Rsa2048(rsa) => tx_draft.sign(rsa)?.into(),
+            WalletInner::Rsa2048(_) => {
+                return Err(TxError::UnsupportedKeyType("Rsa2048".to_string()));
+            }
             WalletInner::Secp256k1(k256) => tx_draft.sign(k256)?.into(),
             WalletInner::Ed25519(_) => {
                 return Err(TxError::UnsupportedKeyType("Ed25519".to_string()));
@@ -143,35 +142,16 @@ enum WalletInner {
 }
 
 pub struct WalletKind;
-pub type WalletSk<SK: WalletSecretKey> = TypedSecretKey<WalletKind, SK>;
-pub type WalletPk<PK: WalletPublicKey> = TypedPublicKey<WalletKind, PK>;
+pub type WalletSk<SK: SecretKey> = TypedSecretKey<WalletKind, SK>;
+pub type WalletPk<PK: PublicKey> = TypedPublicKey<WalletKind, PK>;
 
-pub trait SupportedSignatureScheme: SignatureScheme {}
-
-impl<const BIT: usize> SupportedSignatureScheme for RsaPss<BIT> where Self: SignatureScheme {}
-impl<C: EcdsaCurve> SupportedSignatureScheme for Ecdsa<C> where Self: SignatureScheme {}
-
-impl<C: eddsa::SupportedCurves> SupportedSignatureScheme for Eddsa<C> where Self: SignatureScheme {}
-
-pub(crate) trait WalletSecretKey: SecretKey + SignSigExt<Self::SigScheme> {
-    type SigScheme: SupportedSignatureScheme;
-}
-
-impl<SK> WalletSecretKey for SK
-where
-    SK: SecretKey,
-    SK::Scheme: SupportsSignatures<Signer = SK>,
-    <SK::Scheme as SupportsSignatures>::Scheme: SupportedSignatureScheme,
-{
-    type SigScheme = <SK::Scheme as SupportsSignatures>::Scheme;
-}
-
-impl<S: SignatureScheme, SK: WalletSecretKey<SigScheme = S>> WalletSk<SK> {
-    pub(crate) fn sign_entity_hash<T: ArEntityHash, H: Hasher>(
+impl<SK: SecretKey> WalletSk<SK> {
+    pub(crate) fn sign_entity_hash<S: SignatureScheme, T: ArEntityHash, H: Hasher>(
         &self,
         entity_hash: &T,
     ) -> Result<ArEntitySignature<T, S>, String>
     where
+        SK: SignSigExt<S>,
         T: PrehashFor<H>,
         for<'a> S: SignatureScheme<Message<'a> = &'a Digest<H>>,
     {
@@ -181,20 +161,7 @@ impl<S: SignatureScheme, SK: WalletSecretKey<SigScheme = S>> WalletSk<SK> {
     }
 }
 
-pub(crate) trait WalletPublicKey: PublicKey + VerifySigExt<Self::SigScheme> {
-    type SigScheme: SignatureScheme;
-}
-
-impl<PK> WalletPublicKey for PK
-where
-    PK: PublicKey,
-    PK::Scheme: SupportsSignatures<Verifier = PK>,
-    <PK::Scheme as SupportsSignatures>::Scheme: SupportedSignatureScheme,
-{
-    type SigScheme = <PK::Scheme as SupportsSignatures>::Scheme;
-}
-
-impl<SK: WalletSecretKey> WalletSk<SK> {
+impl<SK: SecretKey> WalletSk<SK> {
     pub fn public_key(&self) -> &WalletPk<<SK::Scheme as keys::AsymmetricScheme>::PublicKey> {
         WalletPk::wrap_ref(self.public_key_impl())
     }
@@ -221,19 +188,20 @@ impl FromStr for WalletAddress {
     }
 }
 
-impl<PK: WalletPublicKey> WalletPk<PK> {
+impl<PK: PublicKey> WalletPk<PK> {
     pub fn derive_address(&self) -> WalletAddress {
         WalletAddress::from_inner(self.0.digest())
     }
 }
 
-impl<S: SignatureScheme, PK: WalletPublicKey<SigScheme = S>> WalletPk<PK> {
-    pub(crate) fn verify_entity_hash<T: ArEntityHash, H: Hasher>(
+impl<PK: PublicKey> WalletPk<PK> {
+    pub(crate) fn verify_entity_hash<S: SignatureScheme, T: ArEntityHash, H: Hasher>(
         &self,
         hash: &T,
         sig: &ArEntitySignature<T, S>,
     ) -> Result<(), String>
     where
+        PK: VerifySigExt<S>,
         T: PrehashFor<H>,
         for<'a> S: SignatureScheme<Message<'a> = &'a Digest<H>>,
     {

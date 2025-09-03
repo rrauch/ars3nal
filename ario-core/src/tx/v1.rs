@@ -1,7 +1,8 @@
-use crate::blob::AsBlob;
+use crate::blob::{AsBlob, Blob};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
-use crate::entity::pss::PssSignatureData;
+use crate::entity::pss::{Rsa2048SignatureData, Rsa4096SignatureData};
+use crate::entity::{Owner, Signature, pss};
 use crate::json::JsonSource;
 use crate::tag::Tag;
 use crate::tx::CommonTxDataError::MissingOwner;
@@ -14,6 +15,7 @@ use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
 use crate::wallet::WalletAddress;
 use crate::{JsonError, JsonValue, entity};
+use itertools::Either;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -104,7 +106,65 @@ impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
     }
 }
 
-pub(super) type V1SignatureData = PssSignatureData<TxHash>;
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum V1SignatureData {
+    Rsa4096(Rsa4096SignatureData<TxHash>),
+    Rsa2048(Rsa2048SignatureData<TxHash>),
+}
+
+impl Hashable for V1SignatureData {
+    #[inline]
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        match self {
+            Self::Rsa4096(rsa) => rsa.feed(hasher),
+            Self::Rsa2048(rsa) => rsa.feed(hasher),
+        }
+    }
+}
+
+impl DeepHashable for V1SignatureData {
+    #[inline]
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        match self {
+            Self::Rsa4096(rsa) => rsa.deep_hash(),
+            Self::Rsa2048(rsa) => rsa.deep_hash(),
+        }
+    }
+}
+
+impl V1SignatureData {
+    #[inline]
+    fn from_raw(raw_owner: Blob<'_>, raw_signature: Blob<'_>) -> Result<Self, entity::Error> {
+        Ok(match pss::from_raw_autodetect(raw_owner, raw_signature)? {
+            Either::Left(rsa) => V1SignatureData::Rsa4096(rsa),
+            Either::Right(rsa) => V1SignatureData::Rsa2048(rsa),
+        })
+    }
+
+    #[inline]
+    fn verify_sig(&self, tx_hash: &TxHash) -> Result<(), entity::Error> {
+        match self {
+            Self::Rsa4096(rsa) => rsa.verify_sig(tx_hash),
+            Self::Rsa2048(rsa) => rsa.verify_sig(tx_hash),
+        }
+    }
+
+    #[inline]
+    pub fn owner(&self) -> Owner<'_> {
+        match self {
+            Self::Rsa4096(rsa) => rsa.owner(),
+            Self::Rsa2048(rsa) => rsa.owner(),
+        }
+    }
+
+    #[inline]
+    pub fn signature(&self) -> Signature<'_, TxHash> {
+        match self {
+            Self::Rsa4096(rsa) => rsa.signature(),
+            Self::Rsa2048(rsa) => rsa.signature(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct V1TxData<'a> {
@@ -369,9 +429,9 @@ mod tests {
             "jUcuEDZQy2fC6T3fHnGfYsw0D0Zl4NfuaXfwBOLiQtA"
         );
 
-        if let V1SignatureData::Rsa4096 { owner, .. } = &tx_data.signature_data {
+        if let V1SignatureData::Rsa4096(rsa) = &tx_data.signature_data {
             assert_eq!(
-                owner.to_base64(),
+                rsa.owner().to_base64(),
                 "posmEh5k2_h7fgj-0JwB2l2AU72u-UizJOA2m8gyYYcVjh_6N3A3DhwbLmnbIWjVWmsidgQZDDibiJhhyHsy28ARxrt5BJ3OCa1VRAk2ffhbaUaGUoIkVt6G8mnnTScN9JNPS7UYEqG_L8J48c2tQNsydbon2ImKIwCYmnMHKcpyEgXcgLDGhtGhIKtkuI-QOAu-TMqVjn5EaWsfJTW5J-ty8mswAMSxepgsUbUB3GXZfCyOAK0EGjrClZ1MLvyc8ANGQfLPjwTipMcUtX47Udy8i4C-c-vLC9oB_z5ZCDCat-5wGh2OA-lyghro2SpkxX0e-D-nbi91Pp9LORwDZIRQ5RCMDvtQx1-QD2adxn_P2zDN0hk5IWXoCnHyeoj-IdNIyCXNkDzT2A184CxjReE5XOUF7UFeOmvVwbUTMfnNBOSWeRz3U_e3MPNlc2JTIprRLC8IegyfS6NdCr90lYnuviEr0g75NE6-muJdHAd9gu2QZ1MpkX9OnsbtvCvvFje-K_p_4AR9l43CLemfdSZeHHMIzdPwKe75SFMbsuklsyc-ieq-OHrJCeL0WrkLT4Gf6rpGVkS8MjORuMOBRFrHRE7XKswzhwmV2SuzeU6ojtPNP87aNdiUGHtYCIyt7cRN5bRbrVjdCAXj2NnuWMzM6J6dme4e2R8gqNpsEok"
             );
         } else {

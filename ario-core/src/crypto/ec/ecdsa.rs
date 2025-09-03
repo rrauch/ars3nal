@@ -164,10 +164,12 @@ impl<C: Curve> Scheme for Ecdsa<C> {
 #[cfg(test)]
 mod tests {
     use crate::crypto::ec::SupportedSecretKey;
+    use crate::crypto::ec::ecdsa::{Ecdsa};
     use crate::crypto::hash::HashableExt;
     use crate::crypto::keys::SecretKey;
-    use crate::crypto::signature::{SignSigExt, VerifySigExt};
+    use crate::crypto::signature::{SignSigExt, Signature, VerifySigExt};
     use crate::jwk::Jwk;
+    use k256::Secp256k1;
 
     static JWK_WALLET: &'static [u8] =
         include_bytes!("../../../testdata/ar_wallet_tests_ES256K_fixture.json");
@@ -183,7 +185,7 @@ mod tests {
         //let _addr = pk.digest::<Sha256>().to_base64();
         let message = "HEllO wOrlD".as_bytes().digest();
 
-        let signature = sk.sign_sig(&message)?;
+        let signature: Signature<Ecdsa<Secp256k1>> = sk.sign_sig(&message)?;
         pk.verify_sig(&message, &signature)?;
         Ok(())
     }

@@ -1,7 +1,9 @@
 use crate::base64::ToBase64;
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::Output;
+use crate::crypto::keys::{PublicKey, SecretKey};
 use crate::typed::Typed;
+use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
 use std::fmt::{Debug, Display, Formatter};
 use thiserror::Error;
@@ -9,6 +11,7 @@ use thiserror::Error;
 pub type TypedSignature<T, SIGNER, S: Scheme> = Typed<(T, SIGNER), Signature<S>>;
 
 #[derive_where(Clone, PartialEq)]
+#[derive(TransparentWrapper)]
 #[repr(transparent)]
 pub struct Signature<S: Scheme>(S::Output);
 
@@ -42,6 +45,11 @@ impl<S: Scheme> Signature<S> {
     pub(crate) fn as_inner(&self) -> &S::Output {
         &self.0
     }
+
+    #[inline]
+    pub(crate) fn as_variant<O: Scheme<Output = S::Output>>(&self) -> &Signature<O> {
+        Signature::<O>::wrap_ref(&self.0)
+    }
 }
 
 impl<'a, S: Scheme> TryFrom<Blob<'a>> for Signature<S> {
@@ -72,6 +80,57 @@ pub enum VerificationError {
     Other(String),
 }
 
+pub trait SchemeVariant {
+    type Scheme: Scheme;
+    type Error: Display + Send;
+    type Message<'a>;
+
+    fn process(
+        msg: Self::Message<'_>,
+    ) -> Result<<Self::Scheme as Scheme>::Message<'_>, Self::Error>;
+}
+
+impl<T> Scheme for T
+where
+    T: SchemeVariant,
+{
+    type Output = <T::Scheme as Scheme>::Output;
+    type Signer = <T::Scheme as Scheme>::Signer;
+    type SigningError = SigningError;
+    type Verifier = <T::Scheme as Scheme>::Verifier;
+    type VerificationError = VerificationError;
+    type Message<'a> = T::Message<'a>;
+
+    #[inline]
+    fn sign(
+        signer: &Self::Signer,
+        msg: Self::Message<'_>,
+    ) -> Result<Signature<Self>, Self::SigningError>
+    where
+        Self: Sized,
+    {
+        let msg = T::process(msg).map_err(|e| SigningError::Other(e.to_string()))?;
+        Ok(Signature::from_inner(
+            <T::Scheme as Scheme>::sign(signer, msg)
+                .map_err(|e| e.into())?
+                .into_inner(),
+        ))
+    }
+
+    #[inline]
+    fn verify(
+        verifier: &Self::Verifier,
+        msg: Self::Message<'_>,
+        signature: &Signature<Self>,
+    ) -> Result<(), Self::VerificationError>
+    where
+        Self: Sized,
+    {
+        let msg = T::process(msg).map_err(|e| VerificationError::Other(e.to_string()))?;
+        <T::Scheme as Scheme>::verify(verifier, msg, signature.as_variant()).map_err(|e| e.into())
+    }
+}
+
 pub trait Scheme {
     type Output: Output + PartialEq;
     type Signer;
@@ -95,12 +154,6 @@ pub trait Scheme {
         Self: Sized;
 }
 
-pub(crate) trait SupportsSignatures {
-    type Signer;
-    type Verifier;
-    type Scheme: Scheme<Signer = Self::Signer, Verifier = Self::Verifier>;
-}
-
 pub(crate) trait VerifySigExt<S: Scheme> {
     type VerificationError: Into<VerificationError>;
 
@@ -111,7 +164,35 @@ pub(crate) trait VerifySigExt<S: Scheme> {
     ) -> Result<(), Self::VerificationError>;
 }
 
+impl<T, S> VerifySigExt<S> for T
+where
+    T: PublicKey,
+    S: Scheme<Verifier = T>,
+{
+    type VerificationError = <S as Scheme>::VerificationError;
+
+    fn verify_sig(
+        &self,
+        msg: S::Message<'_>,
+        sig: &Signature<S>,
+    ) -> Result<(), Self::VerificationError> {
+        S::verify(self, msg, sig)
+    }
+}
+
 pub(crate) trait SignSigExt<S: Scheme> {
     type SigningError: Into<SigningError>;
     fn sign_sig(&self, msg: S::Message<'_>) -> Result<Signature<S>, Self::SigningError>;
+}
+
+impl<T, S> SignSigExt<S> for T
+where
+    T: SecretKey,
+    S: Scheme<Signer = T>,
+{
+    type SigningError = <S as Scheme>::SigningError;
+
+    fn sign_sig(&self, msg: S::Message<'_>) -> Result<Signature<S>, Self::SigningError> {
+        S::sign(self, msg)
+    }
 }

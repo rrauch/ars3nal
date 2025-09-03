@@ -7,8 +7,6 @@ use crate::crypto::hash::Hashable;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::rsa::KeyError as RsaKeyError;
 use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
-use crate::crypto::signature;
-use crate::crypto::signature::{SignSigExt, Signature, SupportsSignatures, VerifySigExt};
 use crate::jwk::{Jwk, KeyType};
 use crate::typed::Typed;
 use hybrid_array::ArraySize;
@@ -72,39 +70,6 @@ pub(crate) trait SymmetricKey {
 
 pub type TypedSymmetricKey<T, K: SymmetricKey> = Typed<T, K>;
 
-/*impl<K: SymmetricKey> DecryptionExt<<K::Scheme as SupportsEncryption>::Scheme> for K
-where
-    K::Scheme: SupportsEncryption<Decryptor = K>,
-{
-    type DecryptionError =
-        <<K::Scheme as SupportsEncryption>::Scheme as encryption::Scheme>::DecryptionError;
-
-    fn decrypt(
-        &self,
-        ciphertext: &Ciphertext<'_, <K::Scheme as SupportsEncryption>::Scheme>,
-    ) -> Result<OwnedBlob, Self::DecryptionError> {
-        <<K::Scheme as SupportsEncryption>::Scheme as encryption::Scheme>::new_decryptor(self, ciphertext)
-    }
-}
-
-impl<K: SymmetricKey> EncryptionExt<<K::Scheme as SupportsEncryption>::Scheme> for K
-where
-    K::Scheme: SupportsEncryption<Encryptor = K>,
-{
-    type EncryptionError =
-        <<K::Scheme as SupportsEncryption>::Scheme as encryption::Scheme>::EncryptionError;
-
-    fn encrypt(
-        &self,
-        plaintext: &<<K::Scheme as SupportsEncryption>::Scheme as encryption::Scheme>::Plaintext<
-            '_,
-        >,
-    ) -> Result<Ciphertext<'static, <K::Scheme as SupportsEncryption>::Scheme>, Self::EncryptionError>
-    {
-        <<K::Scheme as SupportsEncryption>::Scheme as encryption::Scheme>::new_encryptor(self, plaintext)
-    }
-}*/
-
 pub(crate) trait SecretKey {
     type Scheme: AsymmetricScheme;
 
@@ -119,7 +84,7 @@ pub(crate) trait PublicKey:
     type Scheme: AsymmetricScheme;
 }
 
-impl<PK: PublicKey> VerifySigExt<<PK::Scheme as SupportsSignatures>::Scheme> for PK
+/*impl<PK: PublicKey> VerifySigExt<<PK::Scheme as SupportsSignatures>::Scheme> for PK
 where
     PK::Scheme: SupportsSignatures<Verifier = PK>,
 {
@@ -133,9 +98,9 @@ where
     ) -> Result<(), Self::VerificationError> {
         <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::verify(self, data, sig)
     }
-}
+}*/
 
-impl<SK: SecretKey> SignSigExt<<SK::Scheme as SupportsSignatures>::Scheme> for SK
+/*impl<SK: SecretKey> SignSigExt<<SK::Scheme as SupportsSignatures>::Scheme> for SK
 where
     SK::Scheme: SupportsSignatures<Signer = SK>,
 {
@@ -148,7 +113,7 @@ where
     ) -> Result<Signature<<SK::Scheme as SupportsSignatures>::Scheme>, Self::SigningError> {
         <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::sign(self, data)
     }
-}
+}*/
 
 #[derive(Error, Debug)]
 pub enum KeyError {

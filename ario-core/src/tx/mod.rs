@@ -12,6 +12,7 @@ use crate::crypto::hash::{Sha256, Sha384};
 use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature;
+use crate::crypto::signature::Scheme as SignatureScheme;
 use crate::data::{DataItem, EmbeddedDataItem, ExternalDataItem};
 use crate::entity::{
     ArEntity, ArEntityHash, ArEntitySignature, Owner as EntityOwner, PrehashFor,
@@ -26,7 +27,7 @@ use crate::tx::v2::{TxDraft, UnvalidatedV2Tx, V2Tx, V2TxBuilder, V2TxDataError};
 use crate::typed::{FromInner, Typed};
 use crate::validation::ValidateExt;
 use crate::wallet::{WalletAddress, WalletPk};
-use crate::{JsonError, JsonValue, blob, entity};
+use crate::{JsonError, JsonValue, blob};
 use bigdecimal::BigDecimal;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
@@ -431,12 +432,9 @@ impl<'a> Signature<'a> {
     }
 }
 
-pub(crate) trait TxSignatureScheme:
-    entity::SignatureScheme + SupportedSignatureScheme
-{
-}
+pub(crate) trait TxSignatureScheme: SignatureScheme + SupportedSignatureScheme {}
 
-impl<T> TxSignatureScheme for T where T: entity::SignatureScheme + SupportedSignatureScheme {}
+impl<T> TxSignatureScheme for T where T: SignatureScheme + SupportedSignatureScheme {}
 
 trait SupportedSignatureScheme {}
 impl SupportedSignatureScheme for Ecdsa<Secp256k1> {}

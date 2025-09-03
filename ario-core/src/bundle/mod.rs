@@ -7,12 +7,14 @@ use crate::bundle::v2::{
 };
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
+use crate::crypto::edwards::variants::Ed25519HexStr;
 use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
 use crate::crypto::hash::{
-    Digest, HashableExt, Hasher, HasherExt, Sha256, Sha384, Sha512, TypedDigest,
+    Digest, HashableExt, Hasher, HasherExt, Sha256, Sha384, Sha512, Sha512HexStr, TypedDigest,
 };
 use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
+use crate::crypto::signature::Scheme as SignatureScheme;
 use crate::crypto::signature::TypedSignature;
 use crate::entity::{
     ArEntity, ArEntityHash, ArEntitySignature, Owner as EntityOwner, PrehashFor,
@@ -387,6 +389,12 @@ impl PrehashFor<Sha512> for BundleItemHash {
     }
 }
 
+impl PrehashFor<Sha512HexStr> for BundleItemHash {
+    fn prehash(&self) -> MaybeOwned<'_, Digest<Sha512HexStr>> {
+        self.prehash()
+    }
+}
+
 impl ArEntityHash for BundleItemHash {}
 
 impl BundleItemHash {
@@ -404,14 +412,15 @@ impl BundleItemHash {
 }
 
 pub(crate) trait BundleItemSignatureScheme:
-    entity::SignatureScheme + SupportedSignatureScheme
+    SignatureScheme + SupportedSignatureScheme
 {
 }
 
-impl<T> BundleItemSignatureScheme for T where T: entity::SignatureScheme + SupportedSignatureScheme {}
+impl<T> BundleItemSignatureScheme for T where T: SignatureScheme + SupportedSignatureScheme {}
 
 trait SupportedSignatureScheme {}
 impl SupportedSignatureScheme for Ed25519 {}
+impl SupportedSignatureScheme for Ed25519HexStr {}
 impl SupportedSignatureScheme for Ecdsa<Secp256k1> {}
 impl SupportedSignatureScheme for RsaPss<4096> {}
 
@@ -494,6 +503,7 @@ pub enum Signature<'a> {
     Rsa4096(MaybeOwned<'a, ArEntitySignature<BundleItemHash, RsaPss<4096>>>),
     Secp256k1(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ecdsa<Secp256k1>>>),
     Ed25519(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ed25519>>),
+    Ed25519HexStr(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ed25519HexStr>>),
 }
 
 impl<'a> From<Signature<'a>> for EntitySignature<'a, BundleItemHash> {
@@ -503,6 +513,7 @@ impl<'a> From<Signature<'a>> for EntitySignature<'a, BundleItemHash> {
             Signature::Rsa4096(o) => Self::Rsa4096(o),
             Signature::Secp256k1(o) => Self::Secp256k1(o),
             Signature::Ed25519(o) => Self::Ed25519(o),
+            Signature::Ed25519HexStr(o) => Self::Ed25519HexStr(o),
         }
     }
 }
@@ -528,6 +539,7 @@ impl AsBlob for Signature<'_> {
             Self::Rsa4096(pss) => pss.as_blob(),
             Self::Secp256k1(ecdsa) => ecdsa.as_blob(),
             Self::Ed25519(ed25519) => ed25519.as_blob(),
+            Self::Ed25519HexStr(ed25519) => ed25519.as_blob(),
         }
     }
 }
@@ -539,6 +551,7 @@ impl<'a> Signature<'a> {
             Self::Rsa4096(pss) => pss.digest(),
             Self::Secp256k1(ecdsa) => ecdsa.digest(),
             Self::Ed25519(ed25519) => ed25519.digest(),
+            Self::Ed25519HexStr(ed25519) => ed25519.digest(),
         }
     }
 }

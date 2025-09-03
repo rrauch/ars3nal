@@ -3,11 +3,10 @@ pub mod ecdsa;
 use crate::JsonError;
 use crate::blob::{AsBlob, Blob};
 use crate::confidential::{Confidential, NewSecretExt, OptionRevealExt, RevealExt, Sensitive};
-use crate::crypto::ec::ecdsa::{Ecdsa, EcdsaError};
+use crate::crypto::ec::ecdsa::EcdsaError;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
 use crate::crypto::keys::{AsymmetricScheme, PublicKey, SecretKey};
-use crate::crypto::signature::SupportsSignatures;
 use crate::jwk::{Jwk, KeyType};
 use ::ecdsa::EcdsaCurve;
 use ::ecdsa::hazmat::DigestAlgorithm;
@@ -41,12 +40,6 @@ pub struct Ec<C: Curve>(PhantomData<C>);
 impl<C: Curve> AsymmetricScheme for Ec<C> {
     type SecretKey = EcSecretKey<C>;
     type PublicKey = EcPublicKey<C>;
-}
-
-impl<C: Curve> SupportsSignatures for Ec<C> {
-    type Signer = EcSecretKey<C>;
-    type Verifier = EcPublicKey<C>;
-    type Scheme = Ecdsa<C>;
 }
 
 pub enum SupportedSecretKey {

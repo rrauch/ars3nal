@@ -6,8 +6,6 @@ use crate::confidential::{Confidential, NewSecretExt, OptionRevealExt, RevealExt
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
 use crate::crypto::keys::{AsymmetricScheme, KeySize, PublicKey, SecretKey};
-use crate::crypto::rsa::pss::RsaPss;
-use crate::crypto::signature::SupportsSignatures;
 use crate::jwk::{Jwk, KeyType};
 use crate::{BigUint, RsaError};
 use bytemuck::TransparentWrapper;
@@ -243,36 +241,10 @@ impl RsaPrivateKeyComponents {
     }
 }
 
-impl<const BIT: usize> SupportsSignatures for Rsa<BIT>
-where
-    Self: SupportedRsaKeySize,
-{
-    type Signer = RsaPrivateKey<BIT>;
-    type Verifier = RsaPublicKey<BIT>;
-    type Scheme = RsaPss<BIT>;
-}
-
-pub enum SupportedPublicKey {
-    Rsa4096(RsaPublicKey<4096>),
-    Rsa2048(RsaPublicKey<2048>),
-}
-
 #[derive(Clone, Debug, PartialEq, TransparentWrapper)]
 #[transparent(ExternalRsaPublicKey)]
 #[repr(transparent)]
 pub struct RsaPublicKey<const BIT: usize>(ExternalRsaPublicKey);
-
-impl TryFrom<Blob<'_>> for SupportedPublicKey {
-    type Error = KeyError;
-
-    fn try_from(value: Blob<'_>) -> Result<Self, Self::Error> {
-        Ok(match value.len() {
-            512 => SupportedPublicKey::Rsa4096(RsaPublicKey::<4096>::try_from(value)?),
-            256 => SupportedPublicKey::Rsa2048(RsaPublicKey::<2048>::try_from(value)?),
-            unsupported => return Err(KeyError::UnsupportedKeySize(unsupported)),
-        })
-    }
-}
 
 impl<const BIT: usize> RsaPublicKey<BIT> {
     const EXPECTED_BYTES: usize = (BIT + 7) / 8;

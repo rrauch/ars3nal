@@ -7,9 +7,7 @@ use crate::crypto::edwards::{Curve, Curve25519};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha512Hash};
 use crate::crypto::keys::{AsymmetricScheme, PublicKey, SecretKey};
-use crate::crypto::signature::{
-    Scheme, Signature, SigningError, SupportsSignatures, VerificationError,
-};
+use crate::crypto::signature::{Scheme, Signature, SigningError, VerificationError};
 use crate::jwk::{Jwk, KeyType};
 use derive_where::derive_where;
 use ed25519::Signature as Ed25519Signature;
@@ -122,15 +120,6 @@ impl TryFrom<&Jwk> for SupportedSigningKey {
             None => Err(JwkError::MissingCurve.into()),
         }
     }
-}
-
-impl<C: SupportedCurves> SupportsSignatures for Eddsa<C>
-where
-    EddsaVerifyingKey<C>: PublicKey + for<'a> TryFrom<Blob<'a>>,
-{
-    type Signer = EddsaSigningKey<C>;
-    type Verifier = EddsaVerifyingKey<C>;
-    type Scheme = Eddsa<C>;
 }
 
 impl<C: SupportedCurves> AsymmetricScheme for Eddsa<C>
@@ -367,10 +356,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::crypto::edwards::Ed25519;
     use crate::crypto::edwards::eddsa::SupportedSigningKey;
     use crate::crypto::hash::HashableExt;
     use crate::crypto::keys::SecretKey;
-    use crate::crypto::signature::{SignSigExt, VerifySigExt};
+    use crate::crypto::signature::{SignSigExt, Signature, VerifySigExt};
     use crate::jwk::Jwk;
 
     static JWK_WALLET: &'static [u8] =
@@ -386,7 +376,7 @@ mod tests {
         let vk = sk.public_key_impl();
         let message = "HEllO wOrlD".as_bytes().digest();
 
-        let signature = sk.sign_sig(&message)?;
+        let signature: Signature<Ed25519> = sk.sign_sig(&message)?;
         vk.verify_sig(&message, &signature)?;
         Ok(())
     }

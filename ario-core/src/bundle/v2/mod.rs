@@ -10,9 +10,9 @@ use crate::bundle::{
 };
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384, TypedDigest};
-use crate::entity::ecdsa::EcdsaSignatureData;
-use crate::entity::eddsa::EddsaSignatureData;
-use crate::entity::pss::PssSignatureData;
+use crate::entity::ecdsa::Secp256k1SignatureData;
+use crate::entity::ed25519::{Ed25519HexStrSignatureData, Ed25519RegularSignatureData};
+use crate::entity::pss::{PssSignatureData, Rsa4096SignatureData};
 use crate::tag::Tag;
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, Validator};
@@ -260,6 +260,7 @@ pub enum SignatureType {
     RsaPss = 1,
     Ed25519 = 2,
     EcdsaSecp256k1 = 3,
+    Ed25519HexStr = 4,
 }
 
 impl SignatureType {
@@ -268,6 +269,7 @@ impl SignatureType {
             Self::RsaPss => 512,
             Self::Ed25519 => 64,
             Self::EcdsaSecp256k1 => 65,
+            Self::Ed25519HexStr => 64,
         }
     }
 
@@ -276,6 +278,7 @@ impl SignatureType {
             Self::RsaPss => 512,
             Self::Ed25519 => 32,
             Self::EcdsaSecp256k1 => 65,
+            Self::Ed25519HexStr => 32,
         }
     }
 }
@@ -292,6 +295,7 @@ impl AsRef<str> for SignatureType {
             Self::RsaPss => "1",
             Self::Ed25519 => "2",
             Self::EcdsaSecp256k1 => "3",
+            Self::Ed25519HexStr => "4",
         }
     }
 }
@@ -316,6 +320,7 @@ impl TryFrom<u16> for SignatureType {
             1 => Ok(SignatureType::RsaPss),
             2 => Ok(SignatureType::Ed25519),
             3 => Ok(SignatureType::EcdsaSecp256k1),
+            4 => Ok(SignatureType::Ed25519HexStr),
             invalid => Err(BundleItemError::InvalidOrUnsupportedSignatureType(
                 invalid.to_string(),
             )),
@@ -335,15 +340,17 @@ impl<'a> Signature<'a> {
             Self::Rsa4096(_) => SignatureType::RsaPss,
             Self::Ed25519(_) => SignatureType::Ed25519,
             Self::Secp256k1(_) => SignatureType::EcdsaSecp256k1,
+            Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum SignatureData {
-    Pss(PssSignatureData<BundleItemHash>),
-    Ecdsa(EcdsaSignatureData<BundleItemHash>),
-    Eddsa(EddsaSignatureData<BundleItemHash>),
+    Rsa4096(Rsa4096SignatureData<BundleItemHash>),
+    Secp256k1(Secp256k1SignatureData<BundleItemHash>),
+    Ed25519(Ed25519RegularSignatureData<BundleItemHash>),
+    Ed25519HexStr(Ed25519HexStrSignatureData<BundleItemHash>),
 }
 
 impl SignatureData {
@@ -355,7 +362,7 @@ impl SignatureData {
         signature_type: SignatureType,
     ) -> Result<Self, BundleItemError> {
         match signature_type {
-            SignatureType::RsaPss => Ok(SignatureData::Pss(PssSignatureData::from_raw(
+            SignatureType::RsaPss => Ok(SignatureData::Rsa4096(PssSignatureData::from_raw(
                 raw_owner,
                 raw_signature,
             )?)),
@@ -365,27 +372,33 @@ impl SignatureData {
                     raw_signature,
                     hash,
                 )?))*/
-                Ok(SignatureData::Ecdsa(EcdsaSignatureData::from_raw(
+                Ok(SignatureData::Secp256k1(Secp256k1SignatureData::from_raw(
                     raw_signature,
                     raw_owner,
                 )?))
             }
-            SignatureType::Ed25519 => Ok(SignatureData::Eddsa(EddsaSignatureData::from_raw(
-                raw_signature,
-                raw_owner,
-            )?)),
+            SignatureType::Ed25519 => Ok(SignatureData::Ed25519(
+                Ed25519RegularSignatureData::from_raw(raw_signature, raw_owner)?,
+            )),
+            SignatureType::Ed25519HexStr => Ok(SignatureData::Ed25519HexStr(
+                Ed25519HexStrSignatureData::from_raw(raw_signature, raw_owner)?,
+            )),
         }
     }
 
     #[inline]
     pub(super) fn owner(&self) -> Owner<'_> {
         match self {
-            Self::Pss(pss) => pss.owner().try_into().expect("owner conversion to succeed"),
-            Self::Ecdsa(ecdsa) => ecdsa
+            Self::Rsa4096(pss) => pss.owner().try_into().expect("owner conversion to succeed"),
+            Self::Secp256k1(ecdsa) => ecdsa
                 .owner()
                 .try_into()
                 .expect("owner conversion to succeed"),
-            Self::Eddsa(eddsa) => eddsa
+            Self::Ed25519(ed25519) => ed25519
+                .owner()
+                .try_into()
+                .expect("owner conversion to succeed"),
+            Self::Ed25519HexStr(ed25519) => ed25519
                 .owner()
                 .try_into()
                 .expect("owner conversion to succeed"),
@@ -395,15 +408,19 @@ impl SignatureData {
     #[inline]
     pub(super) fn signature(&self) -> Signature<'_> {
         match self {
-            Self::Pss(pss) => pss
+            Self::Rsa4096(pss) => pss
                 .signature()
                 .try_into()
                 .expect("signature conversion to succeed"),
-            Self::Ecdsa(ecdsa) => ecdsa
+            Self::Secp256k1(ecdsa) => ecdsa
                 .signature()
                 .try_into()
                 .expect("signature conversion to succeed"),
-            Self::Eddsa(eddsa) => eddsa
+            Self::Ed25519(ed25519) => ed25519
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
+            Self::Ed25519HexStr(ed25519) => ed25519
                 .signature()
                 .try_into()
                 .expect("signature conversion to succeed"),
@@ -413,18 +430,20 @@ impl SignatureData {
     #[inline]
     fn verify_sig(&self, hash: &BundleItemHash) -> Result<(), BundleItemError> {
         match self {
-            Self::Pss(pss) => Ok(pss.verify_sig(hash)?),
-            Self::Ecdsa(ecdsa) => Ok(ecdsa.verify_sig(hash)?),
-            Self::Eddsa(eddsa) => Ok(eddsa.verify_sig(hash)?),
+            Self::Rsa4096(pss) => Ok(pss.verify_sig(hash)?),
+            Self::Secp256k1(ecdsa) => Ok(ecdsa.verify_sig(hash)?),
+            Self::Ed25519(ed25519) => Ok(ed25519.verify_sig(hash)?),
+            Self::Ed25519HexStr(ed25519) => Ok(ed25519.verify_sig(hash)?),
         }
     }
 
     #[inline]
     fn signature_type(&self) -> SignatureType {
         match self {
-            Self::Pss(_) => SignatureType::RsaPss,
-            Self::Ecdsa(EcdsaSignatureData::Secp256k1 { .. }) => SignatureType::EcdsaSecp256k1,
-            Self::Eddsa(EddsaSignatureData::Ed25519 { .. }) => SignatureType::Ed25519,
+            Self::Rsa4096(_) => SignatureType::RsaPss,
+            Self::Secp256k1(_) => SignatureType::EcdsaSecp256k1,
+            Self::Ed25519(_) => SignatureType::Ed25519,
+            Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
         }
     }
 }

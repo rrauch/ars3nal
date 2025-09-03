@@ -1,26 +1,22 @@
 pub mod ecdsa;
-pub mod eddsa;
+pub mod ed25519;
 pub mod pss;
 
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
+use crate::crypto::edwards::variants::Ed25519HexStr;
 use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
 use crate::crypto::hash::{Digest, Hasher};
-use crate::crypto::keys::{PublicKey, SecretKey};
 use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
+use crate::crypto::signature::{Scheme as SignatureScheme};
 use crate::crypto::{keys, signature};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk};
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use std::fmt::{Debug, Display};
 use thiserror::Error;
-
-pub trait SignatureScheme: signature::Scheme {
-    type Signer: SecretKey;
-    type Verifier: PublicKey;
-}
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -97,6 +93,7 @@ pub enum Signature<'a, T: ArEntityHash> {
     Rsa2048(MaybeOwned<'a, ArEntitySignature<T, RsaPss<2048>>>),
     Secp256k1(MaybeOwned<'a, ArEntitySignature<T, Ecdsa<Secp256k1>>>),
     Ed25519(MaybeOwned<'a, ArEntitySignature<T, Ed25519>>),
+    Ed25519HexStr(MaybeOwned<'a, ArEntitySignature<T, Ed25519HexStr>>),
 }
 
 impl<T: ArEntityHash> AsBlob for Signature<'_, T> {
@@ -106,6 +103,7 @@ impl<T: ArEntityHash> AsBlob for Signature<'_, T> {
             Self::Rsa2048(pss) => pss.as_blob(),
             Self::Secp256k1(ecdsa) => ecdsa.as_blob(),
             Self::Ed25519(ed25519) => ed25519.as_blob(),
+            Self::Ed25519HexStr(ed25519) => ed25519.as_blob(),
         }
     }
 }
