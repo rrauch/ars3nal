@@ -527,6 +527,7 @@ impl<'a> TryFrom<EntitySignature<'a, BundleItemHash>> for Signature<'a> {
             EntitySignature::Rsa4096(o) => Ok(Self::Rsa4096(o)),
             EntitySignature::Secp256k1(o) => Ok(Self::Secp256k1(o)),
             EntitySignature::Ed25519(o) => Ok(Self::Ed25519(o)),
+            EntitySignature::Ed25519HexStr(o) => Ok(Self::Ed25519HexStr(o)),
             other => Err(other),
         }
     }
