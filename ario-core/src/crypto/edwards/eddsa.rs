@@ -131,15 +131,15 @@ where
 }
 
 pub trait SupportedCurves: Curve {
-    type VerifyingKey: for<'a> CanVerify<Self::Message<'a>, Self::Signature>
+    type VerifyingKey: CanVerify<Self::Message, Self::Signature>
         + Clone
         + Send
         + Sync
         + Debug
         + PartialEq;
-    type SigningKey: for<'a> CanSign<Self::Message<'a>, Self::Signature> + Clone + Send + Sync;
+    type SigningKey: CanSign<Self::Message, Self::Signature> + Clone + Send + Sync;
     type Signature: Clone + Send + Sync + Debug + PartialEq + Output;
-    type Message<'a>;
+    type Message;
 }
 
 #[derive_where(Clone)]
@@ -152,26 +152,26 @@ where
 }
 
 trait CanSign<M, S> {
-    fn sign(&self, msg: M) -> Result<S, SigningError>;
+    fn sign(&self, msg: &M) -> Result<S, SigningError>;
 }
 
-impl<'a> CanSign<&'a Sha512Hash, Ed25519Signature> for ed25519_dalek::SigningKey {
+impl CanSign<Sha512Hash, Ed25519Signature> for ed25519_dalek::SigningKey {
     #[inline]
-    fn sign(&self, msg: &'a Sha512Hash) -> Result<Ed25519Signature, SigningError> {
+    fn sign(&self, msg: &Sha512Hash) -> Result<Ed25519Signature, SigningError> {
         self.sign_prehashed(msg.as_wrapped_digest(), None)
             .map_err(|e| SigningError::Other(e.to_string()))
     }
 }
 
 trait CanVerify<M, S> {
-    fn verify(&self, msg: M, signature: &S) -> Result<(), VerificationError>;
+    fn verify(&self, msg: &M, signature: &S) -> Result<(), VerificationError>;
 }
 
-impl<'a> CanVerify<&'a Sha512Hash, Ed25519Signature> for ed25519_dalek::VerifyingKey {
+impl CanVerify<Sha512Hash, Ed25519Signature> for ed25519_dalek::VerifyingKey {
     #[inline]
     fn verify(
         &self,
-        msg: &'a Sha512Hash,
+        msg: &Sha512Hash,
         signature: &Ed25519Signature,
     ) -> Result<(), VerificationError> {
         self.verify_prehashed(msg.as_wrapped_digest(), None, signature)
@@ -185,7 +185,7 @@ where
     EddsaVerifyingKey<C>: for<'a> TryFrom<Blob<'a>>,
 {
     #[inline]
-    fn sign(&self, msg: C::Message<'_>) -> Result<C::Signature, SigningError> {
+    fn sign(&self, msg: &C::Message) -> Result<C::Signature, SigningError> {
         self.inner.reveal().sign(msg)
     }
 }
@@ -219,11 +219,7 @@ where
     Self: for<'a> TryFrom<Blob<'a>>,
 {
     #[inline]
-    fn verify(
-        &self,
-        msg: C::Message<'_>,
-        signature: &C::Signature,
-    ) -> Result<(), VerificationError> {
+    fn verify(&self, msg: &C::Message, signature: &C::Signature) -> Result<(), VerificationError> {
         self.0.verify(msg, signature)
     }
 }
@@ -264,7 +260,7 @@ impl SupportedCurves for Curve25519 {
     type VerifyingKey = ed25519_dalek::VerifyingKey;
     type SigningKey = ed25519_dalek::SigningKey;
     type Signature = Ed25519Signature;
-    type Message<'a> = &'a Sha512Hash;
+    type Message = Sha512Hash;
 }
 
 impl AsBlob for Ed25519Signature {
@@ -330,11 +326,11 @@ where
     type SigningError = SigningError;
     type Verifier = EddsaVerifyingKey<C>;
     type VerificationError = VerificationError;
-    type Message<'a> = C::Message<'a>;
+    type Message = C::Message;
 
     fn sign(
         signer: &Self::Signer,
-        msg: Self::Message<'_>,
+        msg: &Self::Message,
     ) -> Result<Signature<Self>, Self::SigningError>
     where
         Self: Sized,
@@ -344,7 +340,7 @@ where
 
     fn verify(
         verifier: &Self::Verifier,
-        msg: Self::Message<'_>,
+        msg: &Self::Message,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where

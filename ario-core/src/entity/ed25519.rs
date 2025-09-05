@@ -14,11 +14,11 @@ pub type Ed25519RegularSignatureData<T: ArEntityHash> = Ed25519SignatureData<T, 
 pub type Ed25519HexStrSignatureData<T: ArEntityHash> = Ed25519SignatureData<T, Ed25519HexStr>;
 
 trait SupportedScheme:
-    for<'a> Scheme<
+    Scheme<
         Signer = Ed25519SigningKey,
         Verifier = Ed25519VerifyingKey,
         Output = Ed25519Signature,
-        Message<'a> = &'a Digest<Self::Hasher>,
+        Message = Digest<Self::Hasher>,
     > + Sized
 {
     type Hasher: Hasher;

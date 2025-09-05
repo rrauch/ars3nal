@@ -153,7 +153,7 @@ impl<SK: SecretKey> WalletSk<SK> {
     where
         SK: SignSigExt<S>,
         T: PrehashFor<H>,
-        for<'a> S: SignatureScheme<Message<'a> = &'a Digest<H>>,
+        S: SignatureScheme<Message = Digest<H>>,
     {
         let prehash = entity_hash.to_sign_prehash();
         let sig = self.sign_sig(&prehash).map_err(|e| e.into().to_string())?;
@@ -203,7 +203,7 @@ impl<PK: PublicKey> WalletPk<PK> {
     where
         PK: VerifySigExt<S>,
         T: PrehashFor<H>,
-        for<'a> S: SignatureScheme<Message<'a> = &'a Digest<H>>,
+        S: SignatureScheme<Message = Digest<H>>,
     {
         let prehash = hash.to_sign_prehash();
         self.verify_sig(&prehash, sig)

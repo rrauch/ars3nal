@@ -63,11 +63,11 @@ where
     type SigningError = SigningError;
     type Verifier = RsaPublicKey<BIT>;
     type VerificationError = VerificationError;
-    type Message<'a> = &'a Sha256Hash;
+    type Message = Sha256Hash;
 
     fn sign(
         signer: &Self::Signer,
-        msg: Self::Message<'_>,
+        msg: &Self::Message,
     ) -> Result<Signature<Self>, Self::SigningError>
     where
         Self: Sized,
@@ -92,7 +92,7 @@ where
 
     fn verify(
         verifier: &Self::Verifier,
-        msg: Self::Message<'_>,
+        msg: &Self::Message,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where

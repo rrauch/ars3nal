@@ -43,11 +43,8 @@ where
 
 impl<T: ArEntityHash, const BIT: usize> PssSignatureData<T, BIT>
 where
-    for<'a> RsaPss<BIT>: Scheme<
-            Signer = RsaPrivateKey<BIT>,
-            Verifier = RsaPublicKey<BIT>,
-            Message<'a> = &'a Digest<Sha256>,
-        >,
+    RsaPss<BIT>:
+        Scheme<Signer = RsaPrivateKey<BIT>, Verifier = RsaPublicKey<BIT>, Message = Digest<Sha256>>,
     Rsa<BIT>: SupportedRsaKeySize,
     T: PrehashFor<Sha256>,
 {

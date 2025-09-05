@@ -24,7 +24,7 @@ pub struct EcdsaSignature<C: Curve> {
 impl<C: Curve> EcdsaSignature<C> {
     pub(crate) fn recover_verifier(
         &self,
-        msg: <Ecdsa<C> as Scheme>::Message<'_>,
+        msg: &<Ecdsa<C> as Scheme>::Message,
     ) -> Result<<Ecdsa<C> as Scheme>::Verifier, EcdsaError> {
         if let Some(rec_id) = self.rec_id {
             Ok(EcPublicKey(elliptic_curve::PublicKey::<C>::from(
@@ -128,11 +128,11 @@ impl<C: Curve> Scheme for Ecdsa<C> {
     type SigningError = EcdsaError;
     type Verifier = EcPublicKey<C>;
     type VerificationError = EcdsaError;
-    type Message<'a> = &'a Sha256Hash;
+    type Message = Sha256Hash;
 
     fn sign(
         signer: &Self::Signer,
-        msg: Self::Message<'_>,
+        msg: &Self::Message,
     ) -> Result<Signature<Self>, Self::SigningError>
     where
         Self: Sized,
@@ -148,7 +148,7 @@ impl<C: Curve> Scheme for Ecdsa<C> {
 
     fn verify(
         verifier: &Self::Verifier,
-        msg: Self::Message<'_>,
+        msg: &Self::Message,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where
@@ -164,7 +164,7 @@ impl<C: Curve> Scheme for Ecdsa<C> {
 #[cfg(test)]
 mod tests {
     use crate::crypto::ec::SupportedSecretKey;
-    use crate::crypto::ec::ecdsa::{Ecdsa};
+    use crate::crypto::ec::ecdsa::Ecdsa;
     use crate::crypto::hash::HashableExt;
     use crate::crypto::keys::SecretKey;
     use crate::crypto::signature::{SignSigExt, Signature, VerifySigExt};
