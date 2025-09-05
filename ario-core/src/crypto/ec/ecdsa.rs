@@ -23,7 +23,7 @@ pub struct EcdsaSignature<C: Curve> {
 impl<C: Curve> EcdsaSignature<C> {
     pub(crate) fn recover_verifier(
         &self,
-        msg: &<Ecdsa<C> as Scheme>::Message,
+        msg: &<Ecdsa<C> as Scheme>::Message<'_>,
     ) -> Result<<Ecdsa<C> as Scheme>::Verifier, EcdsaError> {
         if let Some(rec_id) = self.rec_id {
             Ok(EcPublicKey(elliptic_curve::PublicKey::<C>::from(
@@ -123,11 +123,11 @@ impl<C: Curve> Scheme for Ecdsa<C> {
     type SigningError = EcdsaError;
     type Verifier = EcPublicKey<C>;
     type VerificationError = EcdsaError;
-    type Message = [u8];
+    type Message<'a> = [u8];
 
     fn sign(
         signer: &Self::Signer,
-        msg: &Self::Message,
+        msg: &Self::Message<'_>,
     ) -> Result<Signature<Self>, Self::SigningError>
     where
         Self: Sized,
@@ -142,7 +142,7 @@ impl<C: Curve> Scheme for Ecdsa<C> {
 
     fn verify(
         verifier: &Self::Verifier,
-        msg: &Self::Message,
+        msg: &Self::Message<'_>,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where

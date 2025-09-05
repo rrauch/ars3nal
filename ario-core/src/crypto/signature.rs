@@ -84,26 +84,29 @@ pub enum VerificationError {
 pub trait SchemeVariant {
     type Scheme: Scheme;
     type Error: Display + Send;
-    type Message: ?Sized + ToOwned;
+    type Message<'a>: ?Sized + ToOwned;
 
-    fn process(msg: &Self::Message) -> Result<Cow<<Self::Scheme as Scheme>::Message>, Self::Error>;
+    fn process<'m>(
+        msg: &Self::Message<'m>,
+    ) -> Result<Cow<'m, <Self::Scheme as Scheme>::Message<'m>>, Self::Error>;
 }
 
 impl<T> Scheme for T
 where
     T: SchemeVariant,
+    for<'a> <T as SchemeVariant>::Scheme: 'a,
 {
     type Output = <T::Scheme as Scheme>::Output;
     type Signer = <T::Scheme as Scheme>::Signer;
     type SigningError = SigningError;
     type Verifier = <T::Scheme as Scheme>::Verifier;
     type VerificationError = VerificationError;
-    type Message = T::Message;
+    type Message<'a> = T::Message<'a>;
 
     #[inline]
     fn sign(
         signer: &Self::Signer,
-        msg: &Self::Message,
+        msg: &Self::Message<'_>,
     ) -> Result<Signature<Self>, Self::SigningError>
     where
         Self: Sized,
@@ -119,7 +122,7 @@ where
     #[inline]
     fn verify(
         verifier: &Self::Verifier,
-        msg: &Self::Message,
+        msg: &Self::Message<'_>,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where
@@ -136,17 +139,17 @@ pub trait Scheme {
     type SigningError: Into<SigningError>;
     type Verifier: for<'a> TryFrom<Blob<'a>> + Debug + Clone + PartialEq;
     type VerificationError: Into<VerificationError>;
-    type Message: ?Sized + ToOwned;
+    type Message<'a>: ?Sized + ToOwned;
 
     fn sign(
         signer: &Self::Signer,
-        msg: &Self::Message,
+        msg: &Self::Message<'_>,
     ) -> Result<Signature<Self>, Self::SigningError>
     where
         Self: Sized;
     fn verify(
         verifier: &Self::Verifier,
-        msg: &Self::Message,
+        msg: &Self::Message<'_>,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where
@@ -158,7 +161,7 @@ pub(crate) trait VerifySigExt<S: Scheme> {
 
     fn verify_sig(
         &self,
-        msg: &S::Message,
+        msg: &S::Message<'_>,
         sig: &Signature<S>,
     ) -> Result<(), Self::VerificationError>;
 }
@@ -172,7 +175,7 @@ where
 
     fn verify_sig(
         &self,
-        msg: &S::Message,
+        msg: &S::Message<'_>,
         sig: &Signature<S>,
     ) -> Result<(), Self::VerificationError> {
         S::verify(self, msg, sig)
@@ -181,7 +184,7 @@ where
 
 pub(crate) trait SignSigExt<S: Scheme> {
     type SigningError: Into<SigningError>;
-    fn sign_sig(&self, msg: &S::Message) -> Result<Signature<S>, Self::SigningError>;
+    fn sign_sig(&self, msg: &S::Message<'_>) -> Result<Signature<S>, Self::SigningError>;
 }
 
 impl<T, S> SignSigExt<S> for T
@@ -191,7 +194,7 @@ where
 {
     type SigningError = <S as Scheme>::SigningError;
 
-    fn sign_sig(&self, msg: &S::Message) -> Result<Signature<S>, Self::SigningError> {
+    fn sign_sig(&self, msg: &S::Message<'_>) -> Result<Signature<S>, Self::SigningError> {
         S::sign(self, msg)
     }
 }

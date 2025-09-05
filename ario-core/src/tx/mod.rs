@@ -465,25 +465,21 @@ impl ArEntityHash for TxHash {}
 
 impl<const BIT: usize> MessageFor<RsaPss<BIT>> for TxHash
 where
-    RsaPss<BIT>: SignatureScheme<Message = pss::Message>,
+    for<'a> RsaPss<BIT>: SignatureScheme<Message<'a> = pss::Message<'a>>,
 {
-    fn message(&self) -> Cow<'_, <RsaPss<BIT> as SignatureScheme>::Message> {
+    fn message(&self) -> Cow<'_, <RsaPss<BIT> as SignatureScheme>::Message<'_>> {
         match self {
-            Self::DeepHash(deep_hash) => {
-                Cow::Owned(pss::Message::Regular(deep_hash.as_blob().into_owned()))
-            }
-            Self::Shallow(shallow) => {
-                Cow::Owned(pss::Message::PreHashed(shallow.clone().into_inner()))
-            }
+            Self::DeepHash(deep_hash) => Cow::Owned(pss::Message::Regular(deep_hash.as_blob())),
+            Self::Shallow(shallow) => Cow::Owned(pss::Message::PreHashed(shallow)),
         }
     }
 }
 
 impl MessageFor<Ecdsa<Secp256k1>> for TxHash
 where
-    Ecdsa<Secp256k1>: SignatureScheme<Message = [u8]>,
+    for<'a> Ecdsa<Secp256k1>: SignatureScheme<Message<'a> = [u8]>,
 {
-    fn message(&self) -> Cow<'_, <Ecdsa<Secp256k1> as SignatureScheme>::Message> {
+    fn message(&self) -> Cow<'_, <Ecdsa<Secp256k1> as SignatureScheme>::Message<'_>> {
         match self {
             Self::DeepHash(deep_hash) => Cow::Borrowed(deep_hash.as_slice()),
             Self::Shallow(_) => {

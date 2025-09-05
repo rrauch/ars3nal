@@ -13,11 +13,11 @@ pub type Ed25519RegularSignatureData<T: ArEntityHash> = Ed25519SignatureData<T, 
 pub type Ed25519HexStrSignatureData<T: ArEntityHash> = Ed25519SignatureData<T, Ed25519HexStr>;
 
 trait SupportedScheme:
-    Scheme<
+    for<'a> Scheme<
         Signer = Ed25519SigningKey,
         Verifier = Ed25519VerifyingKey,
         Output = Ed25519Signature,
-        Message = [u8],
+        Message<'a> = [u8],
     > + Sized
 {
     fn signature<T: ArEntityHash>(sig: &ArEntitySignature<T, Self>) -> super::Signature<'_, T>;

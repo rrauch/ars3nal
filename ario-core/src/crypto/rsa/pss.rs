@@ -18,27 +18,27 @@ use thiserror::Error;
 pub struct RsaPss<const BIT: usize>;
 
 #[derive(Clone)]
-pub enum Message {
-    Regular(Blob<'static>),
-    PreHashed(Sha256Hash),
+pub enum Message<'a> {
+    Regular(Blob<'a>),
+    PreHashed(&'a Sha256Hash),
 }
 
-impl From<Sha256Hash> for Message {
-    fn from(value: Sha256Hash) -> Self {
+impl<'a> From<&'a Sha256Hash> for Message<'a> {
+    fn from(value: &'a Sha256Hash) -> Self {
         Message::PreHashed(value)
     }
 }
 
-impl From<Blob<'static>> for Message {
-    fn from(value: Blob<'static>) -> Self {
+impl<'a> From<Blob<'a>> for Message<'a> {
+    fn from(value: Blob<'a>) -> Self {
         Message::Regular(value)
     }
 }
 
-impl Message {
-    fn as_hash(&self) -> MaybeOwned<'_, Sha256Hash> {
+impl<'a> Message<'a> {
+    fn as_hash(&self) -> MaybeOwned<'a, Sha256Hash> {
         match self {
-            Self::PreHashed(hash) => MaybeOwned::Borrowed(hash),
+            Self::PreHashed(hash) => MaybeOwned::Borrowed(*hash),
             Self::Regular(blob) => MaybeOwned::Owned(blob.digest()),
         }
     }
@@ -92,11 +92,11 @@ where
     type SigningError = SigningError;
     type Verifier = RsaPublicKey<BIT>;
     type VerificationError = VerificationError;
-    type Message = Message;
+    type Message<'a> = Message<'a>;
 
     fn sign(
         signer: &Self::Signer,
-        msg: &Self::Message,
+        msg: &Self::Message<'_>,
     ) -> Result<Signature<Self>, Self::SigningError>
     where
         Self: Sized,
@@ -121,7 +121,7 @@ where
 
     fn verify(
         verifier: &Self::Verifier,
-        msg: &Self::Message,
+        msg: &Self::Message<'_>,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where

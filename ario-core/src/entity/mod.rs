@@ -40,25 +40,25 @@ pub trait ArEntity {
 
 impl<H: ArEntityHash, S: SignatureScheme> MessageFor<S> for H
 where
-    for<'a> Cow<'a, <S as SignatureScheme>::Message>: From<&'a H>,
+    for<'a> Cow<'a, <S as SignatureScheme>::Message<'a>>: From<&'a H>,
 {
-    fn message(&self) -> Cow<'_, S::Message> {
+    fn message(&self) -> Cow<'_, S::Message<'_>> {
         self.into()
     }
 }
 
 pub(crate) trait MessageFor<S: SignatureScheme> {
-    fn message(&self) -> Cow<'_, S::Message>;
+    fn message(&self) -> Cow<'_, S::Message<'_>>;
 }
 
 pub(super) trait ToSignableMessage {
-    fn to_signable_message<S: SignatureScheme>(&self) -> Cow<'_, S::Message>
+    fn to_signable_message<S: SignatureScheme>(&self) -> Cow<'_, S::Message<'_>>
     where
         Self: MessageFor<S>;
 }
 
 impl<T: ?Sized> ToSignableMessage for T {
-    fn to_signable_message<S: SignatureScheme>(&self) -> Cow<'_, S::Message>
+    fn to_signable_message<S: SignatureScheme>(&self) -> Cow<'_, S::Message<'_>>
     where
         Self: MessageFor<S>,
     {

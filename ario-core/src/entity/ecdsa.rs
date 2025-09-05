@@ -17,11 +17,11 @@ impl SupportedCurve for Secp256k1 {}
 #[derive_where(Clone, Debug, PartialEq)]
 pub(crate) struct EcdsaSignatureData<T: ArEntityHash, C: SupportedCurve>
 where
-    Ecdsa<C>: Scheme<
+    for<'a> Ecdsa<C>: Scheme<
             Signer = EcSecretKey<C>,
             Verifier = EcPublicKey<C>,
             Output = EcdsaSignature<C>,
-            Message = [u8],
+            Message<'a> = [u8],
         >,
 {
     owner: WalletPk<<Ecdsa<C> as Scheme>::Verifier>,
@@ -30,11 +30,11 @@ where
 
 impl<T: ArEntityHash, C: SupportedCurve> EcdsaSignatureData<T, C>
 where
-    Ecdsa<C>: Scheme<
+    for<'a> Ecdsa<C>: Scheme<
             Signer = EcSecretKey<C>,
             Verifier = EcPublicKey<C>,
             Output = EcdsaSignature<C>,
-            Message = [u8],
+            Message<'a> = [u8],
         >,
     T: MessageFor<Ecdsa<C>>,
 {

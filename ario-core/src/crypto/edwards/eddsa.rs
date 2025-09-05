@@ -121,15 +121,15 @@ where
 }
 
 pub trait SupportedCurves: Curve {
-    type VerifyingKey: CanVerify<Self::Message, Self::Signature>
+    type VerifyingKey: for<'a> CanVerify<Self::Message<'a>, Self::Signature>
         + Clone
         + Send
         + Sync
         + Debug
         + PartialEq;
-    type SigningKey: CanSign<Self::Message, Self::Signature> + Clone + Send + Sync;
+    type SigningKey: for<'a> CanSign<Self::Message<'a>, Self::Signature> + Clone + Send + Sync;
     type Signature: Clone + Send + Sync + Debug + PartialEq + Output;
-    type Message: ?Sized + ToOwned;
+    type Message<'a>: ?Sized + ToOwned;
 }
 
 #[derive_where(Clone)]
@@ -187,7 +187,7 @@ where
     EddsaVerifyingKey<C>: for<'a> TryFrom<Blob<'a>>,
 {
     #[inline]
-    fn sign(&self, msg: &C::Message) -> Result<C::Signature, SigningError> {
+    fn sign(&self, msg: &C::Message<'_>) -> Result<C::Signature, SigningError> {
         self.inner.reveal().sign(msg)
     }
 }
@@ -221,7 +221,11 @@ where
     Self: for<'a> TryFrom<Blob<'a>>,
 {
     #[inline]
-    fn verify(&self, msg: &C::Message, signature: &C::Signature) -> Result<(), VerificationError> {
+    fn verify(
+        &self,
+        msg: &C::Message<'_>,
+        signature: &C::Signature,
+    ) -> Result<(), VerificationError> {
         self.0.verify(msg, signature)
     }
 }
@@ -262,7 +266,7 @@ impl SupportedCurves for Curve25519 {
     type VerifyingKey = ed25519_dalek::VerifyingKey;
     type SigningKey = ed25519_dalek::SigningKey;
     type Signature = Ed25519Signature;
-    type Message = [u8];
+    type Message<'a> = [u8];
 }
 
 impl AsBlob for Ed25519Signature {
@@ -328,11 +332,11 @@ where
     type SigningError = SigningError;
     type Verifier = EddsaVerifyingKey<C>;
     type VerificationError = VerificationError;
-    type Message = C::Message;
+    type Message<'a> = C::Message<'a>;
 
     fn sign(
         signer: &Self::Signer,
-        msg: &Self::Message,
+        msg: &Self::Message<'_>,
     ) -> Result<Signature<Self>, Self::SigningError>
     where
         Self: Sized,
@@ -342,7 +346,7 @@ where
 
     fn verify(
         verifier: &Self::Verifier,
-        msg: &Self::Message,
+        msg: &Self::Message<'_>,
         signature: &Signature<Self>,
     ) -> Result<(), Self::VerificationError>
     where

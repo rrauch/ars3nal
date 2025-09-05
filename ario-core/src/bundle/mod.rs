@@ -383,7 +383,7 @@ impl<'a> From<&'a BundleItemHash> for Cow<'a, [u8]> {
 }
 
 impl MessageFor<RsaPss<4096>> for BundleItemHash {
-    fn message(&self) -> Cow<'_, <RsaPss<4096> as SignatureScheme>::Message> {
+    fn message(&self) -> Cow<'_, <RsaPss<4096> as SignatureScheme>::Message<'_>> {
         Cow::Owned(pss::Message::Regular(
             self.as_slice().as_blob().into_owned(),
         ))
