@@ -4,7 +4,7 @@ use crate::confidential::{Confidential, NewSecretExt, OptionRevealExt, RevealExt
 use crate::crypto::ec::EcSecretKey;
 use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
 use crate::crypto::edwards::{Ed25519SigningKey, eddsa};
-use crate::crypto::hash::{Digest, HashableExt, Hasher};
+use crate::crypto::hash::HashableExt;
 use crate::crypto::keys;
 use crate::crypto::keys::{
     KeyError, PublicKey, SecretKey, SupportedSecretKey, TypedPublicKey, TypedSecretKey,
@@ -14,7 +14,7 @@ use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
 use crate::crypto::signature::Scheme as SignatureScheme;
 use crate::crypto::signature::SignSigExt;
 use crate::crypto::signature::VerifySigExt;
-use crate::entity::{ArEntityHash, ArEntitySignature, PrehashFor};
+use crate::entity::{ArEntityHash, ArEntitySignature, MessageFor};
 use crate::jwk::Jwk;
 use crate::tx::v2::TxDraft;
 use crate::tx::{TxError, ValidatedTx};
@@ -146,17 +146,16 @@ pub type WalletSk<SK: SecretKey> = TypedSecretKey<WalletKind, SK>;
 pub type WalletPk<PK: PublicKey> = TypedPublicKey<WalletKind, PK>;
 
 impl<SK: SecretKey> WalletSk<SK> {
-    pub(crate) fn sign_entity_hash<S: SignatureScheme, T: ArEntityHash, H: Hasher>(
+    pub(crate) fn sign_entity_hash<S: SignatureScheme, T: ArEntityHash>(
         &self,
         entity_hash: &T,
     ) -> Result<ArEntitySignature<T, S>, String>
     where
         SK: SignSigExt<S>,
-        T: PrehashFor<H>,
-        S: SignatureScheme<Message = Digest<H>>,
+        T: MessageFor<S>,
     {
-        let prehash = entity_hash.to_sign_prehash();
-        let sig = self.sign_sig(&prehash).map_err(|e| e.into().to_string())?;
+        let msg = entity_hash.to_signable_message();
+        let sig = self.sign_sig(&msg).map_err(|e| e.into().to_string())?;
         Ok(ArEntitySignature::from_inner(sig))
     }
 }
@@ -195,19 +194,17 @@ impl<PK: PublicKey> WalletPk<PK> {
 }
 
 impl<PK: PublicKey> WalletPk<PK> {
-    pub(crate) fn verify_entity_hash<S: SignatureScheme, T: ArEntityHash, H: Hasher>(
+    pub(crate) fn verify_entity_hash<S: SignatureScheme, T: ArEntityHash>(
         &self,
         hash: &T,
         sig: &ArEntitySignature<T, S>,
     ) -> Result<(), String>
     where
         PK: VerifySigExt<S>,
-        T: PrehashFor<H>,
-        S: SignatureScheme<Message = Digest<H>>,
+        T: MessageFor<S>,
     {
-        let prehash = hash.to_sign_prehash();
-        self.verify_sig(&prehash, sig)
-            .map_err(|e| e.into().to_string())
+        let msg = hash.to_signable_message();
+        self.verify_sig(&msg, sig).map_err(|e| e.into().to_string())
     }
 }
 

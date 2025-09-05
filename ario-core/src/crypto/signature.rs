@@ -84,17 +84,14 @@ pub enum VerificationError {
 pub trait SchemeVariant {
     type Scheme: Scheme;
     type Error: Display + Send;
-    type Message: ?Sized;
+    type Message: ?Sized + ToOwned;
 
-    fn process(msg: &Self::Message) -> Result<Cow<<Self::Scheme as Scheme>::Message>, Self::Error>
-    where
-        <Self::Scheme as Scheme>::Message: Clone;
+    fn process(msg: &Self::Message) -> Result<Cow<<Self::Scheme as Scheme>::Message>, Self::Error>;
 }
 
 impl<T> Scheme for T
 where
     T: SchemeVariant,
-    <<T as SchemeVariant>::Scheme as Scheme>::Message: Clone,
 {
     type Output = <T::Scheme as Scheme>::Output;
     type Signer = <T::Scheme as Scheme>::Signer;
@@ -139,7 +136,7 @@ pub trait Scheme {
     type SigningError: Into<SigningError>;
     type Verifier: for<'a> TryFrom<Blob<'a>> + Debug + Clone + PartialEq;
     type VerificationError: Into<VerificationError>;
-    type Message: ?Sized;
+    type Message: ?Sized + ToOwned;
 
     fn sign(
         signer: &Self::Signer,

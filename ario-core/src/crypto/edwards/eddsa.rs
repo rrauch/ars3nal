@@ -3,14 +3,14 @@ use crate::base64::{Base64Error, FromBase64};
 use crate::blob::{AsBlob, Blob};
 use crate::confidential::{NewSecretExt, OptionRevealExt, RevealExt, Sensitive};
 use crate::crypto::Output;
-use crate::crypto::edwards::{Curve, Curve25519};
+use crate::crypto::edwards::{Curve, Curve25519, Ed25519SigningKey};
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hashable, Hasher, Sha512Hash};
+use crate::crypto::hash::{Digest, Hashable, Hasher};
 use crate::crypto::keys::{AsymmetricScheme, PublicKey, SecretKey};
 use crate::crypto::signature::{Scheme, Signature, SigningError, VerificationError};
 use crate::jwk::{Jwk, KeyType};
 use derive_where::derive_where;
-use ed25519::Signature as Ed25519Signature;
+use ed25519_dalek::{Signature as Ed25519Signature, ed25519};
 use hybrid_array::typenum::U64;
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -98,23 +98,13 @@ impl TryFrom<&Jwk> for SupportedSigningKey {
                 let vk = ed25519_dalek::VerifyingKey::from_bytes(slice)?;
 
                 let d = d.reveal().try_from_base64()?.sensitive();
-                let slice: &[u8; 32] = match d.reveal().bytes().try_into() {
-                    Ok(slice) => slice,
-                    Err(_) => {
-                        return Err(KeyError::InvalidKeyLength {
-                            expected: 32,
-                            actual: x.len(),
-                        });
-                    }
-                };
-                let sk = ed25519_dalek::SigningKey::from_bytes(slice).sensitive();
-                if sk.reveal().verifying_key() != vk {
+
+                let sk = Ed25519SigningKey::from_raw(d.reveal())?;
+
+                if &sk.public_key_impl().0 != &vk {
                     return Err(JwkError::KeyMismatch)?;
                 }
-                Ok(Self::Ed25519(EddsaSigningKey::<Curve25519> {
-                    inner: sk,
-                    pk: EddsaVerifyingKey(vk),
-                }))
+                Ok(Self::Ed25519(sk))
             }
             Some(unsupported) => Err(JwkError::UnsupportedCurve(unsupported.to_string()).into()),
             None => Err(JwkError::MissingCurve.into()),
@@ -139,7 +129,7 @@ pub trait SupportedCurves: Curve {
         + PartialEq;
     type SigningKey: CanSign<Self::Message, Self::Signature> + Clone + Send + Sync;
     type Signature: Clone + Send + Sync + Debug + PartialEq + Output;
-    type Message;
+    type Message: ?Sized + ToOwned;
 }
 
 #[derive_where(Clone)]
@@ -151,30 +141,42 @@ where
     pk: EddsaVerifyingKey<C>,
 }
 
-trait CanSign<M, S> {
-    fn sign(&self, msg: &M) -> Result<S, SigningError>;
-}
-
-impl CanSign<Sha512Hash, Ed25519Signature> for ed25519_dalek::SigningKey {
-    #[inline]
-    fn sign(&self, msg: &Sha512Hash) -> Result<Ed25519Signature, SigningError> {
-        self.sign_prehashed(msg.as_wrapped_digest(), None)
-            .map_err(|e| SigningError::Other(e.to_string()))
+impl EddsaSigningKey<Curve25519> {
+    fn from_raw(raw: &[u8]) -> Result<Self, KeyError> {
+        let slice: &[u8; 32] = match raw.try_into() {
+            Ok(slice) => slice,
+            Err(_) => {
+                return Err(KeyError::InvalidKeyLength {
+                    expected: 32,
+                    actual: raw.len(),
+                });
+            }
+        };
+        let sk = ed25519_dalek::SigningKey::from_bytes(slice).sensitive();
+        let pk = EddsaVerifyingKey(sk.reveal().verifying_key());
+        Ok(Self { inner: sk, pk })
     }
 }
 
-trait CanVerify<M, S> {
+trait CanSign<M: ?Sized, S> {
+    fn sign(&self, msg: &M) -> Result<S, SigningError>;
+}
+
+impl CanSign<[u8], Ed25519Signature> for ed25519_dalek::SigningKey {
+    #[inline]
+    fn sign(&self, msg: &[u8]) -> Result<Ed25519Signature, SigningError> {
+        Ok(ed25519_dalek::Signer::sign(self, msg))
+    }
+}
+
+trait CanVerify<M: ?Sized, S> {
     fn verify(&self, msg: &M, signature: &S) -> Result<(), VerificationError>;
 }
 
-impl CanVerify<Sha512Hash, Ed25519Signature> for ed25519_dalek::VerifyingKey {
+impl CanVerify<[u8], Ed25519Signature> for ed25519_dalek::VerifyingKey {
     #[inline]
-    fn verify(
-        &self,
-        msg: &Sha512Hash,
-        signature: &Ed25519Signature,
-    ) -> Result<(), VerificationError> {
-        self.verify_prehashed(msg.as_wrapped_digest(), None, signature)
+    fn verify(&self, msg: &[u8], signature: &Ed25519Signature) -> Result<(), VerificationError> {
+        ed25519_dalek::Verifier::verify(self, msg, signature)
             .map_err(|e| VerificationError::Other(e.to_string()))
     }
 }
@@ -260,7 +262,7 @@ impl SupportedCurves for Curve25519 {
     type VerifyingKey = ed25519_dalek::VerifyingKey;
     type SigningKey = ed25519_dalek::SigningKey;
     type Signature = Ed25519Signature;
-    type Message = Sha512Hash;
+    type Message = [u8];
 }
 
 impl AsBlob for Ed25519Signature {
@@ -352,12 +354,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::edwards::Ed25519;
+    use crate::blob::Blob;
     use crate::crypto::edwards::eddsa::SupportedSigningKey;
-    use crate::crypto::hash::HashableExt;
+    use crate::crypto::edwards::{
+        Ed25519, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey,
+    };
     use crate::crypto::keys::SecretKey;
     use crate::crypto::signature::{SignSigExt, Signature, VerifySigExt};
     use crate::jwk::Jwk;
+    use hex_literal::hex;
 
     static JWK_WALLET: &'static [u8] =
         include_bytes!("../../../testdata/ar_wallet_tests_Ed25519_fixture.json");
@@ -370,10 +375,36 @@ mod tests {
             Err(err) => Err(err)?,
         };
         let vk = sk.public_key_impl();
-        let message = "HEllO wOrlD".as_bytes().digest();
+        let message = "HEllO wOrlD".as_bytes();
 
-        let signature: Signature<Ed25519> = sk.sign_sig(&message)?;
-        vk.verify_sig(&message, &signature)?;
+        let signature: Signature<Ed25519> = sk.sign_sig(message)?;
+        vk.verify_sig(message, &signature)?;
+        Ok(())
+    }
+
+    #[test]
+    fn sig_verify() -> Result<(), anyhow::Error> {
+        let raw_sk = Blob::Slice(&hex!(
+            "2aa8f6e0ff0e8249ec460e97c45fca011ea2d9d76f705faa9e1be2a4e0d551e3cf4ae50f56985188dc1d4db899cd334b056a20f2e31c5bcf4298bbec2ad050b8"
+        ));
+        let raw_pk = Blob::Slice(&hex!(
+            "cf4ae50f56985188dc1d4db899cd334b056a20f2e31c5bcf4298bbec2ad050b8"
+        ));
+        let raw_msg = Blob::Slice(&hex!(
+            "fb56b6cedd5b3ad1f20a4a4dee408d7bdc12759e3a551e41504c48a4696bc6ef70c06602932b55cdc4aa09c76b15e720"
+        ));
+        let raw_sig = Blob::Slice(&hex!(
+            "0ea86500afe4accc39857d7a8654c6628268a626808bbad1677a227ffdd427e8a65a8de060686e1ee769a60691ad48ff084168cec434b1d5fa7eb06705cab40a"
+        ));
+
+        let sk = Ed25519SigningKey::from_raw(&raw_sk.bytes()[..32])?;
+        let pk = Ed25519VerifyingKey::try_from(raw_pk)?;
+        assert_eq!(&sk.pk, &pk);
+        let sig = Signature::<Ed25519>::from_inner(Ed25519Signature::try_from(raw_sig)?);
+        let msg = raw_msg.bytes();
+
+        pk.verify_sig(msg, &sig)?;
+
         Ok(())
     }
 }

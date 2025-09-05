@@ -2,10 +2,9 @@ use crate::blob::Blob;
 use crate::crypto::edwards::eddsa::EddsaVerifyingKey;
 use crate::crypto::edwards::variants::Ed25519HexStr;
 use crate::crypto::edwards::{Ed25519, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
-use crate::crypto::hash::{Digest, Hasher, Sha512, Sha512HexStr};
 use crate::crypto::signature::{Scheme, Signature};
 use crate::entity::Error::{InvalidKey, InvalidSignature};
-use crate::entity::{ArEntityHash, ArEntitySignature, Error, Owner, PrehashFor};
+use crate::entity::{ArEntityHash, ArEntitySignature, Error, MessageFor, Owner};
 use crate::typed::FromInner;
 use crate::wallet::WalletPk;
 use derive_where::derive_where;
@@ -18,16 +17,12 @@ trait SupportedScheme:
         Signer = Ed25519SigningKey,
         Verifier = Ed25519VerifyingKey,
         Output = Ed25519Signature,
-        Message = Digest<Self::Hasher>,
+        Message = [u8],
     > + Sized
 {
-    type Hasher: Hasher;
-
     fn signature<T: ArEntityHash>(sig: &ArEntitySignature<T, Self>) -> super::Signature<'_, T>;
 }
 impl SupportedScheme for Ed25519 {
-    type Hasher = Sha512;
-
     fn signature<T: ArEntityHash>(
         sig: &ArEntitySignature<T, Self>,
     ) -> crate::entity::Signature<'_, T> {
@@ -35,7 +30,6 @@ impl SupportedScheme for Ed25519 {
     }
 }
 impl SupportedScheme for Ed25519HexStr {
-    type Hasher = Sha512HexStr;
     fn signature<T: ArEntityHash>(
         sig: &ArEntitySignature<T, Self>,
     ) -> crate::entity::Signature<'_, T> {
@@ -51,7 +45,7 @@ pub(crate) struct Ed25519SignatureData<T: ArEntityHash, S: SupportedScheme> {
 
 impl<T: ArEntityHash, S: SupportedScheme> Ed25519SignatureData<T, S>
 where
-    T: PrehashFor<S::Hasher>,
+    T: MessageFor<S>,
 {
     pub fn new(owner: WalletPk<S::Verifier>, signature: ArEntitySignature<T, S>) -> Self {
         Self { owner, signature }

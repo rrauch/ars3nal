@@ -7,14 +7,14 @@ use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::edwards::variants::Ed25519HexStr;
 use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
-use crate::crypto::hash::{Digest, Hasher};
 use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
-use crate::crypto::signature::{Scheme as SignatureScheme};
+use crate::crypto::signature::Scheme as SignatureScheme;
 use crate::crypto::{keys, signature};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk};
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
+use std::borrow::Cow;
 use std::fmt::{Debug, Display};
 use thiserror::Error;
 
@@ -26,7 +26,7 @@ pub enum Error {
     InvalidKey(#[from] keys::KeyError),
 }
 
-pub trait ArEntityHash: ToSignPrehash + PartialEq + Clone + Send {}
+pub trait ArEntityHash: ToSignableMessage + PartialEq + Clone + Send {}
 
 pub type ArEntitySignature<T: ArEntityHash, S: SignatureScheme> =
     signature::TypedSignature<T, WalletKind, S>;
@@ -38,22 +38,31 @@ pub trait ArEntity {
     fn id(&self) -> &Self::Id;
 }
 
-pub(crate) trait PrehashFor<H: Hasher> {
-    fn prehash(&self) -> MaybeOwned<'_, Digest<H>>;
+impl<H: ArEntityHash, S: SignatureScheme> MessageFor<S> for H
+where
+    for<'a> Cow<'a, <S as SignatureScheme>::Message>: From<&'a H>,
+{
+    fn message(&self) -> Cow<'_, S::Message> {
+        self.into()
+    }
 }
 
-pub(super) trait ToSignPrehash {
-    fn to_sign_prehash<H: Hasher>(&self) -> MaybeOwned<'_, Digest<H>>
-    where
-        Self: PrehashFor<H>;
+pub(crate) trait MessageFor<S: SignatureScheme> {
+    fn message(&self) -> Cow<'_, S::Message>;
 }
 
-impl<T: ?Sized> ToSignPrehash for T {
-    fn to_sign_prehash<H: Hasher>(&self) -> MaybeOwned<'_, Digest<H>>
+pub(super) trait ToSignableMessage {
+    fn to_signable_message<S: SignatureScheme>(&self) -> Cow<'_, S::Message>
     where
-        Self: PrehashFor<H>,
+        Self: MessageFor<S>;
+}
+
+impl<T: ?Sized> ToSignableMessage for T {
+    fn to_signable_message<S: SignatureScheme>(&self) -> Cow<'_, S::Message>
+    where
+        Self: MessageFor<S>,
     {
-        self.prehash()
+        self.message()
     }
 }
 

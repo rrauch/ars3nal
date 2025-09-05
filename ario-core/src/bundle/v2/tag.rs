@@ -52,6 +52,9 @@ impl<'a> From<&'a Tag<'a>> for AvroTag<'a> {
 }
 
 pub fn from_avro(input: &[u8]) -> Result<Vec<Tag<'static>>, TagError> {
+    if input.is_empty() {
+        return Ok(vec![]);
+    }
     Ok(
         serde_avro_fast::from_datum_slice::<Vec<AvroTag<'_>>>(input, AVRO_SCHEMA.deref())?
             .into_iter()

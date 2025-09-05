@@ -9,15 +9,13 @@ use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::edwards::variants::Ed25519HexStr;
 use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
-use crate::crypto::hash::{
-    Digest, HashableExt, Hasher, HasherExt, Sha256, Sha384, Sha512, Sha512HexStr, TypedDigest,
-};
-use crate::crypto::rsa::RsaPublicKey;
+use crate::crypto::hash::{HasherExt, Sha256, Sha384, TypedDigest};
 use crate::crypto::rsa::pss::RsaPss;
+use crate::crypto::rsa::{RsaPublicKey, pss};
 use crate::crypto::signature::Scheme as SignatureScheme;
 use crate::crypto::signature::TypedSignature;
 use crate::entity::{
-    ArEntity, ArEntityHash, ArEntitySignature, Owner as EntityOwner, PrehashFor,
+    ArEntity, ArEntityHash, ArEntitySignature, MessageFor, Owner as EntityOwner,
     Signature as EntitySignature,
 };
 use crate::tag::Tag;
@@ -28,6 +26,7 @@ use crate::{blob, entity};
 use futures_lite::AsyncRead;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::io::Read;
@@ -377,21 +376,17 @@ impl From<V2BundleItemHash> for BundleItemHash {
     }
 }
 
-impl PrehashFor<Sha256> for BundleItemHash {
-    fn prehash(&self) -> MaybeOwned<'_, Digest<Sha256>> {
-        self.prehash()
+impl<'a> From<&'a BundleItemHash> for Cow<'a, [u8]> {
+    fn from(value: &'a BundleItemHash) -> Self {
+        Cow::Borrowed(value.as_slice())
     }
 }
 
-impl PrehashFor<Sha512> for BundleItemHash {
-    fn prehash(&self) -> MaybeOwned<'_, Digest<Sha512>> {
-        self.prehash()
-    }
-}
-
-impl PrehashFor<Sha512HexStr> for BundleItemHash {
-    fn prehash(&self) -> MaybeOwned<'_, Digest<Sha512HexStr>> {
-        self.prehash()
+impl MessageFor<RsaPss<4096>> for BundleItemHash {
+    fn message(&self) -> Cow<'_, <RsaPss<4096> as SignatureScheme>::Message> {
+        Cow::Owned(pss::Message::Regular(
+            self.as_slice().as_blob().into_owned(),
+        ))
     }
 }
 
@@ -401,12 +396,6 @@ impl BundleItemHash {
     pub(crate) fn as_slice(&self) -> &[u8] {
         match self {
             Self::V2(v2) => v2.as_slice(),
-        }
-    }
-
-    fn prehash<H: Hasher>(&self) -> MaybeOwned<'_, Digest<H>> {
-        match self {
-            Self::V2(v2) => v2.digest().into(),
         }
     }
 }

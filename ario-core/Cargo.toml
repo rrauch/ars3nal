@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-aes = { version = "0.9.0-rc.0", features = ["zeroize"] }
+aes = { workspace = true, features = ["zeroize"] }
 anyhow = { workspace = true }
 bigdecimal = { version = "0.4", features = ["serde-json"] }
 bip32 = { version = "0.5", features = ["k256"] }
@@ -14,19 +14,18 @@ bytemuck = { version = "1.23", features = ["derive"] }
 bytes = { workspace = true }
 circular-buffer = "1.1"
 ct-codecs = "1.1"
-ctr = { version = "0.10.0-rc.0", features = ["alloc", "zeroize", "block-padding"] }
+ctr = { workspace = true, features = ["alloc", "zeroize", "block-padding"] }
 derive-where = { workspace = true, features = ["zeroize"] }
-digest = "0.11.0-rc.0"
+digest = { workspace = true }
 ecdsa = { workspace = true }
-ed25519 = { workspace = true, features = ["zeroize"] }
-ed25519-dalek = { workspace = true, features = ["default", "digest"] }
-elliptic-curve = { workspace = true, features = ["jwk"] }
+ed25519-dalek = { workspace = true }
+elliptic-curve = { workspace = true }
 futures-lite = { workspace = true, features = ["futures-io"] }
-ghash = { version = "0.6.0-rc.1", features = ["zeroize"] }
-hkdf = "0.13.0-rc.0"
-hybrid-array = { version = "0.3", features = ["serde", "zeroize", "bytemuck"] }
+ghash = { workspace = true, features = ["zeroize"] }
+hkdf = { workspace = true }
+hybrid-array = { workspace = true, features = ["serde", "zeroize", "bytemuck"] }
 itertools = "0.14"
-k256 = { version = "0.14.0-pre.9", features = ["jwk"] }
+k256 = { workspace = true }
 maybe-async = "0.2"
 maybe-owned = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
@@ -39,7 +38,8 @@ serde_avro_fast = "2.0"
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_repr = "0.1"
 serde_with = { workspace = true, features = ["base64"] }
-sha2 = { version = "0.11.0-rc.0", features = ["oid"] }
+signature = { workspace = true }
+sha2 = { workspace = true, features = ["oid"] }
 subtle = "2.6"
 thiserror = { workspace = true }
 url = { workspace = true }
@@ -47,8 +47,6 @@ uuid = { workspace = true, features = ["v4"] }
 zeroize = { workspace = true, features = ["derive", "serde"] }
 
 [dev-dependencies]
-aes-gcm = { version = "0.11.0-rc.0", features = ["zeroize"] }
-hex = "0.4"
 hex-literal = "1"
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["compat"] }

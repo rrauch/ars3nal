@@ -1,11 +1,13 @@
 use crate::blob::{AsBlob, Blob};
-use crate::crypto::hash::{Sha256, Sha256Hash};
+use crate::crypto::hash::{HashableExt, Sha256, Sha256Hash};
 use crate::crypto::rsa::{Rsa, RsaPrivateKey, RsaPublicKey, SupportedRsaKeySize};
 use crate::crypto::signature::{Scheme, Signature, SigningError, VerificationError};
 use crate::crypto::{Output, OutputLen};
 use derive_where::derive_where;
+use digest::OutputSizeUser;
 use ecdsa::signature;
 use hybrid_array::typenum::Unsigned;
+use maybe_owned::MaybeOwned;
 use rsa::pss::Signature as ExternalPssSignature;
 use rsa::pss::{SigningKey as PssSigningKey, VerifyingKey as PssVerifyingKey};
 use rsa::signature::SignatureEncoding;
@@ -14,6 +16,33 @@ use std::marker::PhantomData;
 use thiserror::Error;
 
 pub struct RsaPss<const BIT: usize>;
+
+#[derive(Clone)]
+pub enum Message {
+    Regular(Blob<'static>),
+    PreHashed(Sha256Hash),
+}
+
+impl From<Sha256Hash> for Message {
+    fn from(value: Sha256Hash) -> Self {
+        Message::PreHashed(value)
+    }
+}
+
+impl From<Blob<'static>> for Message {
+    fn from(value: Blob<'static>) -> Self {
+        Message::Regular(value)
+    }
+}
+
+impl Message {
+    fn as_hash(&self) -> MaybeOwned<'_, Sha256Hash> {
+        match self {
+            Self::PreHashed(hash) => MaybeOwned::Borrowed(hash),
+            Self::Regular(blob) => MaybeOwned::Owned(blob.digest()),
+        }
+    }
+}
 
 #[derive_where(Clone, Debug, PartialEq)]
 #[repr(transparent)]
@@ -63,7 +92,7 @@ where
     type SigningError = SigningError;
     type Verifier = RsaPublicKey<BIT>;
     type VerificationError = VerificationError;
-    type Message = Sha256Hash;
+    type Message = Message;
 
     fn sign(
         signer: &Self::Signer,
@@ -74,15 +103,15 @@ where
     {
         let signing_key = PssSigningKey::<Sha256>::new_with_salt_len(
             signer.as_inner().clone(),
-            calculate_rsa_pss_max_salt_len::<Sha256>(
-                <<Rsa<BIT> as SupportedRsaKeySize>::KeySize>::to_usize(),
-            ),
+            Sha256::output_size(),
         );
 
         let mut rng = rand::rng();
 
+        let hash = msg.as_hash();
+
         let sig = signing_key
-            .sign_prehash_with_rng(&mut rng, msg.as_slice())
+            .sign_prehash_with_rng(&mut rng, hash.as_slice())
             .map_err(|e| SigningError::Other(e.to_string()))?;
         if sig.encoded_len() != <Self::Output as Output>::Len::to_usize() {
             return Err(SigningError::Other("invalid signature length".to_string()));
@@ -103,21 +132,17 @@ where
         let verifying_key: PssVerifyingKey<Sha256> =
             PssVerifyingKey::new_with_auto_salt_len(verifier.as_inner().clone());
 
+        let hash = msg.as_hash();
+
         verifying_key
-            .verify_prehash(msg.as_slice(), sig)
+            .verify_prehash(hash.as_slice(), sig)
             .map_err(|e| VerificationError::Other(e.to_string()))
     }
 }
 
-/// Calculate the maximum salt length for the given key & digest
-fn calculate_rsa_pss_max_salt_len<D: digest::Digest>(key_size_bytes: usize) -> usize {
-    let hash_size_bytes = <D as digest::Digest>::output_size();
-    key_size_bytes - hash_size_bytes - 2
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::crypto::hash::HashableExt;
+    use crate::blob::AsBlob;
     use crate::crypto::keys::SecretKey;
     use crate::crypto::rsa::RsaPrivateKey;
     use crate::crypto::rsa::pss::RsaPss;
@@ -213,7 +238,7 @@ OTOdooS54PVffrqDRHz7dQ==
             ExternalRsaPrivateKey::from_pkcs8_pem(SECRET_KEY_4096_PEM)?,
         )?;
         let public_key = secret_key.public_key_impl();
-        let message = "HEllO wOrlD".as_bytes().digest();
+        let message = "HEllO wOrlD".as_bytes().as_blob().into_owned().into();
 
         let signature: Signature<RsaPss<4096>> = secret_key.sign_sig(&message)?;
         public_key.verify_sig(&message, &signature)?;
@@ -227,7 +252,7 @@ OTOdooS54PVffrqDRHz7dQ==
         )?;
         let public_key = secret_key.public_key_impl();
 
-        let message = "HEllO wOrlD2222".digest();
+        let message = "HEllO wOrlD2222".as_bytes().as_blob().into_owned().into();
         let signature: Signature<RsaPss<2048>> = secret_key.sign_sig(&message)?;
         public_key.verify_sig(&message, &signature)?;
         Ok(())

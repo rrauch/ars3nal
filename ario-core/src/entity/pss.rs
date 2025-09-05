@@ -1,12 +1,12 @@
 use crate::blob::Blob;
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
+use crate::crypto::hash::{Digest, Hashable, Hasher};
 use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::rsa::{Rsa, RsaPrivateKey, RsaPublicKey, SupportedRsaKeySize};
 use crate::crypto::signature::Scheme;
 use crate::crypto::{keys, signature};
 use crate::entity::Error::InvalidSignature;
-use crate::entity::{ArEntityHash, ArEntitySignature, Error, Owner, PrehashFor, Signature};
+use crate::entity::{ArEntityHash, ArEntitySignature, Error, MessageFor, Owner, Signature};
 use crate::typed::FromInner;
 use crate::wallet::WalletPk;
 use itertools::Either;
@@ -19,7 +19,8 @@ pub fn from_raw_autodetect<'a, T: ArEntityHash>(
     raw_signature: Blob<'a>,
 ) -> Result<Either<Rsa4096SignatureData<T>, Rsa2048SignatureData<T>>, Error>
 where
-    T: PrehashFor<Sha256>,
+    T: MessageFor<RsaPss<2048>>,
+    T: MessageFor<RsaPss<4096>>,
 {
     Ok(match raw_owner.len() {
         256 => Either::Right(Rsa2048SignatureData::from_raw(raw_owner, raw_signature)?),
@@ -43,10 +44,9 @@ where
 
 impl<T: ArEntityHash, const BIT: usize> PssSignatureData<T, BIT>
 where
-    RsaPss<BIT>:
-        Scheme<Signer = RsaPrivateKey<BIT>, Verifier = RsaPublicKey<BIT>, Message = Digest<Sha256>>,
+    RsaPss<BIT>: Scheme<Signer = RsaPrivateKey<BIT>, Verifier = RsaPublicKey<BIT>>,
     Rsa<BIT>: SupportedRsaKeySize,
-    T: PrehashFor<Sha256>,
+    T: MessageFor<RsaPss<BIT>>,
 {
     pub(crate) fn new(
         owner: WalletPk<RsaPublicKey<BIT>>,

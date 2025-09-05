@@ -1,6 +1,7 @@
 pub mod ecdsa;
 
 use crate::JsonError;
+use crate::base64::{Base64Error, FromBase64};
 use crate::blob::{AsBlob, Blob};
 use crate::confidential::{Confidential, NewSecretExt, OptionRevealExt, RevealExt, Sensitive};
 use crate::crypto::ec::ecdsa::EcdsaError;
@@ -51,6 +52,8 @@ pub enum KeyError {
     #[error(transparent)]
     JwkError(#[from] JwkError),
     #[error(transparent)]
+    Base64Error(#[from] Base64Error),
+    #[error(transparent)]
     EcdsaError(#[from] EcdsaError),
     #[error("key error: {0}")]
     Other(String),
@@ -64,6 +67,12 @@ pub enum JwkError {
     UnsupportedCurve(String),
     #[error("no 'crv' field in jwk found")]
     MissingCurve,
+    #[error("one or more mandatory fields not found")]
+    MissingMandatoryFields,
+    #[error("provided private key and public key do not match")]
+    KeyMismatch,
+    #[error("invalid field length: expected '{expected}' but got '{actual}'")]
+    InvalidLength { expected: usize, actual: usize },
     #[error(transparent)]
     JsonError(#[from] JsonError),
 }
@@ -77,15 +86,45 @@ impl TryFrom<&Jwk> for SupportedSecretKey {
         }
         match jwk.get("crv").reveal().map(|s| s.as_str()) {
             Some("secp256k1") => {
-                // there doesn't seem to be a better way than turning the jwk struct back into a json string
-                // and passing it to `from_jwk_str`. Might warrant a PR.
-                let sk = ExternalSecretKey::<Secp256k1>::from_jwk_str(
-                    &jwk.to_json_str().map_err(JwkError::from)?.reveal(),
-                )
-                .map_err(EcdsaError::from)?;
-                let pk = sk.public_key();
+                let (d, x, y) = match (jwk.get("d"), jwk.get("x"), jwk.get("y")) {
+                    (Some(d), Some(x), Some(y)) => (d, x, y),
+                    _ => return Err(JwkError::MissingMandatoryFields)?,
+                };
+
+                let x = x.reveal().try_from_base64()?;
+                if x.len() != 32 {
+                    return Err(JwkError::InvalidLength {
+                        expected: 32,
+                        actual: x.len(),
+                    })?;
+                }
+                let y = y.reveal().try_from_base64()?;
+                if y.len() != 32 {
+                    return Err(JwkError::InvalidLength {
+                        expected: 32,
+                        actual: y.len(),
+                    })?;
+                }
+
+                let mut sec1 = [0u8; 65];
+                sec1[0] = 0x04;
+                sec1[1..=32].copy_from_slice(x.bytes());
+                sec1[33..].copy_from_slice(y.bytes());
+
+                let d = d.reveal().try_from_base64()?.sensitive();
+
+                let pk = ExternalPublicKey::<Secp256k1>::from_sec1_bytes(&sec1)
+                    .map_err(EcdsaError::EcError)?;
+                let sk = ExternalSecretKey::<Secp256k1>::from_slice(d.reveal().bytes())
+                    .map_err(EcdsaError::EcError)?
+                    .sensitive();
+
+                if sk.reveal().public_key() != pk {
+                    return Err(JwkError::KeyMismatch)?;
+                }
+
                 Ok(Self::Secp256k1(EcSecretKey {
-                    inner: sk.sensitive(),
+                    inner: sk,
                     pk: EcPublicKey(pk),
                 }))
             }

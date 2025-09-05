@@ -7,15 +7,15 @@ use crate::blob::{AsBlob, Blob};
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hashable, HashableExt, Hasher, HasherExt, TypedDigest};
+use crate::crypto::hash::{Digest, Hashable, Hasher, HasherExt, TypedDigest};
 use crate::crypto::hash::{Sha256, Sha384};
-use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
+use crate::crypto::rsa::{RsaPublicKey, pss};
 use crate::crypto::signature;
 use crate::crypto::signature::Scheme as SignatureScheme;
 use crate::data::{DataItem, EmbeddedDataItem, ExternalDataItem};
 use crate::entity::{
-    ArEntity, ArEntityHash, ArEntitySignature, Owner as EntityOwner, PrehashFor,
+    ArEntity, ArEntityHash, ArEntitySignature, MessageFor, Owner as EntityOwner,
     Signature as EntitySignature,
 };
 use crate::json::JsonSource;
@@ -32,6 +32,7 @@ use bigdecimal::BigDecimal;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use serde_repr::{Deserialize_repr, Serialize_repr};
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::Deref;
@@ -462,11 +463,32 @@ impl TxHash {
 
 impl ArEntityHash for TxHash {}
 
-impl PrehashFor<Sha256> for TxHash {
-    fn prehash(&self) -> MaybeOwned<'_, Digest<Sha256>> {
+impl<const BIT: usize> MessageFor<RsaPss<BIT>> for TxHash
+where
+    RsaPss<BIT>: SignatureScheme<Message = pss::Message>,
+{
+    fn message(&self) -> Cow<'_, <RsaPss<BIT> as SignatureScheme>::Message> {
         match self {
-            TxHash::DeepHash(deep_hash) => deep_hash.digest().into(),
-            TxHash::Shallow(shallow) => MaybeOwned::Borrowed(shallow),
+            Self::DeepHash(deep_hash) => {
+                Cow::Owned(pss::Message::Regular(deep_hash.as_blob().into_owned()))
+            }
+            Self::Shallow(shallow) => {
+                Cow::Owned(pss::Message::PreHashed(shallow.clone().into_inner()))
+            }
+        }
+    }
+}
+
+impl MessageFor<Ecdsa<Secp256k1>> for TxHash
+where
+    Ecdsa<Secp256k1>: SignatureScheme<Message = [u8]>,
+{
+    fn message(&self) -> Cow<'_, <Ecdsa<Secp256k1> as SignatureScheme>::Message> {
+        match self {
+            Self::DeepHash(deep_hash) => Cow::Borrowed(deep_hash.as_slice()),
+            Self::Shallow(_) => {
+                unreachable!("v1 transaction support RSA signatures only")
+            }
         }
     }
 }

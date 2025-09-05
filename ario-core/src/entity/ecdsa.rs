@@ -1,10 +1,9 @@
 use crate::blob::Blob;
 use crate::crypto::ec::ecdsa::{Ecdsa, EcdsaSignature};
 use crate::crypto::ec::{Curve, EcPublicKey, EcSecretKey};
-use crate::crypto::hash::{Digest, Sha256};
 use crate::crypto::signature::{Scheme, Signature};
 use crate::entity::Error::{InvalidKey, InvalidSignature};
-use crate::entity::{ArEntityHash, ArEntitySignature, Error, Owner, PrehashFor};
+use crate::entity::{ArEntityHash, ArEntitySignature, Error, MessageFor, Owner};
 use crate::typed::FromInner;
 use crate::wallet::WalletPk;
 use derive_where::derive_where;
@@ -22,7 +21,7 @@ where
             Signer = EcSecretKey<C>,
             Verifier = EcPublicKey<C>,
             Output = EcdsaSignature<C>,
-            Message = Digest<Sha256>,
+            Message = [u8],
         >,
 {
     owner: WalletPk<<Ecdsa<C> as Scheme>::Verifier>,
@@ -35,9 +34,9 @@ where
             Signer = EcSecretKey<C>,
             Verifier = EcPublicKey<C>,
             Output = EcdsaSignature<C>,
-            Message = Digest<Sha256>,
+            Message = [u8],
         >,
-    T: PrehashFor<Sha256>,
+    T: MessageFor<Ecdsa<C>>,
 {
     pub fn new(
         owner: WalletPk<<Ecdsa<C> as Scheme>::Verifier>,
@@ -49,9 +48,9 @@ where
     pub(crate) fn recover_from_raw(raw_signature: Blob, hash: &T) -> Result<Self, Error> {
         let signature = EcdsaSignature::<C>::try_from(raw_signature)
             .map_err(|e| InvalidSignature(e.to_string()))?;
-        let prehash = hash.to_sign_prehash();
+        let msg = hash.to_signable_message();
         let owner = signature
-            .recover_verifier(&prehash)
+            .recover_verifier(&msg)
             .map_err(|e| InvalidSignature(e.to_string()))?;
         Ok(Self::new(
             WalletPk::from_inner(owner),

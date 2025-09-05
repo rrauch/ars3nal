@@ -6,7 +6,6 @@ use crate::crypto::{Output, OutputLen};
 use crate::typed::Typed;
 use bytemuck::TransparentWrapper;
 use bytes::Bytes;
-use ct_codecs::Encoder;
 use derive_where::derive_where;
 use digest::FixedOutputReset;
 use std::fmt::{Debug, Display, Formatter};
@@ -21,9 +20,6 @@ pub type Sha384Hash = Digest<Sha384>;
 
 pub type Sha512 = sha2::Sha512;
 pub type Sha512Hash = Digest<Sha512>;
-
-pub type Sha512HexStr = TransformingHasher<Sha512, HexTransformer>;
-pub type Sha512HexStrHash = Digest<Sha512HexStr>;
 
 pub type TypedDigest<T, H: Hasher> = Typed<T, Digest<H>>;
 
@@ -159,60 +155,6 @@ where
 
     fn digest(_: impl AsRef<[u8]>) -> digest::Output<Self> {
         unimplemented!("do not use!")
-    }
-}
-
-pub struct HexTransformer;
-
-impl Transformer for HexTransformer {
-    fn new() -> Self {
-        Self
-    }
-
-    fn transform_and_update<H: Hasher>(&mut self, data: impl AsRef<[u8]>, hasher: &mut H) {
-        let hex_encoded =
-            ct_codecs::Hex::encode_to_string(data).expect("hex encoding to never fail");
-        hasher.update(hex_encoded.as_bytes());
-    }
-
-    fn finalize<H: Hasher>(self, _: &mut H) {
-        // do nothing
-    }
-}
-
-pub(crate) trait Transformer: Send + Sync {
-    fn new() -> Self;
-    fn transform_and_update<H: Hasher>(&mut self, data: impl AsRef<[u8]>, hasher: &mut H);
-
-    fn finalize<H: Hasher>(self, hasher: &mut H);
-}
-
-pub struct TransformingHasher<H: Hasher, T: Transformer> {
-    hasher: H,
-    transformer: T,
-}
-
-impl<H: Hasher, T: Transformer> Hasher for TransformingHasher<H, T> {
-    type Output = H::Output;
-
-    fn new() -> Self {
-        TransformingHasher {
-            hasher: H::new(),
-            transformer: Transformer::new(),
-        }
-    }
-
-    fn update(&mut self, data: impl AsRef<[u8]>) {
-        self.transformer
-            .transform_and_update(data, &mut self.hasher);
-    }
-
-    fn finalize(mut self) -> Digest<Self>
-    where
-        Self: Sized,
-    {
-        self.transformer.finalize(&mut self.hasher);
-        Digest::from_inner(self.hasher.finalize().0)
     }
 }
 

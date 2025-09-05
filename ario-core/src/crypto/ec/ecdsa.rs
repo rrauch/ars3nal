@@ -2,13 +2,12 @@ use crate::blob::{AsBlob, Blob};
 use crate::confidential::RevealExt;
 use crate::crypto::Output;
 use crate::crypto::ec::{Curve, EcPublicKey, EcSecretKey};
-use crate::crypto::hash::Sha256Hash;
 use crate::crypto::signature::{Scheme, Signature, SigningError, VerificationError};
 use derive_where::derive_where;
 use ecdsa::RecoveryId;
 use ecdsa::Signature as ExternalSignature;
-use ecdsa::signature::hazmat::PrehashVerifier;
 use hybrid_array::typenum::Unsigned;
+use signature::Verifier;
 use std::marker::PhantomData;
 use std::ops::{Add, Range};
 use thiserror::Error;
@@ -28,11 +27,7 @@ impl<C: Curve> EcdsaSignature<C> {
     ) -> Result<<Ecdsa<C> as Scheme>::Verifier, EcdsaError> {
         if let Some(rec_id) = self.rec_id {
             Ok(EcPublicKey(elliptic_curve::PublicKey::<C>::from(
-                ecdsa::VerifyingKey::recover_from_prehash_noverify(
-                    msg.as_slice(),
-                    &self.inner,
-                    rec_id,
-                )?,
+                ecdsa::VerifyingKey::recover_from_msg(msg, &self.inner, rec_id)?,
             )))
         } else {
             Err(EcdsaError::NonRecoverableSignature)
@@ -128,7 +123,7 @@ impl<C: Curve> Scheme for Ecdsa<C> {
     type SigningError = EcdsaError;
     type Verifier = EcPublicKey<C>;
     type VerificationError = EcdsaError;
-    type Message = Sha256Hash;
+    type Message = [u8];
 
     fn sign(
         signer: &Self::Signer,
@@ -137,8 +132,7 @@ impl<C: Curve> Scheme for Ecdsa<C> {
     where
         Self: Sized,
     {
-        let (sig, rec_id) = ecdsa::SigningKey::from(signer.inner.reveal())
-            .sign_prehash_recoverable(msg.as_slice())?;
+        let (sig, rec_id) = ecdsa::SigningKey::from(signer.inner.reveal()).sign_recoverable(msg)?;
 
         Ok(Signature::from_inner(EcdsaSignature {
             inner: sig,
@@ -155,7 +149,7 @@ impl<C: Curve> Scheme for Ecdsa<C> {
         Self: Sized,
     {
         let verifying_key = ecdsa::VerifyingKey::from(&verifier.0);
-        verifying_key.verify_prehash(msg.as_slice(), &signature.as_inner().inner)?;
+        verifying_key.verify(msg, &signature.as_inner().inner)?;
 
         Ok(())
     }
@@ -165,7 +159,6 @@ impl<C: Curve> Scheme for Ecdsa<C> {
 mod tests {
     use crate::crypto::ec::SupportedSecretKey;
     use crate::crypto::ec::ecdsa::Ecdsa;
-    use crate::crypto::hash::HashableExt;
     use crate::crypto::keys::SecretKey;
     use crate::crypto::signature::{SignSigExt, Signature, VerifySigExt};
     use crate::jwk::Jwk;
@@ -183,10 +176,10 @@ mod tests {
         };
         let pk = sk.public_key_impl();
         //let _addr = pk.digest::<Sha256>().to_base64();
-        let message = "HEllO wOrlD".as_bytes().digest();
+        let message = "HEllO wOrlD".as_bytes();
 
-        let signature: Signature<Ecdsa<Secp256k1>> = sk.sign_sig(&message)?;
-        pk.verify_sig(&message, &signature)?;
+        let signature: Signature<Ecdsa<Secp256k1>> = sk.sign_sig(message)?;
+        pk.verify_sig(message, &signature)?;
         Ok(())
     }
 }
