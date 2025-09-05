@@ -5,6 +5,7 @@ pub mod pss;
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
+use crate::crypto::ec::eip191::Eip191;
 use crate::crypto::edwards::variants::Ed25519HexStr;
 use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
 use crate::crypto::rsa::RsaPublicKey;
@@ -101,6 +102,7 @@ pub enum Signature<'a, T: ArEntityHash> {
     Rsa4096(MaybeOwned<'a, ArEntitySignature<T, RsaPss<4096>>>),
     Rsa2048(MaybeOwned<'a, ArEntitySignature<T, RsaPss<2048>>>),
     Secp256k1(MaybeOwned<'a, ArEntitySignature<T, Ecdsa<Secp256k1>>>),
+    Eip191(MaybeOwned<'a, ArEntitySignature<T, Eip191>>),
     Ed25519(MaybeOwned<'a, ArEntitySignature<T, Ed25519>>),
     Ed25519HexStr(MaybeOwned<'a, ArEntitySignature<T, Ed25519HexStr>>),
 }
@@ -111,6 +113,7 @@ impl<T: ArEntityHash> AsBlob for Signature<'_, T> {
             Self::Rsa4096(pss) => pss.as_blob(),
             Self::Rsa2048(pss) => pss.as_blob(),
             Self::Secp256k1(ecdsa) => ecdsa.as_blob(),
+            Self::Eip191(eip191) => eip191.as_blob(),
             Self::Ed25519(ed25519) => ed25519.as_blob(),
             Self::Ed25519HexStr(ed25519) => ed25519.as_blob(),
         }

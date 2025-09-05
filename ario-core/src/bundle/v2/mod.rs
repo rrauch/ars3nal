@@ -10,7 +10,7 @@ use crate::bundle::{
 };
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384, TypedDigest};
-use crate::entity::ecdsa::Secp256k1SignatureData;
+use crate::entity::ecdsa::Eip191SignatureData;
 use crate::entity::ed25519::{Ed25519HexStrSignatureData, Ed25519RegularSignatureData};
 use crate::entity::pss::{PssSignatureData, Rsa4096SignatureData};
 use crate::tag::Tag;
@@ -259,7 +259,7 @@ impl<'a> RawBundleItem<'a> {
 pub enum SignatureType {
     RsaPss = 1,
     Ed25519 = 2,
-    EcdsaSecp256k1 = 3,
+    Eip191 = 3,
     Ed25519HexStr = 4,
 }
 
@@ -268,7 +268,7 @@ impl SignatureType {
         match self {
             Self::RsaPss => 512,
             Self::Ed25519 => 64,
-            Self::EcdsaSecp256k1 => 65,
+            Self::Eip191 => 65,
             Self::Ed25519HexStr => 64,
         }
     }
@@ -277,7 +277,7 @@ impl SignatureType {
         match self {
             Self::RsaPss => 512,
             Self::Ed25519 => 32,
-            Self::EcdsaSecp256k1 => 65,
+            Self::Eip191 => 65,
             Self::Ed25519HexStr => 32,
         }
     }
@@ -294,7 +294,7 @@ impl AsRef<str> for SignatureType {
         match self {
             Self::RsaPss => "1",
             Self::Ed25519 => "2",
-            Self::EcdsaSecp256k1 => "3",
+            Self::Eip191 => "3",
             Self::Ed25519HexStr => "4",
         }
     }
@@ -319,7 +319,7 @@ impl TryFrom<u16> for SignatureType {
         match value {
             1 => Ok(SignatureType::RsaPss),
             2 => Ok(SignatureType::Ed25519),
-            3 => Ok(SignatureType::EcdsaSecp256k1),
+            3 => Ok(SignatureType::Eip191),
             4 => Ok(SignatureType::Ed25519HexStr),
             invalid => Err(BundleItemError::InvalidOrUnsupportedSignatureType(
                 invalid.to_string(),
@@ -339,7 +339,7 @@ impl<'a> Signature<'a> {
         match self {
             Self::Rsa4096(_) => SignatureType::RsaPss,
             Self::Ed25519(_) => SignatureType::Ed25519,
-            Self::Secp256k1(_) => SignatureType::EcdsaSecp256k1,
+            Self::Eip191(_) => SignatureType::Eip191,
             Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
         }
     }
@@ -348,7 +348,7 @@ impl<'a> Signature<'a> {
 #[derive(Debug, Clone, PartialEq)]
 enum SignatureData {
     Rsa4096(Rsa4096SignatureData<BundleItemHash>),
-    Secp256k1(Secp256k1SignatureData<BundleItemHash>),
+    Eip191(Eip191SignatureData<BundleItemHash>),
     Ed25519(Ed25519RegularSignatureData<BundleItemHash>),
     Ed25519HexStr(Ed25519HexStrSignatureData<BundleItemHash>),
 }
@@ -366,13 +366,13 @@ impl SignatureData {
                 raw_owner,
                 raw_signature,
             )?)),
-            SignatureType::EcdsaSecp256k1 => {
+            SignatureType::Eip191 => {
                 //todo: check if this differs from how EcdsaSecp256k1 is used in regular V2Tx's
                 /*Ok(SignatureData::Ecdsa(EcdsaSignatureData::recover_from_raw(
                     raw_signature,
                     hash,
                 )?))*/
-                Ok(SignatureData::Secp256k1(Secp256k1SignatureData::from_raw(
+                Ok(SignatureData::Eip191(Eip191SignatureData::from_raw(
                     raw_signature,
                     raw_owner,
                 )?))
@@ -390,7 +390,7 @@ impl SignatureData {
     pub(super) fn owner(&self) -> Owner<'_> {
         match self {
             Self::Rsa4096(pss) => pss.owner().try_into().expect("owner conversion to succeed"),
-            Self::Secp256k1(ecdsa) => ecdsa
+            Self::Eip191(eip191) => eip191
                 .owner()
                 .try_into()
                 .expect("owner conversion to succeed"),
@@ -412,7 +412,7 @@ impl SignatureData {
                 .signature()
                 .try_into()
                 .expect("signature conversion to succeed"),
-            Self::Secp256k1(ecdsa) => ecdsa
+            Self::Eip191(eip191) => eip191
                 .signature()
                 .try_into()
                 .expect("signature conversion to succeed"),
@@ -431,7 +431,7 @@ impl SignatureData {
     fn verify_sig(&self, hash: &BundleItemHash) -> Result<(), BundleItemError> {
         match self {
             Self::Rsa4096(pss) => Ok(pss.verify_sig(hash)?),
-            Self::Secp256k1(ecdsa) => Ok(ecdsa.verify_sig(hash)?),
+            Self::Eip191(eip191) => Ok(eip191.verify_sig(hash)?),
             Self::Ed25519(ed25519) => Ok(ed25519.verify_sig(hash)?),
             Self::Ed25519HexStr(ed25519) => Ok(ed25519.verify_sig(hash)?),
         }
@@ -441,7 +441,7 @@ impl SignatureData {
     fn signature_type(&self) -> SignatureType {
         match self {
             Self::Rsa4096(_) => SignatureType::RsaPss,
-            Self::Secp256k1(_) => SignatureType::EcdsaSecp256k1,
+            Self::Eip191(_) => SignatureType::Eip191,
             Self::Ed25519(_) => SignatureType::Ed25519,
             Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
         }
@@ -483,7 +483,10 @@ mod tests {
 
     #[tokio::test]
     async fn deserialize_bundle() -> anyhow::Result<()> {
-        for (bundle_data, bundle_id) in [(BUNDLE_1, BUNDLE_1_ID.deref())] {
+        for (bundle_data, bundle_id) in [
+            (BUNDLE_1, BUNDLE_1_ID.deref()),
+            (BUNDLE_3, BUNDLE_3_ID.deref()),
+        ] {
             let mut input = futures_lite::io::Cursor::new(bundle_data);
 
             let bundle = BundleReader::builder()

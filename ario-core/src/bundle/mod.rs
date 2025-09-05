@@ -6,7 +6,7 @@ use crate::bundle::v2::{
     Bundle as V2Bundle, BundleEntry as V2BundleEntry, BundleItem as V2BundleItem, V2BundleItemHash,
 };
 use crate::crypto::ec::EcPublicKey;
-use crate::crypto::ec::ecdsa::Ecdsa;
+use crate::crypto::ec::eip191::Eip191;
 use crate::crypto::edwards::variants::Ed25519HexStr;
 use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
 use crate::crypto::hash::{HasherExt, Sha256, Sha384, TypedDigest};
@@ -410,7 +410,7 @@ impl<T> BundleItemSignatureScheme for T where T: SignatureScheme + SupportedSign
 trait SupportedSignatureScheme {}
 impl SupportedSignatureScheme for Ed25519 {}
 impl SupportedSignatureScheme for Ed25519HexStr {}
-impl SupportedSignatureScheme for Ecdsa<Secp256k1> {}
+impl SupportedSignatureScheme for Eip191 {}
 impl SupportedSignatureScheme for RsaPss<4096> {}
 
 pub type BundleItemDeepHash = TypedDigest<BundleItemKind, Sha384>;
@@ -490,7 +490,7 @@ impl AsBlob for Owner<'_> {
 #[derive(Debug)]
 pub enum Signature<'a> {
     Rsa4096(MaybeOwned<'a, ArEntitySignature<BundleItemHash, RsaPss<4096>>>),
-    Secp256k1(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ecdsa<Secp256k1>>>),
+    Eip191(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Eip191>>),
     Ed25519(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ed25519>>),
     Ed25519HexStr(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ed25519HexStr>>),
 }
@@ -500,7 +500,7 @@ impl<'a> From<Signature<'a>> for EntitySignature<'a, BundleItemHash> {
     fn from(value: Signature<'a>) -> Self {
         match value {
             Signature::Rsa4096(o) => Self::Rsa4096(o),
-            Signature::Secp256k1(o) => Self::Secp256k1(o),
+            Signature::Eip191(o) => Self::Eip191(o),
             Signature::Ed25519(o) => Self::Ed25519(o),
             Signature::Ed25519HexStr(o) => Self::Ed25519HexStr(o),
         }
@@ -514,7 +514,7 @@ impl<'a> TryFrom<EntitySignature<'a, BundleItemHash>> for Signature<'a> {
     fn try_from(value: EntitySignature<'a, BundleItemHash>) -> Result<Self, Self::Error> {
         match value {
             EntitySignature::Rsa4096(o) => Ok(Self::Rsa4096(o)),
-            EntitySignature::Secp256k1(o) => Ok(Self::Secp256k1(o)),
+            EntitySignature::Eip191(o) => Ok(Self::Eip191(o)),
             EntitySignature::Ed25519(o) => Ok(Self::Ed25519(o)),
             EntitySignature::Ed25519HexStr(o) => Ok(Self::Ed25519HexStr(o)),
             other => Err(other),
@@ -527,7 +527,7 @@ impl AsBlob for Signature<'_> {
     fn as_blob(&self) -> Blob<'_> {
         match self {
             Self::Rsa4096(pss) => pss.as_blob(),
-            Self::Secp256k1(ecdsa) => ecdsa.as_blob(),
+            Self::Eip191(eip191) => eip191.as_blob(),
             Self::Ed25519(ed25519) => ed25519.as_blob(),
             Self::Ed25519HexStr(ed25519) => ed25519.as_blob(),
         }
@@ -539,7 +539,7 @@ impl<'a> Signature<'a> {
     pub fn digest(&self) -> BundleItemId {
         match self {
             Self::Rsa4096(pss) => pss.digest(),
-            Self::Secp256k1(ecdsa) => ecdsa.digest(),
+            Self::Eip191(eip191) => eip191.digest(),
             Self::Ed25519(ed25519) => ed25519.digest(),
             Self::Ed25519HexStr(ed25519) => ed25519.digest(),
         }

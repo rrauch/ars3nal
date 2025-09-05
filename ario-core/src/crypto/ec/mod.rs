@@ -1,4 +1,5 @@
 pub mod ecdsa;
+pub mod eip191;
 
 use crate::JsonError;
 use crate::base64::{Base64Error, FromBase64};
@@ -149,6 +150,18 @@ impl<C: Curve> SecretKey for EcSecretKey<C> {
 }
 
 impl EcSecretKey<Secp256k1> {
+    pub(super) fn from_raw(raw: &[u8]) -> Result<Self, KeyError> {
+        let sk = ExternalSecretKey::<Secp256k1>::from_slice(raw)
+            .map_err(EcdsaError::EcError)?
+            .sensitive();
+        let pk = sk.reveal().public_key();
+
+        Ok(Self {
+            inner: sk,
+            pk: EcPublicKey(pk),
+        })
+    }
+
     pub(crate) fn derive_key_from_seed(seed: &Confidential<[u8; 64]>) -> Result<Self, KeyError> {
         let path = "m/44'/60'/0'/0/0"
             .parse::<bip32::DerivationPath>()
@@ -159,14 +172,7 @@ impl EcSecretKey<Secp256k1> {
                 .map_err(|e| KeyError::Other(e.to_string()))?;
 
         let sk_bytes = xprv.private_key().to_bytes().to_vec().confidential();
-        let sk = ExternalSecretKey::<Secp256k1>::from_slice(sk_bytes.reveal().as_slice())
-            .map_err(EcdsaError::from)?;
-        let pk = sk.public_key();
-
-        Ok(Self::from(EcSecretKey {
-            inner: sk.sensitive(),
-            pk: EcPublicKey(pk),
-        }))
+        Self::from_raw(sk_bytes.reveal().as_slice())
     }
 }
 

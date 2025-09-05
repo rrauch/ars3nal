@@ -12,19 +12,52 @@ use std::marker::PhantomData;
 use std::ops::{Add, Range};
 use thiserror::Error;
 
-pub struct Ecdsa<C: Curve>(PhantomData<C>);
+pub struct Ecdsa<C: Curve, V: Variant = ()>(PhantomData<(C, V)>);
 
-#[derive_where(Clone, Debug, PartialEq)]
-pub struct EcdsaSignature<C: Curve> {
-    inner: ExternalSignature<C>,
-    rec_id: Option<RecoveryId>,
+pub trait Variant: Send + Sync {
+    fn serialize_rec_id(rec_id: RecoveryId) -> u8;
+    fn deserialize_rec_id(value: u8) -> Option<RecoveryId>;
 }
 
-impl<C: Curve> EcdsaSignature<C> {
+impl Variant for () {
+    fn serialize_rec_id(rec_id: RecoveryId) -> u8 {
+        rec_id.to_byte()
+    }
+
+    fn deserialize_rec_id(value: u8) -> Option<RecoveryId> {
+        RecoveryId::from_byte(value)
+    }
+}
+
+#[derive_where(Clone, Debug, PartialEq)]
+pub struct EcdsaSignature<C: Curve, V: Variant = ()> {
+    inner: ExternalSignature<C>,
+    rec_id: Option<RecoveryId>,
+    _phantom: PhantomData<V>,
+}
+
+impl<C: Curve, V: Variant> EcdsaSignature<C, V> {
+    pub(super) fn new(inner: ExternalSignature<C>, rec_id: Option<RecoveryId>) -> Self {
+        Self {
+            inner,
+            rec_id,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub(super) fn inner(&self) -> &ExternalSignature<C> {
+        &self.inner
+    }
+}
+
+impl<C: Curve, V: Variant> EcdsaSignature<C, V>
+where
+    for<'a> Ecdsa<C, V>: Scheme<Message<'a> = [u8], Verifier = EcPublicKey<C>>,
+{
     pub(crate) fn recover_verifier(
         &self,
-        msg: &<Ecdsa<C> as Scheme>::Message<'_>,
-    ) -> Result<<Ecdsa<C> as Scheme>::Verifier, EcdsaError> {
+        msg: &<Ecdsa<C, V> as Scheme>::Message<'_>,
+    ) -> Result<<Ecdsa<C, V> as Scheme>::Verifier, EcdsaError> where {
         if let Some(rec_id) = self.rec_id {
             Ok(EcPublicKey(elliptic_curve::PublicKey::<C>::from(
                 ecdsa::VerifyingKey::recover_from_msg(msg, &self.inner, rec_id)?,
@@ -35,17 +68,17 @@ impl<C: Curve> EcdsaSignature<C> {
     }
 }
 
-impl<C: Curve> AsBlob for EcdsaSignature<C> {
+impl<C: Curve, V: Variant> AsBlob for EcdsaSignature<C, V> {
     fn as_blob(&self) -> Blob<'_> {
         let mut bytes = self.inner.to_vec();
         if let Some(rec_id) = self.rec_id {
-            bytes.push(rec_id.to_byte()); // rec_id is stored at the end
+            bytes.push(V::serialize_rec_id(rec_id)); // rec_id is stored at the end
         }
         Blob::from(bytes)
     }
 }
 
-impl<C: Curve> TryFrom<Blob<'_>> for EcdsaSignature<C> {
+impl<C: Curve, V: Variant> TryFrom<Blob<'_>> for EcdsaSignature<C, V> {
     type Error = EcdsaError;
 
     fn try_from(value: Blob<'_>) -> Result<Self, Self::Error> {
@@ -56,14 +89,14 @@ impl<C: Curve> TryFrom<Blob<'_>> for EcdsaSignature<C> {
 
         if ![expected, with_recovery].contains(&bytes.len()) || expected < 2 {
             return Err(EcdsaError::UnexpectedInputLength {
-                expected: expected..with_recovery + 1,
+                expected: expected..with_recovery,
                 actual: value.len(),
             });
         }
 
         let (sig_bytes, rec_id) = if bytes.len() == with_recovery {
             let (sig_bytes, rec_id) = bytes.split_at(bytes.len() - 1);
-            let rec_id = match RecoveryId::from_byte(rec_id[0]) {
+            let rec_id = match V::deserialize_rec_id(rec_id[0]) {
                 Some(r) => r,
                 None => return Err(EcdsaError::InvalidRecoveryId),
             };
@@ -74,11 +107,11 @@ impl<C: Curve> TryFrom<Blob<'_>> for EcdsaSignature<C> {
 
         let sig = ExternalSignature::<C>::from_slice(sig_bytes)?;
 
-        Ok(Self { inner: sig, rec_id })
+        Ok(Self::new(sig, rec_id))
     }
 }
 
-impl<C: Curve> Output for EcdsaSignature<C> {
+impl<C: Curve, V: Variant> Output for EcdsaSignature<C, V> {
     type Len = <<C as elliptic_curve::Curve>::FieldBytesSize as Add>::Output;
 }
 
@@ -137,6 +170,7 @@ impl<C: Curve> Scheme for Ecdsa<C> {
         Ok(Signature::from_inner(EcdsaSignature {
             inner: sig,
             rec_id: Some(rec_id),
+            _phantom: PhantomData,
         }))
     }
 
