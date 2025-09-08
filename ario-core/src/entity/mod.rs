@@ -6,7 +6,7 @@ use crate::blob::{AsBlob, Blob};
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::ec::eip191::Eip191;
-use crate::crypto::edwards::variants::Ed25519HexStr;
+use crate::crypto::edwards::variants::{Aptos, Ed25519HexStr};
 use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
 use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
@@ -105,6 +105,7 @@ pub enum Signature<'a, T: ArEntityHash> {
     Eip191(MaybeOwned<'a, ArEntitySignature<T, Eip191>>),
     Ed25519(MaybeOwned<'a, ArEntitySignature<T, Ed25519>>),
     Ed25519HexStr(MaybeOwned<'a, ArEntitySignature<T, Ed25519HexStr>>),
+    Aptos(MaybeOwned<'a, ArEntitySignature<T, Aptos>>),
 }
 
 impl<T: ArEntityHash> AsBlob for Signature<'_, T> {
@@ -116,6 +117,7 @@ impl<T: ArEntityHash> AsBlob for Signature<'_, T> {
             Self::Eip191(eip191) => eip191.as_blob(),
             Self::Ed25519(ed25519) => ed25519.as_blob(),
             Self::Ed25519HexStr(ed25519) => ed25519.as_blob(),
+            Self::Aptos(aptos) => aptos.as_blob(),
         }
     }
 }

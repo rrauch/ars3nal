@@ -7,7 +7,7 @@ use crate::bundle::v2::{
 };
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::eip191::Eip191;
-use crate::crypto::edwards::variants::Ed25519HexStr;
+use crate::crypto::edwards::variants::{Aptos, Ed25519HexStr};
 use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
 use crate::crypto::hash::{HasherExt, Sha256, Sha384, TypedDigest};
 use crate::crypto::rsa::pss::RsaPss;
@@ -410,6 +410,7 @@ impl<T> BundleItemSignatureScheme for T where T: SignatureScheme + SupportedSign
 trait SupportedSignatureScheme {}
 impl SupportedSignatureScheme for Ed25519 {}
 impl SupportedSignatureScheme for Ed25519HexStr {}
+impl SupportedSignatureScheme for Aptos {}
 impl SupportedSignatureScheme for Eip191 {}
 impl SupportedSignatureScheme for RsaPss<4096> {}
 
@@ -493,6 +494,7 @@ pub enum Signature<'a> {
     Eip191(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Eip191>>),
     Ed25519(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ed25519>>),
     Ed25519HexStr(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ed25519HexStr>>),
+    Aptos(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Aptos>>),
 }
 
 impl<'a> From<Signature<'a>> for EntitySignature<'a, BundleItemHash> {
@@ -503,6 +505,7 @@ impl<'a> From<Signature<'a>> for EntitySignature<'a, BundleItemHash> {
             Signature::Eip191(o) => Self::Eip191(o),
             Signature::Ed25519(o) => Self::Ed25519(o),
             Signature::Ed25519HexStr(o) => Self::Ed25519HexStr(o),
+            Signature::Aptos(o) => Self::Aptos(o),
         }
     }
 }
@@ -517,6 +520,7 @@ impl<'a> TryFrom<EntitySignature<'a, BundleItemHash>> for Signature<'a> {
             EntitySignature::Eip191(o) => Ok(Self::Eip191(o)),
             EntitySignature::Ed25519(o) => Ok(Self::Ed25519(o)),
             EntitySignature::Ed25519HexStr(o) => Ok(Self::Ed25519HexStr(o)),
+            EntitySignature::Aptos(o) => Ok(Self::Aptos(o)),
             other => Err(other),
         }
     }
@@ -530,6 +534,7 @@ impl AsBlob for Signature<'_> {
             Self::Eip191(eip191) => eip191.as_blob(),
             Self::Ed25519(ed25519) => ed25519.as_blob(),
             Self::Ed25519HexStr(ed25519) => ed25519.as_blob(),
+            Self::Aptos(aptos) => aptos.as_blob(),
         }
     }
 }
@@ -542,6 +547,7 @@ impl<'a> Signature<'a> {
             Self::Eip191(eip191) => eip191.digest(),
             Self::Ed25519(ed25519) => ed25519.digest(),
             Self::Ed25519HexStr(ed25519) => ed25519.digest(),
+            Self::Aptos(aptos) => aptos.digest(),
         }
     }
 }

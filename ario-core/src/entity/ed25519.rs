@@ -1,6 +1,6 @@
 use crate::blob::Blob;
 use crate::crypto::edwards::eddsa::EddsaVerifyingKey;
-use crate::crypto::edwards::variants::Ed25519HexStr;
+use crate::crypto::edwards::variants::{Aptos, Ed25519HexStr};
 use crate::crypto::edwards::{Ed25519, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 use crate::crypto::signature::{Scheme, Signature};
 use crate::entity::Error::{InvalidKey, InvalidSignature};
@@ -11,6 +11,7 @@ use derive_where::derive_where;
 
 pub type Ed25519RegularSignatureData<T: ArEntityHash> = Ed25519SignatureData<T, Ed25519>;
 pub type Ed25519HexStrSignatureData<T: ArEntityHash> = Ed25519SignatureData<T, Ed25519HexStr>;
+pub type AptosSignatureData<T: ArEntityHash> = Ed25519SignatureData<T, Aptos>;
 
 trait SupportedScheme:
     for<'a> Scheme<
@@ -34,6 +35,14 @@ impl SupportedScheme for Ed25519HexStr {
         sig: &ArEntitySignature<T, Self>,
     ) -> crate::entity::Signature<'_, T> {
         super::Signature::Ed25519HexStr(sig.into())
+    }
+}
+
+impl SupportedScheme for Aptos {
+    fn signature<T: ArEntityHash>(
+        sig: &ArEntitySignature<T, Self>,
+    ) -> crate::entity::Signature<'_, T> {
+        super::Signature::Aptos(sig.into())
     }
 }
 

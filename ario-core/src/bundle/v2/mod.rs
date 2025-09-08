@@ -11,7 +11,9 @@ use crate::bundle::{
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384, TypedDigest};
 use crate::entity::ecdsa::Eip191SignatureData;
-use crate::entity::ed25519::{Ed25519HexStrSignatureData, Ed25519RegularSignatureData};
+use crate::entity::ed25519::{
+    AptosSignatureData, Ed25519HexStrSignatureData, Ed25519RegularSignatureData,
+};
 use crate::entity::pss::{PssSignatureData, Rsa4096SignatureData};
 use crate::tag::Tag;
 use crate::typed::FromInner;
@@ -261,6 +263,7 @@ pub enum SignatureType {
     Ed25519 = 2,
     Eip191 = 3,
     Ed25519HexStr = 4,
+    Aptos = 5,
 }
 
 impl SignatureType {
@@ -270,6 +273,7 @@ impl SignatureType {
             Self::Ed25519 => 64,
             Self::Eip191 => 65,
             Self::Ed25519HexStr => 64,
+            Self::Aptos => 64,
         }
     }
 
@@ -279,6 +283,7 @@ impl SignatureType {
             Self::Ed25519 => 32,
             Self::Eip191 => 65,
             Self::Ed25519HexStr => 32,
+            Self::Aptos => 32,
         }
     }
 }
@@ -296,6 +301,7 @@ impl AsRef<str> for SignatureType {
             Self::Ed25519 => "2",
             Self::Eip191 => "3",
             Self::Ed25519HexStr => "4",
+            Self::Aptos => "5",
         }
     }
 }
@@ -321,6 +327,7 @@ impl TryFrom<u16> for SignatureType {
             2 => Ok(SignatureType::Ed25519),
             3 => Ok(SignatureType::Eip191),
             4 => Ok(SignatureType::Ed25519HexStr),
+            5 => Ok(SignatureType::Aptos),
             invalid => Err(BundleItemError::InvalidOrUnsupportedSignatureType(
                 invalid.to_string(),
             )),
@@ -341,6 +348,7 @@ impl<'a> Signature<'a> {
             Self::Ed25519(_) => SignatureType::Ed25519,
             Self::Eip191(_) => SignatureType::Eip191,
             Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
+            Self::Aptos(_) => SignatureType::Aptos,
         }
     }
 }
@@ -351,6 +359,7 @@ enum SignatureData {
     Eip191(Eip191SignatureData<BundleItemHash>),
     Ed25519(Ed25519RegularSignatureData<BundleItemHash>),
     Ed25519HexStr(Ed25519HexStrSignatureData<BundleItemHash>),
+    Aptos(AptosSignatureData<BundleItemHash>),
 }
 
 impl SignatureData {
@@ -383,6 +392,10 @@ impl SignatureData {
             SignatureType::Ed25519HexStr => Ok(SignatureData::Ed25519HexStr(
                 Ed25519HexStrSignatureData::from_raw(raw_signature, raw_owner)?,
             )),
+            SignatureType::Aptos => Ok(SignatureData::Aptos(AptosSignatureData::from_raw(
+                raw_signature,
+                raw_owner,
+            )?)),
         }
     }
 
@@ -399,6 +412,10 @@ impl SignatureData {
                 .try_into()
                 .expect("owner conversion to succeed"),
             Self::Ed25519HexStr(ed25519) => ed25519
+                .owner()
+                .try_into()
+                .expect("owner conversion to succeed"),
+            Self::Aptos(aptos) => aptos
                 .owner()
                 .try_into()
                 .expect("owner conversion to succeed"),
@@ -424,6 +441,10 @@ impl SignatureData {
                 .signature()
                 .try_into()
                 .expect("signature conversion to succeed"),
+            Self::Aptos(aptos) => aptos
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
         }
     }
 
@@ -434,6 +455,7 @@ impl SignatureData {
             Self::Eip191(eip191) => Ok(eip191.verify_sig(hash)?),
             Self::Ed25519(ed25519) => Ok(ed25519.verify_sig(hash)?),
             Self::Ed25519HexStr(ed25519) => Ok(ed25519.verify_sig(hash)?),
+            Self::Aptos(aptos) => Ok(aptos.verify_sig(hash)?),
         }
     }
 
@@ -444,6 +466,7 @@ impl SignatureData {
             Self::Eip191(_) => SignatureType::Eip191,
             Self::Ed25519(_) => SignatureType::Ed25519,
             Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
+            Self::Aptos(_) => SignatureType::Aptos,
         }
     }
 }
