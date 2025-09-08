@@ -107,6 +107,7 @@ pub enum Signature<'a, T: ArEntityHash> {
     Ed25519(MaybeOwned<'a, ArEntitySignature<T, Ed25519>>),
     Ed25519HexStr(MaybeOwned<'a, ArEntitySignature<T, Ed25519HexStr>>),
     Aptos(MaybeOwned<'a, ArEntitySignature<T, Aptos>>),
+    Kyve(MaybeOwned<'a, ArEntitySignature<T, Eip191>>),
 }
 
 impl<T: ArEntityHash> AsBlob for Signature<'_, T> {
@@ -120,6 +121,7 @@ impl<T: ArEntityHash> AsBlob for Signature<'_, T> {
             Self::Ed25519(ed25519) => ed25519.as_blob(),
             Self::Ed25519HexStr(ed25519) => ed25519.as_blob(),
             Self::Aptos(aptos) => aptos.as_blob(),
+            Self::Kyve(kyve) => kyve.as_blob(),
         }
     }
 }

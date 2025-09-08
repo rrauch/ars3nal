@@ -497,6 +497,7 @@ pub enum Signature<'a> {
     Ed25519(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ed25519>>),
     Ed25519HexStr(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ed25519HexStr>>),
     Aptos(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Aptos>>),
+    Kyve(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Eip191>>),
 }
 
 impl<'a> From<Signature<'a>> for EntitySignature<'a, BundleItemHash> {
@@ -509,6 +510,7 @@ impl<'a> From<Signature<'a>> for EntitySignature<'a, BundleItemHash> {
             Signature::Ed25519(o) => Self::Ed25519(o),
             Signature::Ed25519HexStr(o) => Self::Ed25519HexStr(o),
             Signature::Aptos(o) => Self::Aptos(o),
+            Signature::Kyve(o) => Self::Kyve(o),
         }
     }
 }
@@ -525,6 +527,7 @@ impl<'a> TryFrom<EntitySignature<'a, BundleItemHash>> for Signature<'a> {
             EntitySignature::Ed25519(o) => Ok(Self::Ed25519(o)),
             EntitySignature::Ed25519HexStr(o) => Ok(Self::Ed25519HexStr(o)),
             EntitySignature::Aptos(o) => Ok(Self::Aptos(o)),
+            EntitySignature::Kyve(o) => Ok(Self::Kyve(o)),
             other => Err(other),
         }
     }
@@ -540,6 +543,7 @@ impl AsBlob for Signature<'_> {
             Self::Ed25519(ed25519) => ed25519.as_blob(),
             Self::Ed25519HexStr(ed25519) => ed25519.as_blob(),
             Self::Aptos(aptos) => aptos.as_blob(),
+            Self::Kyve(kyve) => kyve.as_blob(),
         }
     }
 }
@@ -554,6 +558,7 @@ impl<'a> Signature<'a> {
             Self::Ed25519(ed25519) => ed25519.digest(),
             Self::Ed25519HexStr(ed25519) => ed25519.digest(),
             Self::Aptos(aptos) => aptos.digest(),
+            Self::Kyve(kyve) => kyve.digest(),
         }
     }
 }

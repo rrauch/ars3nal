@@ -251,13 +251,14 @@ impl<'a> RawBundleItem<'a> {
 //
 // taken from https://github.com/ar-io/arbundles/blob/master/src/constants.ts
 //
-// 1: ArweaveSigner
-// 2: Curve25519
-// 3: EthereumSigner
-// 4: HexInjectedSolanaSigner
-// 5: InjectedAptosSigner
-// 6: MultiSignatureAptosSigner
-// 7: TypedEthereumSigner
+//   1: ArweaveSigner
+//   2: Curve25519
+//   3: EthereumSigner
+//   4: HexInjectedSolanaSigner
+//   5: InjectedAptosSigner
+//   6: MultiSignatureAptosSigner
+//   7: TypedEthereumSigner
+// 101: KYVE
 //
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(u16)]
@@ -268,6 +269,7 @@ pub enum SignatureType {
     Ed25519HexStr = 4,
     Aptos = 5,
     Eip712 = 7,
+    Kyve = 101,
 }
 
 impl SignatureType {
@@ -279,6 +281,7 @@ impl SignatureType {
             Self::Ed25519HexStr => 64,
             Self::Aptos => 64,
             Self::Eip712 => 65,
+            Self::Kyve => 65,
         }
     }
 
@@ -290,6 +293,7 @@ impl SignatureType {
             Self::Ed25519HexStr => 32,
             Self::Aptos => 32,
             Self::Eip712 => 42,
+            Self::Kyve => 65,
         }
     }
 }
@@ -309,6 +313,7 @@ impl AsRef<str> for SignatureType {
             Self::Ed25519HexStr => "4",
             Self::Aptos => "5",
             Self::Eip712 => "7",
+            Self::Kyve => "101",
         }
     }
 }
@@ -336,6 +341,7 @@ impl TryFrom<u16> for SignatureType {
             4 => Ok(SignatureType::Ed25519HexStr),
             5 => Ok(SignatureType::Aptos),
             7 => Ok(SignatureType::Eip712),
+            101 => Ok(SignatureType::Kyve),
             invalid => Err(BundleItemError::InvalidOrUnsupportedSignatureType(
                 invalid.to_string(),
             )),
@@ -358,6 +364,7 @@ impl<'a> Signature<'a> {
             Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
             Self::Aptos(_) => SignatureType::Aptos,
             Self::Eip712(_) => SignatureType::Eip712,
+            Self::Kyve(_) => SignatureType::Kyve,
         }
     }
 }
@@ -370,6 +377,7 @@ enum SignatureData {
     Ed25519(Ed25519RegularSignatureData<BundleItemHash>),
     Ed25519HexStr(Ed25519HexStrSignatureData<BundleItemHash>),
     Aptos(AptosSignatureData<BundleItemHash>),
+    Kyve(Eip191SignatureData<BundleItemHash>),
 }
 
 impl SignatureData {
@@ -432,6 +440,10 @@ impl SignatureData {
                 raw_signature,
                 raw_owner,
             )?)),
+            SignatureType::Kyve => Ok(SignatureData::Kyve(Eip191SignatureData::from_raw(
+                raw_signature,
+                raw_owner,
+            )?)),
         }
     }
 
@@ -456,6 +468,10 @@ impl SignatureData {
                 .try_into()
                 .expect("owner conversion to succeed"),
             Self::Aptos(aptos) => aptos
+                .owner()
+                .try_into()
+                .expect("owner conversion to succeed"),
+            Self::Kyve(kyve) => kyve
                 .owner()
                 .try_into()
                 .expect("owner conversion to succeed"),
@@ -489,6 +505,10 @@ impl SignatureData {
                 .signature()
                 .try_into()
                 .expect("signature conversion to succeed"),
+            Self::Kyve(kvye) => kvye
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
         }
     }
 
@@ -501,6 +521,7 @@ impl SignatureData {
             Self::Ed25519(ed25519) => Ok(ed25519.verify_sig(hash)?),
             Self::Ed25519HexStr(ed25519) => Ok(ed25519.verify_sig(hash)?),
             Self::Aptos(aptos) => Ok(aptos.verify_sig(hash)?),
+            Self::Kyve(kyve) => Ok(kyve.verify_sig(hash)?),
         }
     }
 
@@ -513,6 +534,7 @@ impl SignatureData {
             Self::Ed25519(_) => SignatureType::Ed25519,
             Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
             Self::Aptos(_) => SignatureType::Aptos,
+            Self::Kyve(_) => SignatureType::Kyve,
         }
     }
 }
