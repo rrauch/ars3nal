@@ -8,9 +8,11 @@ use crate::bundle::{
     BundleAnchor, BundleId, BundleItemError, BundleItemHash, BundleItemId, BundleItemIdError,
     BundleItemKind, Error, Owner, Signature,
 };
+use crate::crypto::ec::ethereum::{EthereumAddress, EthereumPublicKeyExt};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384, TypedDigest};
-use crate::entity::ecdsa::Eip191SignatureData;
+use crate::entity;
+use crate::entity::ecdsa::{Eip191SignatureData, Eip712SignatureData};
 use crate::entity::ed25519::{
     AptosSignatureData, Ed25519HexStrSignatureData, Ed25519RegularSignatureData,
 };
@@ -23,6 +25,7 @@ use futures_lite::AsyncRead;
 use std::fmt::{Display, Formatter};
 use std::io::Read;
 use std::ops::Deref;
+use std::str::FromStr;
 
 mod reader;
 mod tag;
@@ -264,6 +267,7 @@ pub enum SignatureType {
     Eip191 = 3,
     Ed25519HexStr = 4,
     Aptos = 5,
+    Eip712 = 7,
 }
 
 impl SignatureType {
@@ -274,6 +278,7 @@ impl SignatureType {
             Self::Eip191 => 65,
             Self::Ed25519HexStr => 64,
             Self::Aptos => 64,
+            Self::Eip712 => 65,
         }
     }
 
@@ -284,6 +289,7 @@ impl SignatureType {
             Self::Eip191 => 65,
             Self::Ed25519HexStr => 32,
             Self::Aptos => 32,
+            Self::Eip712 => 42,
         }
     }
 }
@@ -302,6 +308,7 @@ impl AsRef<str> for SignatureType {
             Self::Eip191 => "3",
             Self::Ed25519HexStr => "4",
             Self::Aptos => "5",
+            Self::Eip712 => "7",
         }
     }
 }
@@ -328,6 +335,7 @@ impl TryFrom<u16> for SignatureType {
             3 => Ok(SignatureType::Eip191),
             4 => Ok(SignatureType::Ed25519HexStr),
             5 => Ok(SignatureType::Aptos),
+            7 => Ok(SignatureType::Eip712),
             invalid => Err(BundleItemError::InvalidOrUnsupportedSignatureType(
                 invalid.to_string(),
             )),
@@ -349,6 +357,7 @@ impl<'a> Signature<'a> {
             Self::Eip191(_) => SignatureType::Eip191,
             Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
             Self::Aptos(_) => SignatureType::Aptos,
+            Self::Eip712(_) => SignatureType::Eip712,
         }
     }
 }
@@ -357,6 +366,7 @@ impl<'a> Signature<'a> {
 enum SignatureData {
     Rsa4096(Rsa4096SignatureData<BundleItemHash>),
     Eip191(Eip191SignatureData<BundleItemHash>),
+    Eip712(Eip712SignatureData<BundleItemHash>),
     Ed25519(Ed25519RegularSignatureData<BundleItemHash>),
     Ed25519HexStr(Ed25519HexStrSignatureData<BundleItemHash>),
     Aptos(AptosSignatureData<BundleItemHash>),
@@ -367,7 +377,7 @@ impl SignatureData {
     pub(super) fn from_raw<'a>(
         raw_signature: Blob<'a>,
         raw_owner: Blob<'a>,
-        _hash: &BundleItemHash,
+        hash: &BundleItemHash,
         signature_type: SignatureType,
     ) -> Result<Self, BundleItemError> {
         match signature_type {
@@ -375,16 +385,42 @@ impl SignatureData {
                 raw_owner,
                 raw_signature,
             )?)),
-            SignatureType::Eip191 => {
-                //todo: check if this differs from how EcdsaSecp256k1 is used in regular V2Tx's
-                /*Ok(SignatureData::Ecdsa(EcdsaSignatureData::recover_from_raw(
-                    raw_signature,
-                    hash,
-                )?))*/
-                Ok(SignatureData::Eip191(Eip191SignatureData::from_raw(
-                    raw_signature,
-                    raw_owner,
-                )?))
+            SignatureType::Eip191 => Ok(SignatureData::Eip191(Eip191SignatureData::from_raw(
+                raw_signature,
+                raw_owner,
+            )?)),
+            SignatureType::Eip712 => {
+                let sig_data = Eip712SignatureData::recover_from_raw(raw_signature, hash)?;
+
+                // raw_owner is supposed to be a string representing the ethereum address of the owner
+                let expected_address =
+                    EthereumAddress::from_str(str::from_utf8(raw_owner.bytes()).map_err(|e| {
+                        BundleItemError::Other(format!(
+                            "expected owner to be a string, but parsing failed: {}",
+                            e
+                        ))
+                    })?)
+                    .map_err(|e| {
+                        BundleItemError::Other(format!(
+                            "expected owner to be an ethereum address, but parsing failed: {}",
+                            e
+                        ))
+                    })?;
+
+                let actual_address = if let entity::Owner::Secp256k1(pk) = sig_data.owner() {
+                    pk.to_ethereum_address()
+                } else {
+                    return Err(BundleItemError::Other("expected recovered owner to be a secp256k1 public key, but got something else".to_string()));
+                };
+
+                if &expected_address != &actual_address {
+                    return Err(BundleItemError::Other(format!(
+                        "Ethereum address of owner [{}] does not match recoered address [{}]",
+                        expected_address, actual_address
+                    )));
+                }
+
+                Ok(SignatureData::Eip712(sig_data))
             }
             SignatureType::Ed25519 => Ok(SignatureData::Ed25519(
                 Ed25519RegularSignatureData::from_raw(raw_signature, raw_owner)?,
@@ -404,6 +440,10 @@ impl SignatureData {
         match self {
             Self::Rsa4096(pss) => pss.owner().try_into().expect("owner conversion to succeed"),
             Self::Eip191(eip191) => eip191
+                .owner()
+                .try_into()
+                .expect("owner conversion to succeed"),
+            Self::Eip712(eip712) => eip712
                 .owner()
                 .try_into()
                 .expect("owner conversion to succeed"),
@@ -433,6 +473,10 @@ impl SignatureData {
                 .signature()
                 .try_into()
                 .expect("signature conversion to succeed"),
+            Self::Eip712(eip712) => eip712
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
             Self::Ed25519(ed25519) => ed25519
                 .signature()
                 .try_into()
@@ -453,6 +497,7 @@ impl SignatureData {
         match self {
             Self::Rsa4096(pss) => Ok(pss.verify_sig(hash)?),
             Self::Eip191(eip191) => Ok(eip191.verify_sig(hash)?),
+            Self::Eip712(eip712) => Ok(eip712.verify_sig(hash)?),
             Self::Ed25519(ed25519) => Ok(ed25519.verify_sig(hash)?),
             Self::Ed25519HexStr(ed25519) => Ok(ed25519.verify_sig(hash)?),
             Self::Aptos(aptos) => Ok(aptos.verify_sig(hash)?),
@@ -464,6 +509,7 @@ impl SignatureData {
         match self {
             Self::Rsa4096(_) => SignatureType::RsaPss,
             Self::Eip191(_) => SignatureType::Eip191,
+            Self::Eip712(_) => SignatureType::Eip712,
             Self::Ed25519(_) => SignatureType::Ed25519,
             Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
             Self::Aptos(_) => SignatureType::Aptos,

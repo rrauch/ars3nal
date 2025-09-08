@@ -1,6 +1,6 @@
 use crate::blob::Blob;
 use crate::crypto::ec::ecdsa::{Ecdsa, EcdsaSignature, Variant};
-use crate::crypto::ec::eip191::Eip191Variant;
+use crate::crypto::ec::ethereum::{Eip191Format, Eip712Format, EthereumVariant};
 use crate::crypto::ec::{Curve, EcPublicKey, EcSecretKey};
 use crate::crypto::signature::{Scheme, Signature};
 use crate::entity::Error::{InvalidKey, InvalidSignature};
@@ -11,7 +11,12 @@ use derive_where::derive_where;
 use k256::Secp256k1;
 
 pub type Secp256k1SignatureData<T: ArEntityHash> = EcdsaSignatureData<T, Secp256k1>;
-pub type Eip191SignatureData<T: ArEntityHash> = EcdsaSignatureData<T, Secp256k1, Eip191Variant>;
+
+type EthereumSignatureData<T: ArEntityHash, F> =
+    EcdsaSignatureData<T, Secp256k1, EthereumVariant<F>>;
+
+pub type Eip191SignatureData<T: ArEntityHash> = EthereumSignatureData<T, Eip191Format>;
+pub type Eip712SignatureData<T: ArEntityHash> = EthereumSignatureData<T, Eip712Format>;
 
 trait SupportedCurve: Curve {}
 impl SupportedCurve for Secp256k1 {}
@@ -89,12 +94,22 @@ impl<T: ArEntityHash> EcdsaSignatureData<T, Secp256k1> {
     }
 }
 
-impl<T: ArEntityHash> EcdsaSignatureData<T, Secp256k1, Eip191Variant> {
+impl<T: ArEntityHash> EthereumSignatureData<T, Eip191Format> {
     pub fn owner(&self) -> Owner<'_> {
         Owner::Secp256k1((&self.owner).into())
     }
 
     pub(crate) fn signature(&self) -> super::Signature<'_, T> {
         super::Signature::Eip191((&self.signature).into())
+    }
+}
+
+impl<T: ArEntityHash> EthereumSignatureData<T, Eip712Format> {
+    pub fn owner(&self) -> Owner<'_> {
+        Owner::Secp256k1((&self.owner).into())
+    }
+
+    pub(crate) fn signature(&self) -> super::Signature<'_, T> {
+        super::Signature::Eip712((&self.signature).into())
     }
 }

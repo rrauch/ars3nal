@@ -1,5 +1,5 @@
 pub mod ecdsa;
-pub mod eip191;
+pub mod ethereum;
 
 use crate::JsonError;
 use crate::base64::{Base64Error, FromBase64};

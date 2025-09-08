@@ -1,5 +1,3 @@
-extern crate core;
-
 use crate::crypto::hash::Sha256;
 use crate::crypto::hash::TypedDigest;
 use crate::typed::{Typed, WithDisplay, WithSerde};
@@ -22,6 +20,7 @@ mod chunking;
 pub mod confidential;
 pub mod crypto;
 pub mod data;
+mod entity;
 mod json;
 pub mod jwk;
 pub mod money;
@@ -30,7 +29,6 @@ pub mod tag;
 pub mod typed;
 mod validation;
 pub mod wallet;
-mod entity;
 
 pub struct AddressKind<T>(PhantomData<T>);
 pub type Address<T> = TypedDigest<AddressKind<T>, Sha256>;
