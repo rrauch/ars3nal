@@ -17,6 +17,9 @@ impl Variant for Eip191Variant {
     }
 
     fn deserialize_rec_id(value: u8) -> Option<RecoveryId> {
+        if value < 27 {
+            return None;
+        }
         RecoveryId::from_byte(value - 27)
     }
 }
@@ -53,7 +56,7 @@ fn to_eip191_hash(input: &[u8]) -> Digest<Keccak256> {
 }
 
 impl Scheme for Eip191 {
-    type Output = EcdsaSignature<Secp256k1, Eip191Variant>;
+    type Output = Eip191Signature;
     type Signer = <Ecdsa<Secp256k1> as Scheme>::Signer;
     type SigningError = Error;
     type Verifier = <Ecdsa<Secp256k1> as Scheme>::Verifier;
