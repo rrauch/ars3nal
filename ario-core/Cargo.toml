@@ -31,7 +31,6 @@ maybe-owned = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
 rand_chacha = { version = "0.9", features = ["std"] }
 rangemap = "1.6"
-ringbuf = "0.4"
 rsa = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_avro_fast = "2.0"

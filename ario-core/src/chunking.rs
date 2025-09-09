@@ -1,4 +1,5 @@
 use crate::blob::{AsBlob, Blob};
+use crate::buffer::{BufMutExt, HeapCircularBuffer};
 use crate::crypto::hash::{Digest, Hashable, Hasher, Sha256};
 use crate::crypto::{Output, OutputLen};
 use crate::data::MaybeOwnedDefaultChunkedData;
@@ -8,11 +9,6 @@ use derive_where::derive_where;
 use futures_lite::AsyncRead;
 use futures_lite::AsyncReadExt;
 use maybe_owned::MaybeOwned;
-use ringbuf::LocalRb;
-use ringbuf::consumer::Consumer;
-use ringbuf::producer::Producer;
-use ringbuf::storage::Heap;
-use ringbuf::traits::Observer;
 use std::cmp::min;
 use std::fmt::Debug;
 use std::io::Cursor;
@@ -184,7 +180,7 @@ pub struct MostlyFixedChunker<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_
     hasher: H,
     current_chunk_start_offset: u64,
     total_bytes_processed: u64,
-    buf: LocalRb<Heap<u8>>,
+    buf: HeapCircularBuffer,
 }
 
 impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunker
@@ -203,15 +199,11 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunke
     fn update(&mut self, input: &mut impl Buf) -> impl IntoIterator<Item = Chunk<Self>> {
         let mut chunks = vec![];
         while input.has_remaining() {
+            self.buf.transfer_from_buf(input);
+
             if self.buf.is_full() {
                 chunks.extend(self.process_chunk(false));
-                continue;
             }
-
-            let chunk = input.chunk();
-            let to_copy = chunk.len().min(self.buf.vacant_len());
-            let num_bytes = self.buf.push_slice(&chunk[..to_copy]);
-            input.advance(num_bytes);
         }
         chunks
     }
@@ -219,7 +211,7 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunke
     fn finalize(mut self) -> impl IntoIterator<Item = Chunk<Self>> {
         let mut chunks = vec![];
         // Process any remaining data
-        while self.buf.occupied_len() > 0 {
+        while self.buf.remaining() > 0 {
             chunks.extend(self.process_chunk(true));
         }
         chunks
@@ -236,7 +228,7 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
             MIN_CHUNK_SIZE <= MAX_CHUNK_SIZE,
             "MIN_CHUNK_SIZE must be <= MAX_CHUNK_SIZE."
         );
-        let buf = LocalRb::new(MAX_CHUNK_SIZE + MIN_CHUNK_SIZE);
+        let buf = HeapCircularBuffer::new(MAX_CHUNK_SIZE + MIN_CHUNK_SIZE);
         Self {
             hasher: H::new(),
             current_chunk_start_offset: 0,
@@ -247,7 +239,7 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
 
     fn process_chunk(&mut self, is_final: bool) -> Vec<Chunk<Self>> {
         let mut chunks = vec![];
-        let buffered_len = self.buf.occupied_len();
+        let buffered_len = self.buf.remaining();
 
         if buffered_len == 0 {
             return chunks;
@@ -261,30 +253,14 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
                 buffered_len
             }
         } else {
-            min(MAX_CHUNK_SIZE, self.buf.occupied_len())
+            min(MAX_CHUNK_SIZE, self.buf.remaining())
         };
         assert!(chunk_len <= MAX_CHUNK_SIZE);
 
-        let mut remaining = chunk_len;
-        let (mut sl1, mut sl2) = self.buf.as_slices();
+        let buf = &self.buf.make_contiguous()[..chunk_len];
+        self.hasher.update(buf);
 
-        while remaining > 0 {
-            if !sl1.is_empty() {
-                let to_process = sl1.len().min(remaining);
-                self.hasher.update(&sl1[..to_process]);
-                sl1 = &sl1[to_process..];
-                remaining -= to_process;
-            } else if !sl2.is_empty() {
-                let to_process = sl2.len().min(remaining);
-                self.hasher.update(&sl2[..to_process]);
-                sl2 = &sl2[to_process..];
-                remaining -= to_process;
-            } else {
-                break;
-            }
-        }
-
-        let processed = chunk_len - remaining;
+        let processed = buf.len();
         assert!(processed > 0);
 
         // finalize the chunk
@@ -296,10 +272,7 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
             offset: self.current_chunk_start_offset..offset_end,
         });
 
-        // Safety: advance read index by `processed` bytes
-        unsafe {
-            self.buf.advance_read_index(processed);
-        }
+        self.buf.advance(processed);
         self.current_chunk_start_offset = offset_end;
         self.total_bytes_processed += processed as u64;
 
