@@ -1,4 +1,5 @@
 pub mod eddsa;
+pub mod multi_aptos;
 pub mod variants;
 
 pub trait Curve {}

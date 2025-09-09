@@ -7,6 +7,7 @@ use crate::bundle::v2::{
 };
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ethereum::{Eip191, Eip712};
+use crate::crypto::edwards::multi_aptos::{MultiAptosEd25519, MultiAptosVerifyingKey};
 use crate::crypto::edwards::variants::{Aptos, Ed25519HexStr};
 use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
 use crate::crypto::hash::{HasherExt, Sha256, Sha384, TypedDigest};
@@ -411,6 +412,7 @@ trait SupportedSignatureScheme {}
 impl SupportedSignatureScheme for Ed25519 {}
 impl SupportedSignatureScheme for Ed25519HexStr {}
 impl SupportedSignatureScheme for Aptos {}
+impl SupportedSignatureScheme for MultiAptosEd25519 {}
 impl SupportedSignatureScheme for Eip191 {}
 impl SupportedSignatureScheme for Eip712 {}
 impl SupportedSignatureScheme for RsaPss<4096> {}
@@ -440,6 +442,7 @@ pub enum Owner<'a> {
     Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
     Secp256k1(MaybeOwned<'a, WalletPk<EcPublicKey<Secp256k1>>>),
     Ed25519(MaybeOwned<'a, WalletPk<Ed25519VerifyingKey>>),
+    MultiAptos(MaybeOwned<'a, WalletPk<MultiAptosVerifyingKey>>),
 }
 
 impl<'a> From<Owner<'a>> for EntityOwner<'a> {
@@ -449,6 +452,7 @@ impl<'a> From<Owner<'a>> for EntityOwner<'a> {
             Owner::Rsa4096(o) => Self::Rsa4096(o),
             Owner::Secp256k1(o) => Self::Secp256k1(o),
             Owner::Ed25519(o) => Self::Ed25519(o),
+            Owner::MultiAptos(o) => Self::MultiAptos(o),
         }
     }
 }
@@ -462,6 +466,7 @@ impl<'a> TryFrom<EntityOwner<'a>> for Owner<'a> {
             EntityOwner::Rsa4096(o) => Ok(Self::Rsa4096(o)),
             EntityOwner::Secp256k1(o) => Ok(Self::Secp256k1(o)),
             EntityOwner::Ed25519(o) => Ok(Self::Ed25519(o)),
+            EntityOwner::MultiAptos(o) => Ok(Self::MultiAptos(o)),
             other => Err(other),
         }
     }
@@ -474,6 +479,7 @@ impl<'a> Owner<'a> {
             Self::Rsa4096(inner) => inner.derive_address(),
             Self::Secp256k1(inner) => inner.derive_address(),
             Self::Ed25519(inner) => inner.derive_address(),
+            Self::MultiAptos(inner) => inner.derive_address(),
         }
     }
 }
@@ -485,6 +491,7 @@ impl AsBlob for Owner<'_> {
             Self::Rsa4096(rsa) => rsa.as_blob(),
             Self::Secp256k1(ec) => ec.as_blob(),
             Self::Ed25519(ed25519) => ed25519.as_blob(),
+            Self::MultiAptos(multi) => multi.as_blob(),
         }
     }
 }
@@ -497,6 +504,7 @@ pub enum Signature<'a> {
     Ed25519(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ed25519>>),
     Ed25519HexStr(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Ed25519HexStr>>),
     Aptos(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Aptos>>),
+    MultiAptos(MaybeOwned<'a, ArEntitySignature<BundleItemHash, MultiAptosEd25519>>),
     Kyve(MaybeOwned<'a, ArEntitySignature<BundleItemHash, Eip191>>),
 }
 
@@ -510,6 +518,7 @@ impl<'a> From<Signature<'a>> for EntitySignature<'a, BundleItemHash> {
             Signature::Ed25519(o) => Self::Ed25519(o),
             Signature::Ed25519HexStr(o) => Self::Ed25519HexStr(o),
             Signature::Aptos(o) => Self::Aptos(o),
+            Signature::MultiAptos(o) => Self::MultiAptos(o),
             Signature::Kyve(o) => Self::Kyve(o),
         }
     }
@@ -527,6 +536,7 @@ impl<'a> TryFrom<EntitySignature<'a, BundleItemHash>> for Signature<'a> {
             EntitySignature::Ed25519(o) => Ok(Self::Ed25519(o)),
             EntitySignature::Ed25519HexStr(o) => Ok(Self::Ed25519HexStr(o)),
             EntitySignature::Aptos(o) => Ok(Self::Aptos(o)),
+            EntitySignature::MultiAptos(o) => Ok(Self::MultiAptos(o)),
             EntitySignature::Kyve(o) => Ok(Self::Kyve(o)),
             other => Err(other),
         }
@@ -543,6 +553,7 @@ impl AsBlob for Signature<'_> {
             Self::Ed25519(ed25519) => ed25519.as_blob(),
             Self::Ed25519HexStr(ed25519) => ed25519.as_blob(),
             Self::Aptos(aptos) => aptos.as_blob(),
+            Self::MultiAptos(multi) => multi.as_blob(),
             Self::Kyve(kyve) => kyve.as_blob(),
         }
     }
@@ -558,6 +569,7 @@ impl<'a> Signature<'a> {
             Self::Ed25519(ed25519) => ed25519.digest(),
             Self::Ed25519HexStr(ed25519) => ed25519.digest(),
             Self::Aptos(aptos) => aptos.digest(),
+            Self::MultiAptos(multi) => multi.digest(),
             Self::Kyve(kyve) => kyve.digest(),
         }
     }

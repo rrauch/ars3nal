@@ -6,7 +6,6 @@ use crate::crypto::{Output, OutputLen};
 use derive_where::derive_where;
 use digest::OutputSizeUser;
 use ecdsa::signature;
-use hybrid_array::typenum::Unsigned;
 use maybe_owned::MaybeOwned;
 use rsa::pss::Signature as ExternalPssSignature;
 use rsa::pss::{SigningKey as PssSigningKey, VerifyingKey as PssVerifyingKey};
@@ -113,7 +112,7 @@ where
         let sig = signing_key
             .sign_prehash_with_rng(&mut rng, hash.as_slice())
             .map_err(|e| SigningError::Other(e.to_string()))?;
-        if sig.encoded_len() != <Self::Output as Output>::Len::to_usize() {
+        if sig.encoded_len() != <<Self::Output as Output>::Len as OutputLen>::to_usize() {
             return Err(SigningError::Other("invalid signature length".to_string()));
         }
         Ok(Signature::from_inner(PssSignature(sig, PhantomData)))

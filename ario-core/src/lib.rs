@@ -1,3 +1,5 @@
+extern crate core;
+
 use crate::crypto::hash::Sha256;
 use crate::crypto::hash::TypedDigest;
 use crate::typed::{Typed, WithDisplay, WithSerde};

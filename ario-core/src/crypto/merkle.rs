@@ -2,13 +2,12 @@ use crate::blob::{AsBlob, Blob};
 use crate::chunking::{
     Chunk, ChunkInfo, Chunker, ChunkerExt, DefaultChunker, IntoMaybeOwnedChunk, MaybeOwnedChunk,
 };
-use crate::crypto::Output;
 use crate::crypto::hash::{Digest, Hashable, HashableExt, Hasher, Sha256};
+use crate::crypto::{Output, OutputLen};
 use crate::typed::{FromInner, Typed};
 use bytemuck::TransparentWrapper;
 use bytes::{Buf, Bytes, BytesMut};
 use derive_where::derive_where;
-use hybrid_array::typenum::Unsigned;
 use rangemap::RangeMap;
 use std::iter;
 use std::marker::PhantomData;
@@ -27,7 +26,7 @@ pub type MerkleRoot<H: Hasher, C: Chunker, const NOTE_SIZE: usize> =
     NodeId<H, C, NOTE_SIZE, MerkleRootKind>;
 
 impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleRoot<H, C, NOTE_SIZE> {
-    const HASH_SIZE: usize = <<H::Output as Output>::Len>::USIZE;
+    const HASH_SIZE: usize = <<H::Output as Output>::Len as OutputLen>::USIZE;
     const CHUNK_OUTPUT_SIZE: usize = <<C::Output as ChunkInfo>::Len>::USIZE;
     const LEAF_PROOF_LEN: usize = { Self::HASH_SIZE + NOTE_SIZE };
     const BRANCH_PROOF_LEN: usize = { Self::HASH_SIZE * 2 + NOTE_SIZE };

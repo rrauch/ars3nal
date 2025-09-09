@@ -9,6 +9,7 @@ use crate::bundle::{
     BundleItemKind, Error, Owner, Signature,
 };
 use crate::crypto::ec::ethereum::{EthereumAddress, EthereumPublicKeyExt};
+use crate::crypto::edwards::multi_aptos;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hasher, Sha384, TypedDigest};
 use crate::entity;
@@ -16,6 +17,7 @@ use crate::entity::ecdsa::{Eip191SignatureData, Eip712SignatureData};
 use crate::entity::ed25519::{
     AptosSignatureData, Ed25519HexStrSignatureData, Ed25519RegularSignatureData,
 };
+use crate::entity::multi_aptos::MultiAptosSignatureData;
 use crate::entity::pss::{PssSignatureData, Rsa4096SignatureData};
 use crate::tag::Tag;
 use crate::typed::FromInner;
@@ -268,6 +270,7 @@ pub enum SignatureType {
     Eip191 = 3,
     Ed25519HexStr = 4,
     Aptos = 5,
+    MultiAptos = 6,
     Eip712 = 7,
     Kyve = 101,
 }
@@ -280,6 +283,7 @@ impl SignatureType {
             Self::Eip191 => 65,
             Self::Ed25519HexStr => 64,
             Self::Aptos => 64,
+            Self::MultiAptos => multi_aptos::SERIALIZED_SIGS_SIZE,
             Self::Eip712 => 65,
             Self::Kyve => 65,
         }
@@ -292,6 +296,7 @@ impl SignatureType {
             Self::Eip191 => 65,
             Self::Ed25519HexStr => 32,
             Self::Aptos => 32,
+            Self::MultiAptos => multi_aptos::SERIALIZED_OWNERS_SIZE,
             Self::Eip712 => 42,
             Self::Kyve => 65,
         }
@@ -312,6 +317,7 @@ impl AsRef<str> for SignatureType {
             Self::Eip191 => "3",
             Self::Ed25519HexStr => "4",
             Self::Aptos => "5",
+            Self::MultiAptos => "6",
             Self::Eip712 => "7",
             Self::Kyve => "101",
         }
@@ -340,6 +346,7 @@ impl TryFrom<u16> for SignatureType {
             3 => Ok(SignatureType::Eip191),
             4 => Ok(SignatureType::Ed25519HexStr),
             5 => Ok(SignatureType::Aptos),
+            6 => Ok(SignatureType::MultiAptos),
             7 => Ok(SignatureType::Eip712),
             101 => Ok(SignatureType::Kyve),
             invalid => Err(BundleItemError::InvalidOrUnsupportedSignatureType(
@@ -363,6 +370,7 @@ impl<'a> Signature<'a> {
             Self::Eip191(_) => SignatureType::Eip191,
             Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
             Self::Aptos(_) => SignatureType::Aptos,
+            Self::MultiAptos(_) => SignatureType::MultiAptos,
             Self::Eip712(_) => SignatureType::Eip712,
             Self::Kyve(_) => SignatureType::Kyve,
         }
@@ -377,6 +385,7 @@ enum SignatureData {
     Ed25519(Ed25519RegularSignatureData<BundleItemHash>),
     Ed25519HexStr(Ed25519HexStrSignatureData<BundleItemHash>),
     Aptos(AptosSignatureData<BundleItemHash>),
+    MultiAptos(MultiAptosSignatureData<BundleItemHash>),
     Kyve(Eip191SignatureData<BundleItemHash>),
 }
 
@@ -423,7 +432,7 @@ impl SignatureData {
 
                 if &expected_address != &actual_address {
                     return Err(BundleItemError::Other(format!(
-                        "Ethereum address of owner [{}] does not match recoered address [{}]",
+                        "Ethereum address of owner [{}] does not match recovered address [{}]",
                         expected_address, actual_address
                     )));
                 }
@@ -440,6 +449,9 @@ impl SignatureData {
                 raw_signature,
                 raw_owner,
             )?)),
+            SignatureType::MultiAptos => Ok(SignatureData::MultiAptos(
+                MultiAptosSignatureData::from_raw(raw_signature, raw_owner)?,
+            )),
             SignatureType::Kyve => Ok(SignatureData::Kyve(Eip191SignatureData::from_raw(
                 raw_signature,
                 raw_owner,
@@ -468,6 +480,10 @@ impl SignatureData {
                 .try_into()
                 .expect("owner conversion to succeed"),
             Self::Aptos(aptos) => aptos
+                .owner()
+                .try_into()
+                .expect("owner conversion to succeed"),
+            Self::MultiAptos(multi) => multi
                 .owner()
                 .try_into()
                 .expect("owner conversion to succeed"),
@@ -505,6 +521,10 @@ impl SignatureData {
                 .signature()
                 .try_into()
                 .expect("signature conversion to succeed"),
+            Self::MultiAptos(multi) => multi
+                .signature()
+                .try_into()
+                .expect("signature conversion to succeed"),
             Self::Kyve(kvye) => kvye
                 .signature()
                 .try_into()
@@ -521,6 +541,7 @@ impl SignatureData {
             Self::Ed25519(ed25519) => Ok(ed25519.verify_sig(hash)?),
             Self::Ed25519HexStr(ed25519) => Ok(ed25519.verify_sig(hash)?),
             Self::Aptos(aptos) => Ok(aptos.verify_sig(hash)?),
+            Self::MultiAptos(multi) => Ok(multi.verify_sig(hash)?),
             Self::Kyve(kyve) => Ok(kyve.verify_sig(hash)?),
         }
     }
@@ -534,6 +555,7 @@ impl SignatureData {
             Self::Ed25519(_) => SignatureType::Ed25519,
             Self::Ed25519HexStr(_) => SignatureType::Ed25519HexStr,
             Self::Aptos(_) => SignatureType::Aptos,
+            Self::MultiAptos(_) => SignatureType::MultiAptos,
             Self::Kyve(_) => SignatureType::Kyve,
         }
     }

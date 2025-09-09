@@ -1,11 +1,13 @@
 pub mod ecdsa;
 pub mod ed25519;
+pub mod multi_aptos;
 pub mod pss;
 
 use crate::blob::{AsBlob, Blob};
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ecdsa::Ecdsa;
 use crate::crypto::ec::ethereum::{Eip191, Eip712};
+use crate::crypto::edwards::multi_aptos::{MultiAptosEd25519, MultiAptosVerifyingKey};
 use crate::crypto::edwards::variants::{Aptos, Ed25519HexStr};
 use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
 use crate::crypto::rsa::RsaPublicKey;
@@ -73,6 +75,7 @@ pub enum Owner<'a> {
     Rsa2048(MaybeOwned<'a, WalletPk<RsaPublicKey<2048>>>),
     Secp256k1(MaybeOwned<'a, WalletPk<EcPublicKey<Secp256k1>>>),
     Ed25519(MaybeOwned<'a, WalletPk<Ed25519VerifyingKey>>),
+    MultiAptos(MaybeOwned<'a, WalletPk<MultiAptosVerifyingKey>>),
 }
 
 impl<'a> Owner<'a> {
@@ -82,6 +85,7 @@ impl<'a> Owner<'a> {
             Self::Rsa2048(inner) => inner.derive_address(),
             Self::Secp256k1(inner) => inner.derive_address(),
             Self::Ed25519(inner) => inner.derive_address(),
+            Self::MultiAptos(inner) => inner.derive_address(),
         }
     }
 }
@@ -93,6 +97,7 @@ impl AsBlob for Owner<'_> {
             Self::Rsa2048(rsa) => rsa.as_blob(),
             Self::Secp256k1(ec) => ec.as_blob(),
             Self::Ed25519(ed25519) => ed25519.as_blob(),
+            Self::MultiAptos(multi) => multi.as_blob(),
         }
     }
 }
@@ -107,6 +112,7 @@ pub enum Signature<'a, T: ArEntityHash> {
     Ed25519(MaybeOwned<'a, ArEntitySignature<T, Ed25519>>),
     Ed25519HexStr(MaybeOwned<'a, ArEntitySignature<T, Ed25519HexStr>>),
     Aptos(MaybeOwned<'a, ArEntitySignature<T, Aptos>>),
+    MultiAptos(MaybeOwned<'a, ArEntitySignature<T, MultiAptosEd25519>>),
     Kyve(MaybeOwned<'a, ArEntitySignature<T, Eip191>>),
 }
 
@@ -121,6 +127,7 @@ impl<T: ArEntityHash> AsBlob for Signature<'_, T> {
             Self::Ed25519(ed25519) => ed25519.as_blob(),
             Self::Ed25519HexStr(ed25519) => ed25519.as_blob(),
             Self::Aptos(aptos) => aptos.as_blob(),
+            Self::MultiAptos(multi) => multi.as_blob(),
             Self::Kyve(kyve) => kyve.as_blob(),
         }
     }
