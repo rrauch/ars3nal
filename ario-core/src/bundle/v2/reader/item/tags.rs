@@ -98,6 +98,7 @@ impl Tags {
         let tag_data = self.tags(ctx).map_err(|e| BundleItemError::from(e))?;
         let data_size = ctx.remaining();
         Ok(Data::new(
+            ctx.pos,
             data_size,
             self.owner.clone(),
             self.signature.clone(),

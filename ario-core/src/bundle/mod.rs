@@ -3,7 +3,9 @@ mod v2;
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
 use crate::bundle::v2::{
-    Bundle as V2Bundle, BundleEntry as V2BundleEntry, BundleItem as V2BundleItem, V2BundleItemHash,
+    Bundle as V2Bundle, BundleEntry as V2BundleEntry, BundleItem as V2BundleItem,
+    BundleItemDataVerifier as V2BundleItemVerifier, BundleItemProof as V2BundleItemProof,
+    MaybeOwnedDataRoot as V2MaybeOwnedDataRoot, V2BundleItemHash,
 };
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ethereum::{Eip191, Eip712};
@@ -23,7 +25,7 @@ use crate::tag::Tag;
 use crate::tx::TxId;
 use crate::typed::{FromInner, Typed};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk};
-use crate::{blob, entity};
+use crate::{blob, data, entity};
 use futures_lite::AsyncRead;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
@@ -31,7 +33,7 @@ use std::borrow::Cow;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::io::Read;
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -281,27 +283,40 @@ impl UnvalidatedBundleItem<'static> {
         Ok(Self(inner))
     }
 
-    pub fn read<R: Read>(reader: R, entry: &BundleEntry<'_>) -> Result<Self, Error> {
-        Self::from_inner(
-            match entry.0.deref() {
-                BundleEntryInner::V2(e) => BundleItemInner::V2(V2BundleItem::read(reader, e.len)?),
-            },
-            entry.id(),
-        )
+    pub fn read<R: Read>(
+        reader: R,
+        entry: &BundleEntry<'_>,
+    ) -> Result<(Self, BundleItemVerifier<'static>), Error> {
+        match entry.0.deref() {
+            BundleEntryInner::V2(e) => {
+                let (item, data_verifier) = V2BundleItem::read(reader, e.len)?;
+                let this = Self::from_inner(BundleItemInner::V2(item), entry.id())?;
+                Ok((
+                    this,
+                    BundleItemVerifier(BundleItemVerifierInner::V2(MaybeOwned::Owned(
+                        data_verifier,
+                    ))),
+                ))
+            }
+        }
     }
 
     pub async fn read_async<R: AsyncRead + Unpin>(
         reader: R,
         entry: &BundleEntry<'_>,
-    ) -> Result<Self, Error> {
-        Self::from_inner(
-            match entry.0.deref() {
-                BundleEntryInner::V2(e) => {
-                    BundleItemInner::V2(V2BundleItem::read_async(reader, e.len).await?)
-                }
-            },
-            entry.id(),
-        )
+    ) -> Result<(Self, BundleItemVerifier<'static>), Error> {
+        match entry.0.deref() {
+            BundleEntryInner::V2(e) => {
+                let (item, data_verifier) = V2BundleItem::read_async(reader, e.len).await?;
+                let this = Self::from_inner(BundleItemInner::V2(item), entry.id())?;
+                Ok((
+                    this,
+                    BundleItemVerifier(BundleItemVerifierInner::V2(MaybeOwned::Owned(
+                        data_verifier,
+                    ))),
+                ))
+            }
+        }
     }
 }
 
@@ -576,14 +591,69 @@ impl<'a> Signature<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct BundledDataItem {
+pub struct BundledDataItem<'a> {
     data_size: u64,
+    data_root: DataRoot<'a>,
 }
 
-impl BundledDataItem {
-    pub fn size(&self) -> u64 {
-        self.data_size
+#[derive(Clone, Debug, PartialEq)]
+#[repr(transparent)]
+pub struct DataRoot<'a>(DataRootInner<'a>);
+
+#[derive(Clone, Debug, PartialEq)]
+enum DataRootInner<'a> {
+    V2(V2MaybeOwnedDataRoot<'a>),
+}
+
+#[derive(Clone, Debug)]
+#[repr(transparent)]
+pub struct BundleItemVerifier<'a>(BundleItemVerifierInner<'a>);
+
+#[derive(Clone, Debug)]
+enum BundleItemVerifierInner<'a> {
+    V2(MaybeOwned<'a, V2BundleItemVerifier<'a>>),
+}
+
+impl<'a> data::Verifier<BundledDataItem<'a>> for BundleItemVerifier<'a> {
+    type Proof<'p>
+        = BundleItemDataProof<'p>
+    where
+        Self: 'p;
+
+    #[inline]
+    fn chunks(&self) -> impl Iterator<Item = &Range<u64>> {
+        match &self.0 {
+            BundleItemVerifierInner::V2(v2) => v2.chunks(),
+        }
+    }
+
+    #[inline]
+    fn proof(&self, range: &Range<u64>) -> Option<MaybeOwned<'_, Self::Proof<'_>>> {
+        match &self.0 {
+            BundleItemVerifierInner::V2(v2) => v2
+                .proof(range)
+                .map(|p| BundleItemDataProof(BundleItemDataProofInner::V2(p)).into()),
+        }
     }
 }
 
-pub type MaybeOwnedBundledDataItem<'a> = MaybeOwned<'a, BundledDataItem>;
+#[derive(Clone, Debug, PartialEq)]
+#[repr(transparent)]
+pub struct BundleItemDataProof<'a>(BundleItemDataProofInner<'a>);
+
+#[derive(Clone, Debug, PartialEq)]
+enum BundleItemDataProofInner<'a> {
+    V2(MaybeOwned<'a, V2BundleItemProof<'a>>),
+}
+
+impl<'a> BundledDataItem<'a> {
+    pub fn size(&self) -> u64 {
+        self.data_size
+    }
+
+    pub fn root(&self) -> &DataRoot<'a> {
+        &self.data_root
+    }
+}
+
+pub type MaybeOwnedBundledDataItem<'a> = MaybeOwned<'a, BundledDataItem<'a>>;

@@ -504,7 +504,7 @@ impl<'a> From<&'a TxDraft<'a>> for TxHashBuilder<'a> {
         };
 
         let (data_size, data_root) = match &value.data_upload {
-            Some(upload) => (upload.size(), Some(upload.root())),
+            Some(upload) => (upload.data_size(), Some(upload.data_root())),
             None => (0, None),
         };
 
@@ -531,7 +531,7 @@ impl<'a> TxDraft<'a> {
         };
 
         let (data_size, data_root) = match self.data_upload {
-            Some(upload) => (upload.size(), Some(upload.root().clone())),
+            Some(upload) => (upload.data_size(), Some(upload.data_root().clone())),
             None => (0, None),
         };
 

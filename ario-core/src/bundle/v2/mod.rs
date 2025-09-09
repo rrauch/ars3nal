@@ -8,10 +8,13 @@ use crate::bundle::{
     BundleAnchor, BundleId, BundleItemError, BundleItemHash, BundleItemId, BundleItemIdError,
     BundleItemKind, Error, Owner, Signature,
 };
+use crate::chunking::MostlyFixedChunker;
 use crate::crypto::ec::ethereum::{EthereumAddress, EthereumPublicKeyExt};
 use crate::crypto::edwards::multi_aptos;
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hasher, Sha384, TypedDigest};
+use crate::crypto::hash::{Digest, Hasher, Sha256, Sha384, TypedDigest};
+use crate::crypto::merkle::{MerkleRoot, MerkleTree, Proof};
+use crate::data::{MerkleDataItemVerifier, MerkleVerifiableDataItem};
 use crate::entity;
 use crate::entity::ecdsa::{Eip191SignatureData, Eip712SignatureData};
 use crate::entity::ed25519::{
@@ -24,10 +27,12 @@ use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, Validator};
 use crate::wallet::WalletAddress;
 use futures_lite::AsyncRead;
+use maybe_owned::MaybeOwned;
 use std::fmt::{Display, Formatter};
 use std::io::Read;
 use std::ops::Deref;
 use std::str::FromStr;
+use std::sync::Arc;
 
 mod reader;
 mod tag;
@@ -136,6 +141,19 @@ impl<'a> SupportsValidation for UnvalidatedItem<'a> {
 #[repr(transparent)]
 pub(super) struct BundleItem<'a, const VALIDATED: bool = false>(BundleItemData<'a>);
 
+type BundleItemChunker = MostlyFixedChunker<Sha256, { 1024 * 64 }, { 1024 * 64 }>;
+type BundleItemMerkleRoot = MerkleRoot<Sha256, BundleItemChunker, 32>;
+type BundleItemMerkleTree<'a> = MerkleTree<'a, Sha256, BundleItemChunker, 32>;
+
+type DataRoot = BundleItemMerkleRoot;
+pub(super) type MaybeOwnedDataRoot<'a> = MaybeOwned<'a, DataRoot>;
+pub(super) type BundleItemProof<'a> = Proof<'a, Sha256, BundleItemChunker, 32>;
+
+pub(super) type BundleItemDataVerifier<'a> =
+    MerkleDataItemVerifier<'a, Sha256, BundleItemChunker, 32>;
+
+pub(super) type BundleDataItem<'a> = MerkleVerifiableDataItem<'a, Sha256, BundleItemChunker, 32>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BundleItemData<'a> {
     id: BundleItemId,
@@ -143,26 +161,30 @@ pub(crate) struct BundleItemData<'a> {
     tags: Vec<Tag<'a>>,
     target: Option<WalletAddress>,
     data_size: u64,
+    data_offset: u64,
     signature_data: SignatureData,
     hash: BundleItemHash,
+    data_root: DataRoot,
 }
 
-impl<'a> TryFrom<RawBundleItem<'a>> for UnvalidatedItem<'a> {
-    type Error = BundleItemError;
-
-    fn try_from(raw: RawBundleItem<'a>) -> Result<Self, Self::Error> {
+impl UnvalidatedItem<'static> {
+    #[inline]
+    fn try_from_raw(
+        raw: RawBundleItem<'static>,
+    ) -> Result<(Self, BundleItemDataVerifier<'static>), Error> {
         let hash = BundleItemHash::from(raw.hash());
         let signature_data =
             SignatureData::from_raw(raw.signature, raw.owner, &hash, raw.signature_type)?;
         let id = signature_data.signature().digest();
-        let tags = from_avro(&raw.tag_data)?;
+        let tags = from_avro(&raw.tag_data).map_err(BundleItemError::from)?;
         if tags.len() != raw.tag_count {
             return Err(IncorrectTagCount {
                 expected: raw.tag_count,
                 actual: tags.len(),
-            })?;
+            })
+            .map_err(BundleItemError::from)?;
         }
-        Ok(Self(BundleItemData {
+        let item = Self(BundleItemData {
             id,
             anchor: raw
                 .anchor
@@ -178,24 +200,36 @@ impl<'a> TryFrom<RawBundleItem<'a>> for UnvalidatedItem<'a> {
             data_size: raw.data_size,
             signature_data,
             hash,
-        }))
-    }
-}
+            data_root: raw.data_merkle_tree.root().clone(),
+            data_offset: raw.data_offset,
+        });
 
-impl UnvalidatedItem<'static> {
-    #[inline]
-    fn try_from_inner(inner: RawBundleItem<'static>) -> Result<Self, Error> {
-        Ok(Self::try_from(inner)?)
+        Ok((
+            item,
+            BundleItemDataVerifier::from_inner(
+                BundleDataItem::new(
+                    raw.data_size,
+                    MaybeOwned::Owned(raw.data_merkle_tree.root().clone()),
+                ),
+                Arc::new(raw.data_merkle_tree),
+            ),
+        ))
     }
 
-    pub fn read<R: Read>(reader: R, len: u64) -> Result<Self, Error> {
-        Ok(Self::try_from_inner(
+    pub fn read<R: Read>(
+        reader: R,
+        len: u64,
+    ) -> Result<(Self, BundleItemDataVerifier<'static>), Error> {
+        Ok(Self::try_from_raw(
             ItemReader::builder().len(len).build().process(reader)?,
         )?)
     }
 
-    pub async fn read_async<R: AsyncRead + Unpin>(reader: R, len: u64) -> Result<Self, Error> {
-        Ok(Self::try_from_inner(
+    pub async fn read_async<R: AsyncRead + Unpin>(
+        reader: R,
+        len: u64,
+    ) -> Result<(Self, BundleItemDataVerifier<'static>), Error> {
+        Ok(Self::try_from_raw(
             ItemReader::builder()
                 .len(len)
                 .build()
@@ -226,10 +260,12 @@ pub(crate) struct RawBundleItem<'a> {
     pub tag_count: usize,
     pub target: Option<Blob<'a>>,
     pub data_size: u64,
+    pub data_offset: u64,
     pub owner: Blob<'a>,
     pub signature: Blob<'a>,
     pub signature_type: SignatureType,
     pub data_deep_hash: DataDeepHash,
+    pub data_merkle_tree: BundleItemMerkleTree<'a>,
 }
 
 impl<'a> RawBundleItem<'a> {
@@ -563,12 +599,14 @@ impl SignatureData {
 
 #[cfg(test)]
 mod tests {
+    use crate::buffer::{BufMutExt, HeapCircularBuffer};
     use crate::bundle::BundleId;
     use crate::bundle::v2::BundleItem;
     use crate::bundle::v2::reader::FlowExt;
     use crate::bundle::v2::reader::bundle::BundleReader;
+    use crate::data::Verifier;
     use crate::validation::ValidateExt;
-    use futures_lite::AsyncSeekExt;
+    use futures_lite::{AsyncReadExt, AsyncSeekExt};
     use std::io::SeekFrom;
     use std::ops::Deref;
     use std::str::FromStr;
@@ -610,9 +648,30 @@ mod tests {
 
             for entry in bundle.entries {
                 input.seek(SeekFrom::Start(entry.offset)).await?;
-                let item = BundleItem::read_async(&mut input, entry.len).await?;
+                let (item, data_verifier) = BundleItem::read_async(&mut input, entry.len).await?;
                 let item = item.validate().map_err(|(_, e)| e)?;
                 assert_eq!(item.id(), &entry.id);
+
+                let mut buf = HeapCircularBuffer::new(data_verifier.max_chunk_size());
+
+                // verify content
+                for chunk in data_verifier.chunks() {
+                    input
+                        .seek(SeekFrom::Start(
+                            entry.offset + item.0.data_offset + chunk.start,
+                        ))
+                        .await?;
+                    buf.reset();
+                    let mut reader = input.take(chunk.end - chunk.start);
+                    buf.fill_async(&mut reader).await?;
+                    input = reader.into_inner();
+
+                    let proof = data_verifier.proof(chunk).unwrap();
+
+                    item.0
+                        .data_root
+                        .verify_data(&mut std::io::Cursor::new(buf.make_contiguous()), &proof)?;
+                }
             }
         }
 

@@ -730,7 +730,7 @@ mod tests {
         }
         let mut hasher = Sha256::new();
         let tx_offset = client.tx_offset(tx_sub.tx_id()).await?;
-        let data_root = verifier.data_item().root();
+        let data_root = verifier.data_item().data_root();
         let mut total = 0;
         while let Some(chunk) = client
             .download_chunk(tx_offset.absolute(total), total, data_root)

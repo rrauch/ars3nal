@@ -107,14 +107,14 @@ impl Client {
         // verify data against merkle tree
         verifier
             .data_item()
-            .root()
+            .data_root()
             .verify_data(&mut Cursor::new(&data), &proof)
             .map_err(|e| UploadError::ProofError(e.into()))?;
 
         // looking good, create upload json
         let upload_chunk = UploadChunk {
-            data_root: verifier.data_item().root().as_blob(),
-            data_size: verifier.data_item().size(),
+            data_root: verifier.data_item().data_root().as_blob(),
+            data_size: verifier.data_item().data_size(),
             data_path: proof.as_blob(),
             offset: offset.start,
             chunk: data,

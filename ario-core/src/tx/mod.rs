@@ -275,7 +275,7 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
 
             TxInner::V2(tx) => tx.as_inner().data_root().map(|dr| {
                 DataItem::External(
-                    ExternalDataItem::new(dr.clone(), tx.as_inner().data_size()).into(),
+                    ExternalDataItem::new(tx.as_inner().data_size(), dr.clone().into()).into(),
                 )
             }),
         }
@@ -856,7 +856,7 @@ mod tests {
     use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
     use crate::crypto::keys::SupportedSecretKey;
     use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
-    use crate::data::{DataRoot, ExternalDataItemVerifier, Verifier};
+    use crate::data::{DataRoot, ExternalDataItemVerifier};
     use crate::jwk::Jwk;
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::{
@@ -951,7 +951,7 @@ mod tests {
 
         match validated.data_item() {
             Some(DataItem::External(data)) => {
-                assert_eq!(data.size(), 128355);
+                assert_eq!(data.data_size(), 128355);
             }
             _ => panic!("invalid data"),
         }
@@ -984,7 +984,7 @@ mod tests {
         let data_root = DataRoot::try_from(Blob::from([0u8; 32]))?;
         let data_size = 32u64;
 
-        let data = ExternalDataItem::new(data_root.clone(), data_size);
+        let data = ExternalDataItem::new(data_size, data_root.clone().into());
 
         let draft = TxBuilder::v2()
             .reward(1234)?
@@ -1019,8 +1019,8 @@ mod tests {
             _ => panic!("invalid data"),
         };
 
-        assert_eq!(data.size(), data_size);
-        assert_eq!(data.root(), &data_root);
+        assert_eq!(data.data_size(), data_size);
+        assert_eq!(data.data_root(), &data_root);
 
         Ok(())
     }

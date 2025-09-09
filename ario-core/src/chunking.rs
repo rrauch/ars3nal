@@ -93,6 +93,8 @@ pub trait Chunker: Sized + Send {
     fn new() -> Self;
     fn update(&mut self, input: &mut impl Buf) -> impl IntoIterator<Item = Chunk<Self>>;
     fn finalize(self) -> impl IntoIterator<Item = Chunk<Self>>;
+    fn max_chunk_size() -> usize;
+    fn min_chunk_size() -> usize;
 }
 
 pub(crate) trait ChunkerExt
@@ -215,6 +217,14 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunke
             chunks.extend(self.process_chunk(true));
         }
         chunks
+    }
+
+    fn max_chunk_size() -> usize {
+        MAX_CHUNK_SIZE
+    }
+
+    fn min_chunk_size() -> usize {
+        MIN_CHUNK_SIZE
     }
 }
 

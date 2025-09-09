@@ -1,12 +1,15 @@
 use crate::blob::{AsBlob, Blob, TypedBlob};
 use crate::bundle::MaybeOwnedBundledDataItem;
 use crate::chunking::{Chunker, ChunkerExt, DefaultChunker, MaybeOwnedChunk, TypedChunk};
-use crate::crypto::merkle::{DefaultMerkleRoot, DefaultMerkleTree, DefaultProof};
+use crate::crypto::hash::{Hasher, Sha256};
+use crate::crypto::merkle::{DefaultMerkleRoot, MerkleRoot, MerkleTree, Proof};
 use crate::typed::FromInner;
+use derive_where::derive_where;
 use futures_lite::AsyncRead;
 use maybe_owned::MaybeOwned;
 use std::borrow::Borrow;
-use std::ops::Range;
+use std::fmt::Debug;
+use std::ops::{Deref, Range};
 use std::sync::Arc;
 
 pub type DataRoot = DefaultMerkleRoot;
@@ -16,7 +19,7 @@ pub struct ExternalDataKind;
 pub type ChunkedData<C: Chunker> = TypedChunk<ExternalDataKind, C>;
 pub type DefaultChunkedData = ChunkedData<DefaultChunker>;
 pub type MaybeOwnedDefaultChunkedData<'a> = MaybeOwned<'a, DefaultChunkedData>;
-
+pub type ExternalDataItem<'a> = MerkleVerifiableDataItem<'a, Sha256, DefaultChunker, 32>;
 pub type MaybeOwnedExternalDataItem<'a> = MaybeOwned<'a, ExternalDataItem<'a>>;
 
 pub trait Verifier<DataItem>: Sized {
@@ -25,73 +28,95 @@ pub trait Verifier<DataItem>: Sized {
         Self: 'a;
 
     fn chunks(&self) -> impl Iterator<Item = &Range<u64>>;
-    fn proof(&self, range: &Range<u64>) -> Option<&Self::Proof<'_>>;
-    fn from_single_value<T: AsBlob>(value: T) -> Self;
-    fn try_from_async_reader<T: AsyncRead + Send + Unpin>(
-        reader: &mut T,
-    ) -> impl Future<Output = std::io::Result<Self>> + Send;
+    fn proof(&self, range: &Range<u64>) -> Option<MaybeOwned<'_, Self::Proof<'_>>>;
 }
 
-#[derive(Clone, Debug)]
-pub struct ExternalDataItemVerifier<'a> {
-    data_item: ExternalDataItem<'a>,
-    merkle_tree: Arc<DefaultMerkleTree<'a>>,
+pub type ExternalDataItemVerifier<'a> = MerkleDataItemVerifier<'a, Sha256, DefaultChunker, 32>;
+
+#[derive_where(Clone, Debug)]
+pub struct MerkleDataItemVerifier<'a, H: Hasher + 'a, C: Chunker, const NOTE_SIZE: usize> {
+    data_item: MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE>,
+    merkle_tree: Arc<MerkleTree<'a, H, C, NOTE_SIZE>>,
 }
 
-impl<'a> ExternalDataItemVerifier<'a> {
-    pub fn data_item(&self) -> &ExternalDataItem<'_> {
+impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize>
+    MerkleDataItemVerifier<'a, H, C, NOTE_SIZE>
+{
+    pub fn data_item(&self) -> &MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE> {
         &self.data_item
+    }
+
+    pub fn max_chunk_size(&self) -> usize {
+        C::max_chunk_size()
+    }
+
+    pub(crate) fn from_inner(
+        data_item: MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE>,
+        merkle_tree: Arc<MerkleTree<'a, H, C, NOTE_SIZE>>,
+    ) -> Self {
+        Self {
+            data_item,
+            merkle_tree,
+        }
+    }
+
+    pub fn from_single_value<T: AsBlob>(value: T) -> Self {
+        Self::from_iter(
+            C::new()
+                .single_input(&mut value.as_blob().buf())
+                .into_iter()
+                .map(|c| MaybeOwned::from(ChunkedData::from_inner(c))),
+        )
+    }
+
+    pub async fn try_from_async_reader<T: AsyncRead + Send + Unpin>(
+        reader: &mut T,
+    ) -> std::io::Result<Self> {
+        Ok(Self::from_iter(
+            C::new()
+                .try_from_async_reader(reader)
+                .await?
+                .into_iter()
+                .map(|c| MaybeOwned::from(ChunkedData::from_inner(c))),
+        ))
     }
 }
 
-impl<'i> Verifier<ExternalDataItem<'i>> for ExternalDataItemVerifier<'i> {
-    type Proof<'a>
-        = DefaultProof<'a>
+impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize>
+    Verifier<MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE>>
+    for MerkleDataItemVerifier<'a, H, C, NOTE_SIZE>
+{
+    type Proof<'p>
+        = Proof<'p, H, C, NOTE_SIZE>
     where
-        Self: 'a;
+        Self: 'p;
 
     fn chunks(&self) -> impl Iterator<Item = &Range<u64>> {
         self.merkle_tree.chunks()
     }
 
-    fn proof(&self, range: &Range<u64>) -> Option<&Self::Proof<'_>> {
+    fn proof(&self, range: &Range<u64>) -> Option<MaybeOwned<'_, Self::Proof<'_>>> {
         if let Some(proof) = self.merkle_tree.proof(range.start) {
             if proof.offset() == range {
-                return Some(proof);
+                return Some(proof.into());
             }
         }
         None
     }
-
-    fn from_single_value<T: AsBlob>(value: T) -> Self {
-        Self::from_iter(
-            DefaultChunker::new()
-                .single_input(&mut value.as_blob().buf())
-                .into_iter()
-                .map(|c| MaybeOwnedDefaultChunkedData::from(DefaultChunkedData::from_inner(c))),
-        )
-    }
-
-    async fn try_from_async_reader<T: AsyncRead + Send + Unpin>(
-        reader: &mut T,
-    ) -> std::io::Result<Self> {
-        Ok(Self::from_iter(
-            DefaultChunker::new()
-                .try_from_async_reader(reader)
-                .await?
-                .into_iter()
-                .map(|c| MaybeOwnedDefaultChunkedData::from(DefaultChunkedData::from_inner(c))),
-        ))
-    }
 }
 
-impl<'a, I: Into<MaybeOwnedDefaultChunkedData<'a>>> FromIterator<I>
-    for ExternalDataItemVerifier<'a>
+impl<
+    'a,
+    I: Into<MaybeOwned<'a, ChunkedData<C>>>,
+    H: Hasher + 'a,
+    C: Chunker,
+    const NOTE_SIZE: usize,
+> FromIterator<I> for MerkleDataItemVerifier<'a, H, C, NOTE_SIZE>
 {
     fn from_iter<T: IntoIterator<Item = I>>(iter: T) -> Self {
         let mut len = 0;
 
-        let merkle_tree = DefaultMerkleTree::from_iter(iter.into_iter().map(|c| {
+        let merkle_tree = MerkleTree::from_iter(iter.into_iter().map(|c| {
             let c = c.into();
             len += c.len();
             match c {
@@ -101,32 +126,40 @@ impl<'a, I: Into<MaybeOwnedDefaultChunkedData<'a>>> FromIterator<I>
         }));
 
         Self {
-            data_item: ExternalDataItem::new(merkle_tree.root().clone(), len),
+            data_item: MerkleVerifiableDataItem::new(
+                len,
+                MaybeOwned::Owned(merkle_tree.root().clone()),
+            ),
             merkle_tree: Arc::new(merkle_tree),
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExternalDataItem<'a> {
+#[derive_where(Clone, Debug, PartialEq)]
+pub struct MerkleVerifiableDataItem<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
     data_size: u64,
-    data_root: MaybeOwnedDataRoot<'a>,
+    data_root: MaybeOwned<'a, MerkleRoot<H, C, NOTE_SIZE>>,
 }
 
-impl<'a> ExternalDataItem<'a> {
-    pub fn new(data_root: impl Into<MaybeOwnedDataRoot<'a>>, data_size: u64) -> Self {
+impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize>
+    MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE>
+{
+    pub(crate) fn new(
+        data_size: u64,
+        data_root: MaybeOwned<'a, MerkleRoot<H, C, NOTE_SIZE>>,
+    ) -> Self {
         Self {
-            data_root: data_root.into(),
+            data_root,
             data_size,
         }
     }
 
-    pub fn size(&self) -> u64 {
+    pub fn data_size(&self) -> u64 {
         self.data_size
     }
 
-    pub fn root(&self) -> &DataRoot {
-        &self.data_root
+    pub fn data_root(&self) -> &MerkleRoot<H, C, NOTE_SIZE> {
+        self.data_root.deref()
     }
 }
 
@@ -142,6 +175,7 @@ pub enum DataItem<'a> {
 }
 
 impl<'a> DataItem<'a> {
+    #[inline]
     pub fn size(&self) -> u64 {
         match self {
             Self::Embedded(d) => d.len() as u64,
@@ -150,6 +184,7 @@ impl<'a> DataItem<'a> {
         }
     }
 
+    #[inline]
     pub fn data(&self) -> Data<'_> {
         match self {
             Self::Embedded(d) => DataInner::Embedded(MaybeOwned::Borrowed(d.borrow())).into(),
@@ -178,6 +213,7 @@ enum DataInner<'a> {
 }
 
 impl<'a> Data<'a> {
+    #[inline]
     pub fn as_blob(&self) -> Option<Blob<'_>> {
         if let DataInner::Embedded(embedded) = &self.0 {
             return Some(embedded.as_blob());
@@ -185,6 +221,7 @@ impl<'a> Data<'a> {
         None
     }
 
+    #[inline]
     pub fn data_root(&self) -> Option<&DataRoot> {
         if let DataInner::DataRoot(data_root) = &self.0 {
             return data_root.as_ref().map(|d| d.as_ref());
