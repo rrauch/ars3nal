@@ -65,6 +65,9 @@ pub fn from_avro(input: &[u8]) -> Result<Vec<Tag<'static>>, TagError> {
 
 pub fn to_avro<'a>(iter: impl IntoIterator<Item = &'a Tag<'a>>) -> Result<OwnedBlob, TagError> {
     let tags = iter.into_iter().map(|t| AvroTag::from(t)).collect_vec();
+    if tags.is_empty() {
+        return Ok(OwnedBlob::Slice(b"".as_slice()));
+    }
     Ok(serde_avro_fast::to_datum_vec(
         &tags,
         &mut serde_avro_fast::ser::SerializerConfig::new(AVRO_SCHEMA.deref()),

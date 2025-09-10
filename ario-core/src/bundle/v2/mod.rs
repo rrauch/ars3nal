@@ -1,4 +1,4 @@
-use crate::blob::{AsBlob, Blob};
+use crate::blob::{AsBlob, Blob, OwnedBlob};
 use crate::buffer::{BufMutExt, HeapCircularBuffer};
 use crate::bundle::TagError::IncorrectTagCount;
 use crate::bundle::v2::reader::FlowExt;
@@ -8,12 +8,13 @@ use crate::bundle::v2::tag::{from_avro, to_avro};
 use crate::bundle::{
     BundleAnchor, BundleId, BundleItemError, BundleItemHash, BundleItemId, BundleItemIdError,
     BundleItemKind, BundleItemSignatureScheme, Error, KyveSignatureData, Owner, Signature,
+    TagError,
 };
 use crate::chunking::{Chunk, Chunker, MostlyFixedChunker};
 use crate::crypto::ec::ethereum::{EthereumAddress, EthereumPublicKeyExt};
 use crate::crypto::edwards::multi_aptos;
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hasher, Sha256, Sha384, TypedDigest, deep_hash};
+use crate::crypto::hash::{Digest, HashableExt, Hasher, Sha256, Sha384, TypedDigest, deep_hash};
 use crate::crypto::keys::SecretKey;
 use crate::crypto::merkle::{MerkleRoot, MerkleTree, Proof};
 use crate::crypto::signature::Scheme as SignatureScheme;
@@ -30,7 +31,7 @@ use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
 use crate::wallet::{WalletAddress, WalletSk};
 use bon::Builder;
-use bytes::Buf;
+use bytes::{Buf, BufMut, BytesMut};
 use futures_lite::AsyncRead;
 use maybe_owned::MaybeOwned;
 use std::fmt::{Display, Formatter};
@@ -203,7 +204,8 @@ impl BundleItemDraft<'_> {
             data_verifier: self.data_upload.data_verifier.clone(),
         };
 
-        //todo: serialize to header to get length and set data_offset
+        let serialized = raw.as_blob();
+        raw.data_offset = serialized.len() as u64;
 
         let (unvalidated, _) = BundleItem::try_from_raw(raw)?;
         let validated = unvalidated.validate().map_err(|(_, e)| e)?;
@@ -497,9 +499,67 @@ pub(crate) struct RawBundleItem<'a> {
     pub data_verifier: BundleItemDataVerifier<'a>,
 }
 
+impl BundleItem<'_, true> {
+    pub fn try_as_blob(&self) -> Result<OwnedBlob, TagError> {
+        let tag_data = to_avro(self.0.tags.iter())?;
+        let owner = self.0.signature_data.owner();
+        let signature = self.0.signature_data.signature();
+
+        let raw = RawBundleItem {
+            anchor: self.0.anchor.as_ref().map(|a| a.as_blob()),
+            tag_data,
+            tag_count: self.0.tags.len(),
+            target: self.0.target.as_ref().map(|t| t.as_blob()),
+            data_size: self.0.data_size,
+            data_offset: self.0.data_offset,
+            owner: owner.as_blob(),
+            signature: signature.as_blob(),
+            signature_type: self.0.signature_data.signature_type(),
+            data_deep_hash: DataDeepHash::new_from_inner(b"".digest()), // dummy value
+            data_verifier: BundleItemDataVerifier::from_single_value(Blob::Slice(b"".as_slice())), // dummy value
+        };
+
+        Ok(raw.as_blob())
+    }
+}
+
 impl<'a> RawBundleItem<'a> {
     pub fn hash(&self) -> V2BundleItemHash {
         BundleItemHashBuilder::from(self).to_hash()
+    }
+
+    pub fn as_blob(&self) -> OwnedBlob {
+        let mut buf = BytesMut::with_capacity(2048);
+
+        // header
+        buf.put_u16_le(self.signature_type.into());
+        buf.extend_from_slice(self.signature.bytes());
+        buf.extend_from_slice(self.owner.bytes());
+        match self.target.as_ref() {
+            Some(target) => {
+                buf.put_u8(0x01);
+                buf.extend_from_slice(target);
+            }
+            None => {
+                buf.put_u8(0x00);
+            }
+        }
+        match self.anchor.as_ref() {
+            Some(anchor) => {
+                buf.put_u8(0x01);
+                buf.extend_from_slice(anchor);
+            }
+            None => {
+                buf.put_u8(0x00);
+            }
+        }
+        buf.put_u64_le(self.tag_count as u64);
+        buf.put_u64_le(self.tag_data.len() as u64);
+
+        // tags
+        buf.extend_from_slice(self.tag_data.bytes());
+
+        buf.freeze().into()
     }
 }
 
@@ -868,11 +928,12 @@ mod tests {
     use crate::bundle::v2::reader::FlowExt;
     use crate::bundle::v2::reader::bundle::BundleReader;
     use crate::bundle::v2::{BundleItem, BundleItemDataProcessor};
-    use crate::bundle::{BundleId, BundleItemBuilder, Ed25519Scheme};
+    use crate::bundle::{BundleId, BundleItemBuilder, BundleItemInner, Ed25519Scheme};
     use crate::data::Verifier;
     use crate::jwk::Jwk;
     use crate::validation::ValidateExt;
     use crate::wallet::Wallet;
+    use bytes::BytesMut;
     use futures_lite::{AsyncReadExt, AsyncSeekExt};
     use std::io::SeekFrom;
     use std::ops::Deref;
@@ -960,9 +1021,40 @@ mod tests {
 
         assert_eq!(
             valid_item.id().to_string(),
-            "5mmfbqDQkMue_7cCyH1MHkU4MeyeYMDFA1Exh8kyVvY"
+            "FTxzaw_jnVmU3LKOrkmBQ29Mhu9cFWQkhelsI4ZY1y8"
         );
         assert_eq!(valid_item.data_size(), ONE_MB.len() as u64);
+
+        let v2_item = match valid_item.0 {
+            BundleItemInner::V2(v2) => v2,
+        };
+        let serialized = v2_item.try_as_blob()?;
+        let mut buf = BytesMut::with_capacity(serialized.bytes().len() + ONE_MB.len());
+        buf.extend_from_slice(serialized.bytes());
+        buf.extend_from_slice(ONE_MB);
+        let bytes = buf.freeze();
+        let len = bytes.len() as u64;
+        let (unvalidated, _) = BundleItem::read(&mut std::io::Cursor::new(&bytes), len)?;
+        let item = unvalidated.validate().map_err(|(_, e)| e)?;
+        assert_eq!(item.id(), v2_item.id());
+
+        let data_verifier = &data.data_verifier;
+        let data_root = data.data_verifier.data_item().data_root();
+        let mut input = &mut futures_lite::io::Cursor::new(&bytes);
+        let mut buf = HeapCircularBuffer::new(data_verifier.max_chunk_size());
+        // verify content
+        for chunk in data_verifier.chunks() {
+            input
+                .seek(SeekFrom::Start(item.0.data_offset + chunk.start))
+                .await?;
+            buf.reset();
+            let mut reader = input.take(chunk.end - chunk.start);
+            buf.fill_async(&mut reader).await?;
+            input = reader.into_inner();
+
+            let proof = data_verifier.proof(chunk).unwrap();
+            data_root.verify_data(&mut std::io::Cursor::new(buf.make_contiguous()), &proof)?;
+        }
 
         Ok(())
     }
