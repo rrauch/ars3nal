@@ -27,6 +27,8 @@ pub enum Error {
     InvalidSignature(String),
     #[error(transparent)]
     InvalidKey(#[from] keys::KeyError),
+    #[error("signing failed: {0}")]
+    SigningError(String),
 }
 
 pub trait ArEntityHash: ToSignableMessage + PartialEq + Clone + Send {}

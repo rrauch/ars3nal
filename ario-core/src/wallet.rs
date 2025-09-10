@@ -1,13 +1,17 @@
 use crate::base64::{TryFromBase64, TryFromBase64Error};
 use crate::blob::Blob;
+use crate::bundle::{
+    BundleItemDraft, BundleItemError, BundleItemSignatureScheme, ValidatedBundleItem,
+};
 use crate::confidential::{Confidential, NewSecretExt, OptionRevealExt, RevealExt};
 use crate::crypto::ec::EcSecretKey;
 use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
+use crate::crypto::edwards::multi_aptos::MultiAptosSigningKey;
 use crate::crypto::edwards::{Ed25519SigningKey, eddsa};
 use crate::crypto::hash::HashableExt;
 use crate::crypto::keys;
 use crate::crypto::keys::{
-    KeyError, PublicKey, SecretKey, SupportedSecretKey, TypedPublicKey, TypedSecretKey,
+    KeyError, KeyType, PublicKey, SecretKey, SupportedSecretKey, TypedPublicKey, TypedSecretKey,
 };
 use crate::crypto::rsa::RsaPrivateKey;
 use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
@@ -23,6 +27,7 @@ use crate::{Address, blob};
 use bip39::Mnemonic;
 use bytemuck::TransparentWrapper;
 use k256::Secp256k1;
+use std::any::Any;
 use std::convert::Infallible;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -80,6 +85,9 @@ impl Wallet {
             KeyType::Ed25519 => {
                 todo!()
             }
+            unsupported => {
+                return Err(KeyError::UnsupportedKeyType(unsupported))?;
+            }
         };
 
         Ok(Self(Arc::new(inner)))
@@ -91,6 +99,7 @@ impl Wallet {
             WalletInner::Rsa2048(rsa) => rsa.public_key().derive_address(),
             WalletInner::Secp256k1(k256) => k256.public_key().derive_address(),
             WalletInner::Ed25519(ed25519) => ed25519.public_key().derive_address(),
+            WalletInner::MultiAptos(multi) => multi.public_key().derive_address(),
         }
     }
 
@@ -105,15 +114,30 @@ impl Wallet {
             WalletInner::Ed25519(_) => {
                 return Err(TxError::UnsupportedKeyType("Ed25519".to_string()));
             }
+            WalletInner::MultiAptos(_) => {
+                return Err(TxError::UnsupportedKeyType("MultiAptos".to_string()));
+            }
         })
     }
-}
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum KeyType {
-    Rsa,
-    Secp256k1,
-    Ed25519,
+    pub fn sign_bundle_item_draft<'a, S: BundleItemSignatureScheme>(
+        &self,
+        draft: BundleItemDraft<'a>,
+    ) -> Result<ValidatedBundleItem<'a>, BundleItemError>
+    where
+        <<S as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer:
+            SecretKey + 'static,
+    {
+        let signer = match self.0.deref().signer::<S::SignatureScheme>() {
+            Some(signer) => signer,
+            None => {
+                return Err(BundleItemError::UnsupportedKeyType(
+                    "key not supported for selected bundle signing scheme".to_string(),
+                ));
+            }
+        };
+        Ok(draft.sign::<S>(signer)?)
+    }
 }
 
 #[derive(Error, Debug)]
@@ -139,6 +163,26 @@ enum WalletInner {
     Rsa2048(WalletSk<RsaPrivateKey<2048>>),
     Secp256k1(WalletSk<EcSecretKey<Secp256k1>>),
     Ed25519(WalletSk<Ed25519SigningKey>),
+    MultiAptos(WalletSk<MultiAptosSigningKey>),
+}
+
+impl WalletInner {
+    fn signer<S: SignatureScheme>(&self) -> Option<&WalletSk<S::Signer>>
+    where
+        <S as SignatureScheme>::Signer: 'static,
+    {
+        let any_signer: &dyn Any = match self {
+            WalletInner::Rsa4096(wallet) => wallet.deref(),
+            WalletInner::Rsa2048(wallet) => wallet.deref(),
+            WalletInner::Secp256k1(wallet) => wallet.deref(),
+            WalletInner::Ed25519(wallet) => wallet.deref(),
+            WalletInner::MultiAptos(wallet) => wallet.deref(),
+        };
+
+        any_signer
+            .downcast_ref::<S::Signer>()
+            .map(|s| WalletSk::wrap_ref(s))
+    }
 }
 
 pub struct WalletKind;

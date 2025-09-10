@@ -7,10 +7,10 @@ use crate::crypto::hash::Hashable;
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::rsa::KeyError as RsaKeyError;
 use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
-use crate::jwk::{Jwk, KeyType};
+use crate::jwk::{Jwk, KeyType as JwkKeyType};
 use crate::typed::Typed;
 use hybrid_array::ArraySize;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use thiserror::Error;
 
 pub type TypedSecretKey<T, SK: SecretKey> = Typed<T, SK>;
@@ -26,9 +26,9 @@ impl TryFrom<&Jwk> for SupportedSecretKey {
 
     fn try_from(jwk: &Jwk) -> Result<Self, Self::Error> {
         match jwk.key_type() {
-            KeyType::Rsa => Ok(Self::from(SupportedRsaPrivateKey::try_from(jwk)?)),
-            KeyType::Ec => Ok(Self::from(SupportedEcSecretKey::try_from(jwk)?)),
-            KeyType::Okp => Ok(Self::from(eddsa::SupportedSigningKey::try_from(jwk)?)),
+            JwkKeyType::Rsa => Ok(Self::from(SupportedRsaPrivateKey::try_from(jwk)?)),
+            JwkKeyType::Ec => Ok(Self::from(SupportedEcSecretKey::try_from(jwk)?)),
+            JwkKeyType::Okp => Ok(Self::from(eddsa::SupportedSigningKey::try_from(jwk)?)),
             //unsupported => Err(KeyError::UnsupportedKeyType(unsupported)),
         }
     }
@@ -84,37 +84,6 @@ pub(crate) trait PublicKey:
     type Scheme: AsymmetricScheme;
 }
 
-/*impl<PK: PublicKey> VerifySigExt<<PK::Scheme as SupportsSignatures>::Scheme> for PK
-where
-    PK::Scheme: SupportsSignatures<Verifier = PK>,
-{
-    type VerificationError =
-        <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::VerificationError;
-
-    fn verify_sig(
-        &self,
-        data: <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::Message<'_>,
-        sig: &Signature<<PK::Scheme as SupportsSignatures>::Scheme>,
-    ) -> Result<(), Self::VerificationError> {
-        <<PK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::verify(self, data, sig)
-    }
-}*/
-
-/*impl<SK: SecretKey> SignSigExt<<SK::Scheme as SupportsSignatures>::Scheme> for SK
-where
-    SK::Scheme: SupportsSignatures<Signer = SK>,
-{
-    type SigningError =
-        <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::SigningError;
-
-    fn sign_sig(
-        &self,
-        data: <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::Message<'_>,
-    ) -> Result<Signature<<SK::Scheme as SupportsSignatures>::Scheme>, Self::SigningError> {
-        <<SK::Scheme as SupportsSignatures>::Scheme as signature::Scheme>::sign(self, data)
-    }
-}*/
-
 #[derive(Error, Debug)]
 pub enum KeyError {
     #[error("unsupported key type: '{0}'")]
@@ -127,6 +96,25 @@ pub enum KeyError {
     EddsaError(#[from] EddsaKeyError),
     #[error(transparent)]
     Other(anyhow::Error),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum KeyType {
+    Rsa,
+    Secp256k1,
+    Ed25519,
+    MultiAptos,
+}
+
+impl Display for KeyType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Rsa => "RSA",
+            Self::Secp256k1 => "Secp256k1",
+            Self::Ed25519 => "Ed25519",
+            Self::MultiAptos => "MultiAptos",
+        })
+    }
 }
 
 #[cfg(test)]

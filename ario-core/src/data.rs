@@ -34,7 +34,7 @@ pub trait Verifier<DataItem>: Sized {
 
 pub type ExternalDataItemVerifier<'a> = MerkleDataItemVerifier<'a, Sha256, DefaultChunker, 32>;
 
-#[derive_where(Clone, Debug)]
+#[derive_where(Clone, Debug, PartialEq)]
 pub struct MerkleDataItemVerifier<'a, H: Hasher + 'a, C: Chunker, const NOTE_SIZE: usize> {
     data_item: MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE>,
     merkle_tree: Arc<MerkleTree<'a, H, C, NOTE_SIZE>>,

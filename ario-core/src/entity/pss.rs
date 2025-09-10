@@ -8,7 +8,7 @@ use crate::crypto::{keys, signature};
 use crate::entity::Error::InvalidSignature;
 use crate::entity::{ArEntityHash, ArEntitySignature, Error, MessageFor, Owner, Signature};
 use crate::typed::FromInner;
-use crate::wallet::WalletPk;
+use crate::wallet::{WalletPk, WalletSk};
 use itertools::Either;
 
 pub type Rsa4096SignatureData<T: ArEntityHash> = PssSignatureData<T, 4096>;
@@ -74,6 +74,13 @@ where
         self.owner
             .verify_entity_hash(hash, &self.signature)
             .map_err(|e| InvalidSignature(e))
+    }
+
+    pub(crate) fn sign(hash: &T, signer: &WalletSk<RsaPrivateKey<BIT>>) -> Result<Self, Error> {
+        Ok(Self {
+            owner: signer.public_key().clone(),
+            signature: signer.sign_entity_hash(hash).map_err(Error::SigningError)?,
+        })
     }
 }
 

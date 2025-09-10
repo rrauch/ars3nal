@@ -1,11 +1,14 @@
 mod v2;
 
+pub use v2::BundleItemDraft;
+
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
 use crate::bundle::v2::{
     Bundle as V2Bundle, BundleEntry as V2BundleEntry, BundleItem as V2BundleItem,
     BundleItemDataVerifier as V2BundleItemVerifier, BundleItemProof as V2BundleItemProof,
-    MaybeOwnedDataRoot as V2MaybeOwnedDataRoot, V2BundleItemHash,
+    MaybeOwnedDataRoot as V2MaybeOwnedDataRoot, SignatureType, V2BundleItemBuilder,
+    V2BundleItemHash,
 };
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ethereum::{Eip191, Eip712};
@@ -17,6 +20,12 @@ use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::rsa::{RsaPublicKey, pss};
 use crate::crypto::signature::Scheme as SignatureScheme;
 use crate::crypto::signature::TypedSignature;
+use crate::entity::ecdsa::{Eip191SignatureData, Eip712SignatureData};
+use crate::entity::ed25519::{
+    AptosSignatureData, Ed25519HexStrSignatureData, Ed25519RegularSignatureData,
+};
+use crate::entity::multi_aptos::MultiAptosSignatureData;
+use crate::entity::pss::Rsa4096SignatureData;
 use crate::entity::{
     ArEntity, ArEntityHash, ArEntitySignature, MessageFor, Owner as EntityOwner,
     Signature as EntitySignature,
@@ -24,7 +33,7 @@ use crate::entity::{
 use crate::tag::Tag;
 use crate::tx::TxId;
 use crate::typed::{FromInner, Typed};
-use crate::wallet::{WalletAddress, WalletKind, WalletPk};
+use crate::wallet::{WalletAddress, WalletKind, WalletPk, WalletSk};
 use crate::{blob, data, entity};
 use futures_lite::AsyncRead;
 use k256::Secp256k1;
@@ -65,6 +74,8 @@ pub enum Error {
 pub enum BundleItemError {
     #[error("invalid or unsupported signature type: {0}")]
     InvalidOrUnsupportedSignatureType(String),
+    #[error("unsupported key type: {0}")]
+    UnsupportedKeyType(String),
     #[error("incorrect signature length; expected '{expected}', actual: '{actual}'")]
     IncorrectSignatureLength { expected: usize, actual: usize },
     #[error("incorrect owner length; expected '{expected}', actual: '{actual}'")]
@@ -262,9 +273,23 @@ impl Display for BundleType {
     }
 }
 
+pub struct BundleItemBuilder;
+
+impl BundleItemBuilder {
+    pub fn v2<'a>() -> V2BundleItemBuilder<'a> {
+        BundleItemDraft::builder()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[repr(transparent)]
 pub struct BundleItem<'a, const VALIDATED: bool = false>(BundleItemInner<'a, VALIDATED>);
+
+impl<'a, const VALIDATED: bool> From<V2BundleItem<'a, VALIDATED>> for BundleItem<'a, VALIDATED> {
+    fn from(value: V2BundleItem<'a, VALIDATED>) -> Self {
+        Self(BundleItemInner::V2(value))
+    }
+}
 
 pub type UnvalidatedBundleItem<'a> = BundleItem<'a, false>;
 pub type ValidatedBundleItem<'a> = BundleItem<'a, true>;
@@ -330,8 +355,14 @@ impl<'a, const VALIDATED: bool> ArEntity for BundleItem<'a, VALIDATED> {
 }
 
 impl<'a, const VALIDATED: bool> BundleItem<'a, VALIDATED> {
+    #[inline]
     pub fn id(&self) -> &BundleItemId {
         self.0.id()
+    }
+
+    #[inline]
+    pub fn data_size(&self) -> u64 {
+        self.0.data_size()
     }
 }
 
@@ -345,6 +376,13 @@ impl<'a, const VALIDATED: bool> BundleItemInner<'a, VALIDATED> {
     fn id(&self) -> &BundleItemId {
         match self {
             Self::V2(v2) => v2.id(),
+        }
+    }
+
+    #[inline]
+    fn data_size(&self) -> u64 {
+        match self {
+            Self::V2(v2) => v2.data_size(),
         }
     }
 }
@@ -416,28 +454,196 @@ impl BundleItemHash {
     }
 }
 
-pub(crate) trait BundleItemSignatureScheme:
-    SignatureScheme + SupportedSignatureScheme
-{
+pub(crate) trait BundleItemSignatureScheme {
+    type SignatureScheme: SignatureScheme;
+    type SignatureData: Into<v2::SignatureData>;
+    fn signature_type() -> SignatureType;
+    fn sign(
+        hash: &BundleItemHash,
+        signer: &WalletSk<
+            <<Self as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer,
+        >,
+    ) -> Result<Self::SignatureData, BundleItemError>;
 }
 
-impl<T> BundleItemSignatureScheme for T where T: SignatureScheme + SupportedSignatureScheme {}
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct ArweaveScheme;
 
-trait SupportedSignatureScheme {}
-impl SupportedSignatureScheme for Ed25519 {}
-impl SupportedSignatureScheme for Ed25519HexStr {}
-impl SupportedSignatureScheme for Aptos {}
-impl SupportedSignatureScheme for MultiAptosEd25519 {}
-impl SupportedSignatureScheme for Eip191 {}
-impl SupportedSignatureScheme for Eip712 {}
-impl SupportedSignatureScheme for RsaPss<4096> {}
+impl BundleItemSignatureScheme for ArweaveScheme {
+    type SignatureScheme = RsaPss<4096>;
+    type SignatureData = Rsa4096SignatureData<BundleItemHash>;
+
+    fn signature_type() -> SignatureType {
+        SignatureType::RsaPss
+    }
+
+    fn sign(
+        hash: &BundleItemHash,
+        signer: &WalletSk<
+            <<Self as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer,
+        >,
+    ) -> Result<Self::SignatureData, BundleItemError> {
+        Ok(Rsa4096SignatureData::<BundleItemHash>::sign(hash, signer)?)
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct Ed25519Scheme;
+
+impl BundleItemSignatureScheme for Ed25519Scheme {
+    type SignatureScheme = Ed25519;
+
+    type SignatureData = Ed25519RegularSignatureData<BundleItemHash>;
+
+    fn signature_type() -> SignatureType {
+        SignatureType::Ed25519
+    }
+
+    fn sign(
+        hash: &BundleItemHash,
+        signer: &WalletSk<
+            <<Self as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer,
+        >,
+    ) -> Result<Self::SignatureData, BundleItemError> {
+        Ok(Ed25519RegularSignatureData::<BundleItemHash>::sign(
+            hash, signer,
+        )?)
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct EthereumScheme;
+
+impl BundleItemSignatureScheme for EthereumScheme {
+    type SignatureScheme = Eip191;
+
+    type SignatureData = Eip191SignatureData<BundleItemHash>;
+    fn signature_type() -> SignatureType {
+        SignatureType::Eip191
+    }
+
+    fn sign(
+        hash: &BundleItemHash,
+        signer: &WalletSk<
+            <<Self as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer,
+        >,
+    ) -> Result<Self::SignatureData, BundleItemError> {
+        Ok(Eip191SignatureData::<BundleItemHash>::sign(hash, signer)?)
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct HexSolanaScheme;
+
+impl BundleItemSignatureScheme for HexSolanaScheme {
+    type SignatureScheme = Ed25519HexStr;
+    type SignatureData = Ed25519HexStrSignatureData<BundleItemHash>;
+
+    fn signature_type() -> SignatureType {
+        SignatureType::Ed25519HexStr
+    }
+
+    fn sign(
+        hash: &BundleItemHash,
+        signer: &WalletSk<
+            <<Self as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer,
+        >,
+    ) -> Result<Self::SignatureData, BundleItemError> {
+        Ok(Ed25519HexStrSignatureData::<BundleItemHash>::sign(
+            hash, signer,
+        )?)
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct AptosScheme;
+
+impl BundleItemSignatureScheme for AptosScheme {
+    type SignatureScheme = Aptos;
+    type SignatureData = AptosSignatureData<BundleItemHash>;
+    fn signature_type() -> SignatureType {
+        SignatureType::Aptos
+    }
+
+    fn sign(
+        hash: &BundleItemHash,
+        signer: &WalletSk<
+            <<Self as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer,
+        >,
+    ) -> Result<Self::SignatureData, BundleItemError> {
+        Ok(AptosSignatureData::<BundleItemHash>::sign(hash, signer)?)
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct MultiSigAptosScheme;
+
+impl BundleItemSignatureScheme for MultiSigAptosScheme {
+    type SignatureScheme = MultiAptosEd25519;
+    type SignatureData = MultiAptosSignatureData<BundleItemHash>;
+    fn signature_type() -> SignatureType {
+        SignatureType::MultiAptos
+    }
+
+    fn sign(
+        hash: &BundleItemHash,
+        signer: &WalletSk<
+            <<Self as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer,
+        >,
+    ) -> Result<Self::SignatureData, BundleItemError> {
+        Ok(MultiAptosSignatureData::<BundleItemHash>::sign(
+            hash, signer,
+        )?)
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct TypedEthereumScheme;
+
+impl BundleItemSignatureScheme for TypedEthereumScheme {
+    type SignatureScheme = Eip712;
+    type SignatureData = Eip712SignatureData<BundleItemHash>;
+    fn signature_type() -> SignatureType {
+        SignatureType::Eip712
+    }
+
+    fn sign(
+        hash: &BundleItemHash,
+        signer: &WalletSk<
+            <<Self as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer,
+        >,
+    ) -> Result<Self::SignatureData, BundleItemError> {
+        Ok(Eip712SignatureData::<BundleItemHash>::sign(hash, signer)?)
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct KyveScheme;
+
+pub type KyveSignatureData = Eip191SignatureData<BundleItemHash, KyveScheme>;
+
+impl BundleItemSignatureScheme for KyveScheme {
+    type SignatureScheme = Eip191;
+    type SignatureData = KyveSignatureData;
+    fn signature_type() -> SignatureType {
+        SignatureType::Kyve
+    }
+
+    fn sign(
+        hash: &BundleItemHash,
+        signer: &WalletSk<
+            <<Self as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer,
+        >,
+    ) -> Result<Self::SignatureData, BundleItemError> {
+        Ok(KyveSignatureData::sign(hash, signer)?)
+    }
+}
 
 pub type BundleItemDeepHash = TypedDigest<BundleItemKind, Sha384>;
 
-pub type BundleItemSignature<S: BundleItemSignatureScheme> =
-    TypedSignature<BundleItemHash, WalletKind, S>;
+pub type BundleItemSignature<S: SignatureScheme> = TypedSignature<BundleItemHash, WalletKind, S>;
 
-impl<S: BundleItemSignatureScheme> BundleItemSignature<S> {
+impl<S: SignatureScheme> BundleItemSignature<S> {
     pub fn digest(&self) -> BundleItemId {
         BundleItemId::from_inner(Sha256::digest(self.as_blob()))
     }

@@ -6,7 +6,7 @@ use crate::crypto::signature::{Scheme, Signature};
 use crate::entity::Error::{InvalidKey, InvalidSignature};
 use crate::entity::{ArEntityHash, ArEntitySignature, Error, MessageFor, Owner};
 use crate::typed::FromInner;
-use crate::wallet::WalletPk;
+use crate::wallet::{WalletPk, WalletSk};
 use derive_where::derive_where;
 
 #[derive_where(Clone, Debug, PartialEq)]
@@ -51,5 +51,15 @@ where
         self.owner
             .verify_entity_hash(hash, &self.signature)
             .map_err(|e| InvalidSignature(e.to_string()))
+    }
+
+    pub(crate) fn sign(
+        hash: &T,
+        signer: &WalletSk<<MultiAptosEd25519 as Scheme>::Signer>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            owner: signer.public_key().clone(),
+            signature: signer.sign_entity_hash(hash).map_err(Error::SigningError)?,
+        })
     }
 }

@@ -448,13 +448,10 @@ impl TxSigner for WalletSk<RsaPrivateKey<4096>> {
         tx_hash_builder.owner = Some(&pk_blob);
         let tx_hash = tx_hash_builder.tx_hash();
 
-        let sig = self
-            .sign_entity_hash(&tx_hash)
-            .map_err(|s| TxError::Other(anyhow!("tx signing failed: {}", s)))?;
-
-        Ok(V2SignatureData::Rsa4096(PssSignatureData::<_, 4096>::new(
-            pk, sig,
-        )))
+        Ok(V2SignatureData::Rsa4096(
+            PssSignatureData::sign(&tx_hash, &self)
+                .map_err(|s| TxError::Other(anyhow!("tx signing failed: {}", s)))?,
+        ))
     }
 }
 
@@ -462,14 +459,10 @@ impl TxSigner for WalletSk<EcSecretKey<Secp256k1>> {
     fn sign(&self, data: &TxDraft) -> Result<V2SignatureData, TxError> {
         let tx_hash = TxHashBuilder::from(data).tx_hash();
 
-        let sig = self
-            .sign_entity_hash(&tx_hash)
-            .map_err(|e| TxError::Other(anyhow!("tx signing failed: {}", e)))?;
-
-        Ok(V2SignatureData::Secp256k1(Secp256k1SignatureData::new(
-            self.public_key().clone(),
-            sig,
-        )))
+        Ok(V2SignatureData::Secp256k1(
+            Secp256k1SignatureData::sign(&tx_hash, &self)
+                .map_err(|s| TxError::Other(anyhow!("tx signing failed: {}", s)))?,
+        ))
     }
 }
 
