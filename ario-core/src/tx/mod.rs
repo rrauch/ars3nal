@@ -1092,7 +1092,7 @@ mod tests {
                 .data_item()
                 .unwrap()
                 .data()
-                .data_root()
+                .tx_data_root()
                 .unwrap()
                 .to_base64(),
             "ikHHDmOhqnZ5qsNZ7SOoofuaG66A5yRLsTvacad2NMg"
@@ -1107,7 +1107,7 @@ mod tests {
                 .data_item()
                 .unwrap()
                 .data()
-                .data_root()
+                .tx_data_root()
                 .unwrap()
                 .to_base64(),
             "ikHHDmOhqnZ5qsNZ7SOoofuaG66A5yRLsTvacad2NMg"

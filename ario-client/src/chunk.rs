@@ -247,7 +247,7 @@ mod tests {
 
         let data_item = tx.data_item().unwrap();
         let data = data_item.data();
-        let data_root = data.data_root().unwrap();
+        let data_root = data.tx_data_root().unwrap();
 
         let tx_offset = client.tx_offset(tx.id()).await?;
 
@@ -294,7 +294,7 @@ mod tests {
 
         let data_item = tx.data_item().unwrap();
         let data = data_item.data();
-        let data_root = data.data_root().unwrap();
+        let data_root = data.tx_data_root().unwrap();
 
         let tx_offset = client.tx_offset(tx.id()).await?;
 

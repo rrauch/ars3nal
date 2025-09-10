@@ -44,6 +44,8 @@ const MAX_TAG_COUNT: u16 = 128;
 const MAX_TAG_KEY_SIZE: usize = 1024;
 const MAX_TAG_VALUE_SIZE: usize = 3072;
 
+const DATA_CHUNK_SIZE: usize = 64 * 1024;
+
 #[derive(Debug, Clone)]
 pub(crate) struct Bundle {
     id: BundleId,
@@ -141,7 +143,7 @@ impl<'a> SupportsValidation for UnvalidatedItem<'a> {
 #[repr(transparent)]
 pub(super) struct BundleItem<'a, const VALIDATED: bool = false>(BundleItemData<'a>);
 
-type BundleItemChunker = MostlyFixedChunker<Sha256, { 1024 * 64 }, { 1024 * 64 }>;
+type BundleItemChunker = MostlyFixedChunker<Sha256, DATA_CHUNK_SIZE, DATA_CHUNK_SIZE>;
 type BundleItemMerkleRoot = MerkleRoot<Sha256, BundleItemChunker, 32>;
 type BundleItemMerkleTree<'a> = MerkleTree<'a, Sha256, BundleItemChunker, 32>;
 
@@ -164,7 +166,6 @@ pub(crate) struct BundleItemData<'a> {
     data_offset: u64,
     signature_data: SignatureData,
     hash: BundleItemHash,
-    data_root: DataRoot,
 }
 
 impl UnvalidatedItem<'static> {
@@ -200,7 +201,6 @@ impl UnvalidatedItem<'static> {
             data_size: raw.data_size,
             signature_data,
             hash,
-            data_root: raw.data_merkle_tree.root().clone(),
             data_offset: raw.data_offset,
         });
 
@@ -651,7 +651,7 @@ mod tests {
                 let (item, data_verifier) = BundleItem::read_async(&mut input, entry.len).await?;
                 let item = item.validate().map_err(|(_, e)| e)?;
                 assert_eq!(item.id(), &entry.id);
-
+                let data_root = data_verifier.data_item().data_root();
                 let mut buf = HeapCircularBuffer::new(data_verifier.max_chunk_size());
 
                 // verify content
@@ -667,9 +667,7 @@ mod tests {
                     input = reader.into_inner();
 
                     let proof = data_verifier.proof(chunk).unwrap();
-
-                    item.0
-                        .data_root
+                    data_root
                         .verify_data(&mut std::io::Cursor::new(buf.make_contiguous()), &proof)?;
                 }
             }

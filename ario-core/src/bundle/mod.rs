@@ -596,6 +596,16 @@ pub struct BundledDataItem<'a> {
     data_root: DataRoot<'a>,
 }
 
+impl<'a> BundledDataItem<'a> {
+    pub fn data_size(&self) -> u64 {
+        self.data_size
+    }
+
+    pub fn data_root(&self) -> &DataRoot<'a> {
+        &self.data_root
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 #[repr(transparent)]
 pub struct DataRoot<'a>(DataRootInner<'a>);
@@ -644,16 +654,6 @@ pub struct BundleItemDataProof<'a>(BundleItemDataProofInner<'a>);
 #[derive(Clone, Debug, PartialEq)]
 enum BundleItemDataProofInner<'a> {
     V2(MaybeOwned<'a, V2BundleItemProof<'a>>),
-}
-
-impl<'a> BundledDataItem<'a> {
-    pub fn size(&self) -> u64 {
-        self.data_size
-    }
-
-    pub fn root(&self) -> &DataRoot<'a> {
-        &self.data_root
-    }
 }
 
 pub type MaybeOwnedBundledDataItem<'a> = MaybeOwned<'a, BundledDataItem<'a>>;

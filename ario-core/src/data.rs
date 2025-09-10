@@ -1,4 +1,5 @@
 use crate::blob::{AsBlob, Blob, TypedBlob};
+use crate::bundle;
 use crate::bundle::MaybeOwnedBundledDataItem;
 use crate::chunking::{Chunker, ChunkerExt, DefaultChunker, MaybeOwnedChunk, TypedChunk};
 use crate::crypto::hash::{Hasher, Sha256};
@@ -180,7 +181,7 @@ impl<'a> DataItem<'a> {
         match self {
             Self::Embedded(d) => d.len() as u64,
             Self::External(d) => d.data_size,
-            Self::Bundled(d) => d.size(),
+            Self::Bundled(d) => d.data_size(),
         }
     }
 
@@ -189,9 +190,12 @@ impl<'a> DataItem<'a> {
         match self {
             Self::Embedded(d) => DataInner::Embedded(MaybeOwned::Borrowed(d.borrow())).into(),
             Self::External(d) => {
-                DataInner::DataRoot(Some(MaybeOwned::Borrowed(d.data_root.borrow()))).into()
+                DataInner::TxDataRoot(Some(MaybeOwned::Borrowed(d.data_root.borrow()))).into()
             }
-            Self::Bundled(_) => DataInner::DataRoot(None).into(),
+            Self::Bundled(d) => {
+                DataInner::BundleItemDataRoot(Some(MaybeOwned::Borrowed(d.data_root().borrow())))
+                    .into()
+            }
         }
     }
 }
@@ -209,7 +213,8 @@ impl<'a> From<DataInner<'a>> for Data<'a> {
 #[derive(Debug, Clone)]
 enum DataInner<'a> {
     Embedded(MaybeOwnedEmbeddedDataItem<'a>),
-    DataRoot(Option<MaybeOwnedDataRoot<'a>>),
+    TxDataRoot(Option<MaybeOwnedDataRoot<'a>>),
+    BundleItemDataRoot(Option<MaybeOwned<'a, bundle::DataRoot<'a>>>),
 }
 
 impl<'a> Data<'a> {
@@ -222,8 +227,16 @@ impl<'a> Data<'a> {
     }
 
     #[inline]
-    pub fn data_root(&self) -> Option<&DataRoot> {
-        if let DataInner::DataRoot(data_root) = &self.0 {
+    pub fn tx_data_root(&self) -> Option<&DataRoot> {
+        if let DataInner::TxDataRoot(data_root) = &self.0 {
+            return data_root.as_ref().map(|d| d.as_ref());
+        }
+        None
+    }
+
+    #[inline]
+    pub fn bundle_data_root(&self) -> Option<&bundle::DataRoot> {
+        if let DataInner::BundleItemDataRoot(data_root) = &self.0 {
             return data_root.as_ref().map(|d| d.as_ref());
         }
         None
