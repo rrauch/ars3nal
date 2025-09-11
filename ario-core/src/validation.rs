@@ -3,16 +3,11 @@ use std::marker::PhantomData;
 
 pub struct Valid<T>(PhantomData<T>);
 
-pub trait SupportsValidation {
-    type Unvalidated;
+pub trait SupportsValidation: Sized {
     type Validated;
-    type Validator: Validator<Self::Unvalidated>;
+    type Validator: Validator<Self>;
 
-    fn into_valid(self, token: Valid<Self>) -> Self::Validated
-    where
-        Self: Sized;
-
-    fn as_unvalidated(&self) -> &Self::Unvalidated;
+    fn into_valid(self, token: Valid<Self>) -> Self::Validated;
 }
 
 pub trait Validator<T> {
@@ -32,14 +27,14 @@ impl<T> ValidateExt for T
 where
     T: SupportsValidation,
 {
-    type Error = <<T as SupportsValidation>::Validator as Validator<T::Unvalidated>>::Error;
+    type Error = <<T as SupportsValidation>::Validator as Validator<T>>::Error;
     type Validated = T::Validated;
 
     fn validate(self) -> Result<T::Validated, (Self, Self::Error)>
     where
         Self: Sized,
     {
-        if let Err(err) = T::Validator::validate(T::as_unvalidated(&self)) {
+        if let Err(err) = T::Validator::validate(&self) {
             return Err((self, err));
         }
         Ok(T::into_valid(self, Valid(PhantomData)))

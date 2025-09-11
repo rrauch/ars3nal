@@ -1,4 +1,4 @@
-use crate::blob::{Blob, TypedBlob};
+use crate::blob::{Blob, OwnedBlob, TypedBlob};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
 
@@ -45,6 +45,22 @@ impl<'a> From<(Blob<'a>, Blob<'a>)> for Tag<'a> {
             name: TagName::new_from_inner(k),
             value: TagValue::new_from_inner(v),
         }
+    }
+}
+
+impl From<(String, String)> for Tag<'static> {
+    fn from((k, v): (String, String)) -> Self {
+        (
+            OwnedBlob::from(k.into_bytes()),
+            OwnedBlob::from(v.into_bytes()),
+        )
+            .into()
+    }
+}
+
+impl<'a> From<(&'a str, &'a str)> for Tag<'a> {
+    fn from((k, v): (&'a str, &'a str)) -> Self {
+        (Blob::from(k.as_bytes()), Blob::from(v.as_bytes())).into()
     }
 }
 

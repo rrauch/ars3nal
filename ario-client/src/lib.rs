@@ -7,6 +7,7 @@ mod price;
 mod routemaster;
 mod tx;
 mod wallet;
+mod bundler;
 
 use crate::api::Api;
 use crate::routemaster::{Handle, Routemaster};

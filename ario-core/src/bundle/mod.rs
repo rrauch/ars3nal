@@ -1,14 +1,17 @@
 mod v2;
 
-pub use v2::BundleItemDraft;
+pub use v2::{
+    Bundle as V2Bundle, BundleDataItem as V2BundleDataItem, BundleEntry as V2BundleEntry,
+    BundleItem as V2BundleItem, BundleItemDataProcessor as V2BundleItemDataProcessor,
+    BundleItemDataVerifier as V2BundleItemDataVerifier, BundleItemDraft,
+    BundleItemProof as V2BundleItemProof, DataRoot as V2DataRoot,
+};
 
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
 use crate::bundle::v2::{
-    Bundle as V2Bundle, BundleEntry as V2BundleEntry, BundleItem as V2BundleItem,
-    BundleItemDataVerifier as V2BundleItemVerifier, BundleItemProof as V2BundleItemProof,
-    MaybeOwnedDataRoot as V2MaybeOwnedDataRoot, SignatureType, V2BundleItemBuilder,
-    V2BundleItemHash,
+    BundleItemDataVerifier as V2BundleItemVerifier, MaybeOwnedDataRoot as V2MaybeOwnedDataRoot,
+    SignatureType, V2BundleItemBuilder, V2BundleItemHash,
 };
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ethereum::{Eip191, Eip712};
@@ -42,7 +45,7 @@ use std::borrow::Cow;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::io::Read;
-use std::ops::{Deref, Range};
+use std::ops::Range;
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -115,117 +118,82 @@ pub enum TagError {
 }
 
 #[derive(Debug, Clone)]
-#[repr(transparent)]
-pub struct Bundle(BundleInner);
+pub enum Bundle {
+    V2(V2Bundle),
+}
 
 pub type BundleId = TxId;
 
 impl Bundle {
     #[inline]
-    pub fn read<R: Read>(
-        reader: R,
-        bundle_type: BundleType,
-        bundle_id: BundleId,
-    ) -> Result<Self, Error> {
-        match bundle_type {
-            BundleType::V2 => Ok(Bundle(BundleInner::V2(V2Bundle::read(reader, bundle_id)?))),
-        }
-    }
-
-    #[inline]
-    pub async fn read_async<R: AsyncRead + Unpin>(
-        reader: R,
-        bundle_type: BundleType,
-        bundle_id: BundleId,
-    ) -> Result<Self, Error> {
-        match bundle_type {
-            BundleType::V2 => Ok(Bundle(BundleInner::V2(
-                V2Bundle::read_async(reader, bundle_id).await?,
-            ))),
-        }
-    }
-
-    #[inline]
     pub fn id(&self) -> &BundleId {
-        match &self.0 {
-            BundleInner::V2(b) => b.id(),
+        match self {
+            Self::V2(b) => b.id(),
         }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        match &self.0 {
-            BundleInner::V2(b) => b.len(),
+        match self {
+            Self::V2(b) => b.len(),
         }
     }
 
     #[inline]
     pub fn total_size(&self) -> u64 {
-        match &self.0 {
-            BundleInner::V2(b) => b.total_size(),
+        match self {
+            Self::V2(b) => b.total_size(),
         }
     }
 
     #[inline]
     pub fn entries(&self) -> impl Iterator<Item = BundleEntry<'_>> {
-        match &self.0 {
-            BundleInner::V2(b) => b
-                .entries()
-                .into_iter()
-                .map(|e| BundleEntry(BundleEntryInner::V2(e.into()).into())),
+        match self {
+            Self::V2(b) => b.entries().into_iter().map(|e| BundleEntry::V2(e.into())),
         }
     }
 
     #[inline]
     pub fn bundle_type(&self) -> BundleType {
-        match &self.0 {
-            BundleInner::V2(_) => BundleType::V2,
+        match self {
+            Self::V2(_) => BundleType::V2,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-enum BundleInner {
-    V2(V2Bundle),
+pub enum BundleEntry<'a> {
+    V2(MaybeOwned<'a, V2BundleEntry>),
 }
-
-#[derive(Debug, Clone)]
-#[repr(transparent)]
-pub struct BundleEntry<'a>(MaybeOwned<'a, BundleEntryInner<'a>>);
 
 impl BundleEntry<'_> {
     #[inline]
     fn id(&self) -> &BundleItemId {
-        match self.0.deref() {
-            BundleEntryInner::V2(e) => &e.id,
+        match self {
+            Self::V2(e) => e.id(),
         }
     }
 
     #[inline]
     fn len(&self) -> u64 {
-        match self.0.deref() {
-            BundleEntryInner::V2(e) => e.len,
+        match self {
+            Self::V2(e) => e.len(),
         }
     }
 
     #[inline]
     fn offset(&self) -> u64 {
-        match self.0.deref() {
-            BundleEntryInner::V2(e) => e.offset,
+        match self {
+            Self::V2(e) => e.offset(),
         }
     }
 
     #[inline]
     fn into_owned(self) -> BundleEntry<'static> {
-        BundleEntry(match self.0.into_owned() {
-            BundleEntryInner::V2(e) => BundleEntryInner::V2(e.into_owned().into()).into(),
-        })
+        match self {
+            Self::V2(e) => BundleEntry::V2(e.into_owned().into()),
+        }
     }
-}
-
-#[derive(Debug, Clone)]
-enum BundleEntryInner<'a> {
-    V2(MaybeOwned<'a, V2BundleEntry>),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
@@ -282,12 +250,13 @@ impl BundleItemBuilder {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[repr(transparent)]
-pub struct BundleItem<'a, const VALIDATED: bool = false>(BundleItemInner<'a, VALIDATED>);
+pub enum BundleItem<'a, const VALIDATED: bool = false> {
+    V2(V2BundleItem<'a, VALIDATED>),
+}
 
 impl<'a, const VALIDATED: bool> From<V2BundleItem<'a, VALIDATED>> for BundleItem<'a, VALIDATED> {
     fn from(value: V2BundleItem<'a, VALIDATED>) -> Self {
-        Self(BundleItemInner::V2(value))
+        Self::V2(value)
     }
 }
 
@@ -295,32 +264,30 @@ pub type UnvalidatedBundleItem<'a> = BundleItem<'a, false>;
 pub type ValidatedBundleItem<'a> = BundleItem<'a, true>;
 
 impl UnvalidatedBundleItem<'static> {
-    fn from_inner(
-        inner: BundleItemInner<'static, false>,
+    fn from_v2(
+        v2: V2BundleItem<'static, false>,
         expected_id: &BundleItemId,
     ) -> Result<Self, Error> {
-        if inner.id() != expected_id {
+        if v2.id() != expected_id {
             return Err(BundleItemError::IdError(BundleItemIdError::IdMismatch {
                 expected: expected_id.clone(),
-                actual: inner.id().clone(),
+                actual: v2.id().clone(),
             }))?;
         }
-        Ok(Self(inner))
+        Ok(Self::V2(v2))
     }
 
     pub fn read<R: Read>(
         reader: R,
         entry: &BundleEntry<'_>,
     ) -> Result<(Self, BundleItemVerifier<'static>), Error> {
-        match entry.0.deref() {
-            BundleEntryInner::V2(e) => {
-                let (item, data_verifier) = V2BundleItem::read(reader, e.len)?;
-                let this = Self::from_inner(BundleItemInner::V2(item), entry.id())?;
+        match entry {
+            BundleEntry::V2(e) => {
+                let (item, data_verifier) = V2BundleItem::read(reader, e.len())?;
+                let this = Self::from_v2(item, entry.id())?;
                 Ok((
                     this,
-                    BundleItemVerifier(BundleItemVerifierInner::V2(MaybeOwned::Owned(
-                        data_verifier,
-                    ))),
+                    BundleItemVerifier::V2(MaybeOwned::Owned(data_verifier)),
                 ))
             }
         }
@@ -330,15 +297,13 @@ impl UnvalidatedBundleItem<'static> {
         reader: R,
         entry: &BundleEntry<'_>,
     ) -> Result<(Self, BundleItemVerifier<'static>), Error> {
-        match entry.0.deref() {
-            BundleEntryInner::V2(e) => {
-                let (item, data_verifier) = V2BundleItem::read_async(reader, e.len).await?;
-                let this = Self::from_inner(BundleItemInner::V2(item), entry.id())?;
+        match entry {
+            BundleEntry::V2(e) => {
+                let (item, data_verifier) = V2BundleItem::read_async(reader, e.len()).await?;
+                let this = Self::from_v2(item, entry.id())?;
                 Ok((
                     this,
-                    BundleItemVerifier(BundleItemVerifierInner::V2(MaybeOwned::Owned(
-                        data_verifier,
-                    ))),
+                    BundleItemVerifier::V2(MaybeOwned::Owned(data_verifier)),
                 ))
             }
         }
@@ -357,32 +322,50 @@ impl<'a, const VALIDATED: bool> ArEntity for BundleItem<'a, VALIDATED> {
 impl<'a, const VALIDATED: bool> BundleItem<'a, VALIDATED> {
     #[inline]
     pub fn id(&self) -> &BundleItemId {
-        self.0.id()
-    }
-
-    #[inline]
-    pub fn data_size(&self) -> u64 {
-        self.0.data_size()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum BundleItemInner<'a, const VALIDATED: bool> {
-    V2(V2BundleItem<'a, VALIDATED>),
-}
-
-impl<'a, const VALIDATED: bool> BundleItemInner<'a, VALIDATED> {
-    #[inline]
-    fn id(&self) -> &BundleItemId {
         match self {
             Self::V2(v2) => v2.id(),
         }
     }
 
     #[inline]
-    fn data_size(&self) -> u64 {
+    pub fn anchor(&self) -> Option<&BundleAnchor> {
+        match self {
+            Self::V2(v2) => v2.anchor(),
+        }
+    }
+
+    #[inline]
+    pub fn tags(&self) -> &Vec<Tag<'a>> {
+        match self {
+            Self::V2(v2) => v2.tags(),
+        }
+    }
+
+    #[inline]
+    pub fn target(&self) -> Option<&WalletAddress> {
+        match self {
+            Self::V2(v2) => v2.target(),
+        }
+    }
+
+    #[inline]
+    pub fn data_offset(&self) -> u64 {
+        match self {
+            Self::V2(v2) => v2.data_offset(),
+        }
+    }
+
+    #[inline]
+    pub fn data_size(&self) -> u64 {
         match self {
             Self::V2(v2) => v2.data_size(),
+        }
+    }
+
+    #[inline]
+    pub fn bundle_type(&self) -> BundleType {
+        match self {
+            Self::V2(_) => BundleType::V2,
         }
     }
 }
@@ -813,21 +796,27 @@ impl<'a> BundledDataItem<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[repr(transparent)]
-pub struct DataRoot<'a>(DataRootInner<'a>);
-
-#[derive(Clone, Debug, PartialEq)]
-enum DataRootInner<'a> {
+pub enum DataRoot<'a> {
     V2(V2MaybeOwnedDataRoot<'a>),
 }
 
 #[derive(Clone, Debug)]
-#[repr(transparent)]
-pub struct BundleItemVerifier<'a>(BundleItemVerifierInner<'a>);
-
-#[derive(Clone, Debug)]
-enum BundleItemVerifierInner<'a> {
+pub enum BundleItemVerifier<'a> {
     V2(MaybeOwned<'a, V2BundleItemVerifier<'a>>),
+}
+
+impl BundleItemVerifier<'_> {
+    pub fn bundle_type(&self) -> BundleType {
+        match self {
+            Self::V2(_) => BundleType::V2,
+        }
+    }
+}
+
+impl<'a> From<V2BundleItemVerifier<'a>> for BundleItemVerifier<'a> {
+    fn from(value: V2BundleItemVerifier<'a>) -> Self {
+        Self::V2(value.into())
+    }
 }
 
 impl<'a> data::Verifier<BundledDataItem<'a>> for BundleItemVerifier<'a> {
@@ -838,27 +827,21 @@ impl<'a> data::Verifier<BundledDataItem<'a>> for BundleItemVerifier<'a> {
 
     #[inline]
     fn chunks(&self) -> impl Iterator<Item = &Range<u64>> {
-        match &self.0 {
-            BundleItemVerifierInner::V2(v2) => v2.chunks(),
+        match self {
+            Self::V2(v2) => v2.chunks(),
         }
     }
 
     #[inline]
     fn proof(&self, range: &Range<u64>) -> Option<MaybeOwned<'_, Self::Proof<'_>>> {
-        match &self.0 {
-            BundleItemVerifierInner::V2(v2) => v2
-                .proof(range)
-                .map(|p| BundleItemDataProof(BundleItemDataProofInner::V2(p)).into()),
+        match self {
+            Self::V2(v2) => v2.proof(range).map(|p| BundleItemDataProof::V2(p).into()),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[repr(transparent)]
-pub struct BundleItemDataProof<'a>(BundleItemDataProofInner<'a>);
-
-#[derive(Clone, Debug, PartialEq)]
-enum BundleItemDataProofInner<'a> {
+pub enum BundleItemDataProof<'a> {
     V2(MaybeOwned<'a, V2BundleItemProof<'a>>),
 }
 

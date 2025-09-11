@@ -110,6 +110,7 @@ dependencies = [
  "n0-watcher",
  "netwatch",
  "rand 0.9.2",
+ "rangemap",
  "reqwest",
  "serde",
  "serde_json",
@@ -120,6 +121,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]

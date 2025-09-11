@@ -25,6 +25,7 @@ maybe-owned = { workspace = true }
 n0-watcher = "0.3"
 netwatch = "0.8"
 rand = { workspace = true, features = ["thread_rng"] }
+rangemap = { workspace = true }
 reqwest = { version = "0.12", features = ["stream", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
@@ -35,6 +36,7 @@ tokio-util = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }

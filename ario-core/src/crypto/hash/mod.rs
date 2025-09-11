@@ -23,7 +23,7 @@ pub type Sha512Hash = Digest<Sha512>;
 
 pub type TypedDigest<T, H: Hasher> = Typed<T, Digest<H>>;
 
-#[derive_where(Clone, PartialEq, Hash)]
+#[derive_where(Clone, PartialEq, Eq, Hash)]
 #[derive(TransparentWrapper)]
 #[repr(transparent)]
 pub struct Digest<H: Hasher>(H::Output);
@@ -159,7 +159,7 @@ where
 }
 
 pub trait Hasher: Send + Sync {
-    type Output: Output + PartialEq + Hash + AsRef<[u8]>;
+    type Output: Output + PartialEq + Eq + Hash + AsRef<[u8]>;
 
     fn new() -> Self;
     fn update(&mut self, data: impl AsRef<[u8]>);

@@ -24,6 +24,7 @@ hybrid-array = "0.4"
 k256 = { version = "0.14.0-pre.10" }
 maybe-owned = "0.3"
 rand = "0.9"
+rangemap = "1.6"
 rsa = "0.10.0-rc.6"
 serde = "1.0"
 serde_json = "1.0"

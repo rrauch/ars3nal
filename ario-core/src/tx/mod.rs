@@ -990,7 +990,7 @@ mod tests {
             .reward(1234)?
             .tx_anchor(TxAnchor::from_inner([0u8; 48]))
             .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 101)?)
-            .data_upload(&data)
+            .data_upload((&data).into())
             .draft();
 
         let valid_tx = draft.sign(&wallet)?;
@@ -1081,7 +1081,7 @@ mod tests {
         let draft = TxBuilder::v2()
             .reward(12345)?
             .tx_anchor(TxAnchor::from_inner([0u8; 48]))
-            .data_upload(data.data_item())
+            .data_upload(data.data_item().into())
             .draft();
 
         let valid_tx = wallet.sign_tx_draft(draft)?;

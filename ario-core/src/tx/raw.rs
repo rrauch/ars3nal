@@ -76,19 +76,11 @@ impl UnvalidatedRawTx<'static> {
 }
 
 impl<'a> SupportsValidation for UnvalidatedRawTx<'a> {
-    type Unvalidated = RawTxData<'a>;
     type Validated = ValidatedRawTx<'a>;
     type Validator = RawTxDataValidator;
 
-    fn into_valid(self, _token: Valid<Self>) -> Self::Validated
-    where
-        Self: Sized,
-    {
+    fn into_valid(self, _token: Valid<Self>) -> Self::Validated {
         RawTx(self.0)
-    }
-
-    fn as_unvalidated(&self) -> &Self::Unvalidated {
-        &self.0
     }
 }
 
@@ -261,10 +253,10 @@ pub enum RawTxDataError {
 
 pub struct RawTxDataValidator;
 
-impl Validator<RawTxData<'_>> for RawTxDataValidator {
+impl Validator<UnvalidatedRawTx<'_>> for RawTxDataValidator {
     type Error = RawTxDataError;
 
-    fn validate(data: &RawTxData) -> Result<(), Self::Error> {
+    fn validate(data: &UnvalidatedRawTx) -> Result<(), Self::Error> {
         const VALID_ID_LENGTHS: &[usize] = &[32];
         const VALID_LAST_TX_LENGTHS: &[usize] = &[32, 48];
         const VALID_OWNER_LENGTHS: &[usize] = &[256, 512];
@@ -278,25 +270,25 @@ impl Validator<RawTxData<'_>> for RawTxDataValidator {
         ];
         const VALID_DATA_ROOT_LENGTHS: &[usize] = &[32];
 
-        validate_byte_len(data.id.bytes(), VALID_ID_LENGTHS, "id")?;
-        validate_byte_len(data.last_tx.bytes(), VALID_LAST_TX_LENGTHS, "last_tx")?;
+        validate_byte_len(data.0.id.bytes(), VALID_ID_LENGTHS, "id")?;
+        validate_byte_len(data.0.last_tx.bytes(), VALID_LAST_TX_LENGTHS, "last_tx")?;
 
-        if let Some(owner) = &data.owner {
+        if let Some(owner) = &data.0.owner {
             validate_byte_len(owner.bytes(), VALID_OWNER_LENGTHS, "owner")?;
         }
 
-        if data.tags_byte_len() > MAX_TAGS_TOTAL_LEN {
+        if data.0.tags_byte_len() > MAX_TAGS_TOTAL_LEN {
             return Err(RawTxDataError::TagsMaxLenExceeded {
                 max: MAX_TAGS_TOTAL_LEN,
-                actual: data.tags_byte_len(),
+                actual: data.0.tags_byte_len(),
             });
         }
 
-        if let Some(target) = &data.target {
+        if let Some(target) = &data.0.target {
             validate_byte_len(target.bytes(), VALID_TARGET_LENGTHS, "target")?;
         }
 
-        if let Some(data) = &data.data {
+        if let Some(data) = &data.0.data {
             if data.len() > MAX_EMBEDDED_DATA_LEN {
                 return Err(RawTxDataError::EmbeddedDataMaxLenExceeded {
                     max: MAX_EMBEDDED_DATA_LEN,
@@ -305,34 +297,34 @@ impl Validator<RawTxData<'_>> for RawTxDataValidator {
             }
         }
 
-        validate_byte_len(data.signature.bytes(), VALID_SIG_LENGTHS, "signature")?;
+        validate_byte_len(data.0.signature.bytes(), VALID_SIG_LENGTHS, "signature")?;
 
-        if let Some(data_root) = &data.data_root {
+        if let Some(data_root) = &data.0.data_root {
             validate_byte_len(data_root.bytes(), VALID_DATA_ROOT_LENGTHS, "data_root")?;
         }
 
         let mut positive_quantity = false;
-        if let Some(quantity) = &data.quantity {
+        if let Some(quantity) = &data.0.quantity {
             validate_positive_integer(quantity, "quantity")?;
 
             if quantity != ZERO_BD.deref() {
-                if data.target.is_none() {
+                if data.0.target.is_none() {
                     return Err(RawTxDataError::MissingTarget);
                 }
                 positive_quantity = true;
             }
         }
 
-        validate_positive_integer(&data.reward, "reward")?;
+        validate_positive_integer(&data.0.reward, "reward")?;
 
-        if data.target.is_some() {
+        if data.0.target.is_some() {
             if !positive_quantity {
                 return Err(RawTxDataError::MissingQuantity);
             }
         }
 
-        let expected_tx_id = data.signature.bytes().digest::<Sha256>();
-        if expected_tx_id.as_slice() != data.id.bytes() {
+        let expected_tx_id = data.0.signature.bytes().digest::<Sha256>();
+        if expected_tx_id.as_slice() != data.0.id.bytes() {
             return Err(RawTxDataError::IdSignatureMismatch);
         }
 

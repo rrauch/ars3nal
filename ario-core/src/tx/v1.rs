@@ -90,19 +90,11 @@ impl<'a> UnvalidatedV1Tx<'a> {
 }
 
 impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
-    type Unvalidated = V1TxData<'a>;
     type Validated = ValidatedV1Tx<'a>;
     type Validator = V1TxValidator;
 
-    fn into_valid(self, _token: Valid<Self>) -> Self::Validated
-    where
-        Self: Sized,
-    {
+    fn into_valid(self, _token: Valid<Self>) -> Self::Validated {
         V1Tx(self.0)
-    }
-
-    fn as_unvalidated(&self) -> &Self::Unvalidated {
-        &self.0
     }
 }
 
@@ -310,11 +302,11 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
 
 pub struct V1TxValidator;
 
-impl Validator<V1TxData<'_>> for V1TxValidator {
+impl Validator<UnvalidatedV1Tx<'_>> for V1TxValidator {
     type Error = V1TxDataError;
 
-    fn validate(data: &V1TxData) -> Result<(), Self::Error> {
-        Ok(data.signature_data.verify_sig(&(data.tx_hash()))?)
+    fn validate(data: &UnvalidatedV1Tx) -> Result<(), Self::Error> {
+        Ok(data.0.signature_data.verify_sig(&(data.0.tx_hash()))?)
     }
 }
 

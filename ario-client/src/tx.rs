@@ -15,6 +15,7 @@ use bytesize::ByteSize;
 use derive_where::derive_where;
 use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, Stream};
 use itertools::Itertools;
+use maybe_owned::MaybeOwned;
 use serde::Deserialize;
 use serde_with::DisplayFromStr;
 use serde_with::base64::Base64;
@@ -208,7 +209,7 @@ pub enum Submission<'a> {
 pub struct TxSubmission<State: Debug>(State);
 
 #[derive(Debug)]
-struct Prepared {
+pub struct Prepared {
     gw_handle: Handle<Gateway>,
     tx_anchor: TxAnchor,
     created: SystemTime,
@@ -279,7 +280,7 @@ impl TxSubmission<Prepared> {
 }
 
 #[derive(Debug)]
-struct AwaitingData<'a> {
+pub struct AwaitingData<'a> {
     gw_handle: Handle<Gateway>,
     tx_id: TxId,
     client: Client,
@@ -298,7 +299,7 @@ impl<'a> TxSubmission<AwaitingData<'a>> {
 
     pub fn data<'b>(
         self,
-        verifier: &'b ExternalDataItemVerifier<'b>,
+        verifier: MaybeOwned<'b, ExternalDataItemVerifier<'b>>,
     ) -> Result<TxSubmission<UploadChunks<'b>>, (Self, super::Error)> {
         // make sure the external data matches the tx data
         if self.0.data.as_ref() != verifier.data_item() {
@@ -319,12 +320,12 @@ impl<'a> TxSubmission<AwaitingData<'a>> {
 }
 
 #[derive(Debug)]
-struct UploadChunks<'a> {
+pub struct UploadChunks<'a> {
     gw_handle: Handle<Gateway>,
     tx_id: TxId,
     client: Client,
     created: SystemTime,
-    data: &'a ExternalDataItemVerifier<'a>,
+    data: MaybeOwned<'a, ExternalDataItemVerifier<'a>>,
     chunks: Vec<Range<u64>>,
 }
 
@@ -412,7 +413,7 @@ impl<'a> TxSubmission<UploadChunks<'a>> {
 }
 
 #[derive(Debug)]
-struct Submitted {
+pub struct Submitted {
     gw_handle: Handle<Gateway>,
     tx_id: TxId,
     client: Client,
@@ -694,7 +695,7 @@ mod tests {
         let tx_draft = TxBuilder::v2()
             .reward("12")?
             .tx_anchor(tx_sub.tx_anchor().clone())
-            .data_upload(verifier.data_item())
+            .data_upload(verifier.data_item().into())
             .draft();
 
         let tx = wallet.sign_tx_draft(tx_draft)?;
@@ -704,7 +705,7 @@ mod tests {
             _ => unreachable!(),
         };
 
-        let tx_sub = tx_sub.data(&verifier).map_err(|(_, err)| err)?;
+        let tx_sub = tx_sub.data((&verifier).into()).map_err(|(_, err)| err)?;
 
         let file = tokio::fs::File::open(ONE_MB_PATH).await?;
         let file_len = file.metadata().await?.len();

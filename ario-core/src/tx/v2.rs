@@ -104,19 +104,11 @@ impl<'a> UnvalidatedV2Tx<'a> {
 }
 
 impl<'a> SupportsValidation for UnvalidatedV2Tx<'a> {
-    type Unvalidated = V2TxData<'a>;
     type Validated = ValidatedV2Tx<'a>;
     type Validator = V2TxValidator;
 
-    fn into_valid(self, _token: Valid<Self>) -> Self::Validated
-    where
-        Self: Sized,
-    {
+    fn into_valid(self, _token: Valid<Self>) -> Self::Validated {
         V2Tx(self.0)
-    }
-
-    fn as_unvalidated(&self) -> &Self::Unvalidated {
-        &self.0
     }
 }
 
@@ -428,11 +420,11 @@ pub enum V2TxDataError {
 
 pub struct V2TxValidator;
 
-impl Validator<V2TxData<'_>> for V2TxValidator {
+impl Validator<UnvalidatedV2Tx<'_>> for V2TxValidator {
     type Error = V2TxDataError;
 
-    fn validate(data: &V2TxData) -> Result<(), Self::Error> {
-        data.signature_data.verify_sig(&(data.tx_hash()))
+    fn validate(data: &UnvalidatedV2Tx) -> Result<(), Self::Error> {
+        data.0.signature_data.verify_sig(&(data.0.tx_hash()))
     }
 }
 
@@ -486,7 +478,7 @@ pub struct TxDraft<'a> {
     tags: Vec<Tag<'a>>,
     tx_anchor: TxAnchor,
     transfer: Option<Transfer>,
-    data_upload: Option<&'a ExternalDataItem<'a>>,
+    data_upload: Option<MaybeOwned<'a, ExternalDataItem<'a>>>,
 }
 
 impl<'a> From<&'a TxDraft<'a>> for TxHashBuilder<'a> {
@@ -516,6 +508,18 @@ impl<'a> From<&'a TxDraft<'a>> for TxHashBuilder<'a> {
 }
 
 impl<'a> TxDraft<'a> {
+    pub fn reward(&self) -> &Reward {
+        &self.reward
+    }
+
+    pub fn set_reward(
+        &mut self,
+        reward: impl TryInto<Money<Winston>, Error: Into<MoneyError>>,
+    ) -> Result<(), RewardError> {
+        self.reward = Reward::try_from(reward)?;
+        Ok(())
+    }
+
     pub(crate) fn sign<T: TxSigner>(self, signer: &T) -> Result<ValidatedV2Tx<'a>, TxError> {
         let signature_data = signer.sign(&self)?;
         let (target, quantity) = match self.transfer {
