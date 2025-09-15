@@ -1,5 +1,7 @@
 mod api;
+mod bundle;
 mod chunk;
+mod data_reader;
 mod gateway;
 #[cfg(feature = "graphql")]
 pub mod graphql;
@@ -7,7 +9,6 @@ mod price;
 mod routemaster;
 mod tx;
 mod wallet;
-mod bundler;
 
 use crate::api::Api;
 use crate::routemaster::{Handle, Routemaster};
@@ -34,6 +35,8 @@ pub enum Error {
     UploadError(#[from] chunk::UploadError),
     #[error(transparent)]
     DownloadError(#[from] chunk::DownloadError),
+    #[error(transparent)]
+    DataReaderError(#[from] data_reader::Error),
 }
 
 #[bon::bon]
@@ -64,7 +67,7 @@ impl Client {
         Self(Arc::new(Inner { api, routemaster }))
     }
 
-    pub(crate) async fn with_gw<T, E: Into<api::Error>>(
+    pub(crate) async fn with_gw<T, E: Into<crate::Error>>(
         &self,
         f: impl AsyncFnOnce(&Gateway) -> Result<T, E>,
     ) -> Result<T, Error> {
@@ -72,7 +75,7 @@ impl Client {
         self.with_existing_gw(&gw_handle, f).await
     }
 
-    pub(crate) async fn with_existing_gw<T, E: Into<api::Error>>(
+    pub(crate) async fn with_existing_gw<T, E: Into<crate::Error>>(
         &self,
         gw_handle: &Handle<Gateway>,
         f: impl AsyncFnOnce(&Gateway) -> Result<T, E>,
@@ -87,7 +90,7 @@ impl Client {
             }
             Err(err) => {
                 let _ = gw_handle.submit_error(duration).await;
-                Err(Error::ApiError(err.into()))
+                Err(err.into())
             }
         }
     }

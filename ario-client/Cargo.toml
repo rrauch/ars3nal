@@ -41,6 +41,7 @@ uuid = { workspace = true, features = ["v7"] }
 [dev-dependencies]
 anyhow = { workspace = true }
 dotenv = "0.15"
+hex-literal = "1"
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["compat"] }
 

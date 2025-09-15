@@ -951,7 +951,7 @@ impl Uploader {
 
 #[cfg(test)]
 mod tests {
-    use crate::bundler::AsyncBundler;
+    use super::AsyncBundler;
     use ario_core::Gateway;
     use ario_core::bundle::{ArweaveScheme, BundleItemBuilder, V2BundleItemDataProcessor};
     use ario_core::jwk::Jwk;

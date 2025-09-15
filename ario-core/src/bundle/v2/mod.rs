@@ -1,10 +1,11 @@
 pub use item::BundleItem;
 
+pub(super) use reader::bundle::BundleReader;
+pub(super) use reader::FlowExt;
+
 use crate::blob::{AsBlob, Blob};
 use crate::buffer::{BufMutExt, HeapCircularBuffer};
 use crate::bundle::v2::item::RawBundleItem;
-use crate::bundle::v2::reader::FlowExt;
-use crate::bundle::v2::reader::bundle::BundleReader;
 use crate::bundle::v2::tag::to_avro;
 use crate::bundle::{
     BundleAnchor, BundleId, BundleItemError, BundleItemHash, BundleItemId, BundleItemKind,
@@ -818,7 +819,7 @@ mod tests {
         let data = BundleItemDataProcessor::from_single_value(ONE_MB);
 
         let draft = BundleItemBuilder::v2()
-            .data_upload((&data).into())
+            .data_upload(&data)
             .draft()?;
 
         let valid_item = wallet.sign_bundle_item_draft::<Ed25519Scheme>(draft)?;

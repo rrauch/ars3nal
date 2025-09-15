@@ -9,6 +9,7 @@ pub use v2::{
 
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
+use crate::bundle::v2::FlowExt;
 use crate::bundle::v2::{
     BundleItemDataVerifier as V2BundleItemVerifier, MaybeOwnedDataRoot as V2MaybeOwnedDataRoot,
     SignatureType, V2BundleItemBuilder, V2BundleItemHash,
@@ -34,11 +35,11 @@ use crate::entity::{
     Signature as EntitySignature,
 };
 use crate::tag::Tag;
-use crate::tx::TxId;
+use crate::tx::{TxId, ValidatedTx};
 use crate::typed::{FromInner, Typed};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk, WalletSk};
 use crate::{blob, data, entity};
-use futures_lite::AsyncRead;
+use futures_lite::{AsyncRead, AsyncSeek};
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use std::borrow::Cow;
@@ -51,6 +52,8 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("not a bundle or unsupported format")]
+    UnsupportedFormat,
     #[error("invalid header")]
     InvalidHeader,
     #[error("empty bundles are unsupported")]
@@ -238,6 +241,26 @@ impl BundleType {
 impl Display for BundleType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_u8())
+    }
+}
+
+pub struct BundleReader;
+
+impl BundleReader {
+    pub async fn new<R: AsyncRead + AsyncSeek + Send + Unpin>(
+        tx: &ValidatedTx<'_>,
+        reader: R,
+    ) -> Result<Bundle, Error> {
+        let bundle_type = BundleType::from_tags(tx.tags()).ok_or(Error::UnsupportedFormat)?;
+        match bundle_type {
+            BundleType::V2 => Ok(Bundle::V2(
+                v2::BundleReader::builder()
+                    .id(tx.id().clone())
+                    .build()
+                    .process_async(reader)
+                    .await?,
+            )),
+        }
     }
 }
 

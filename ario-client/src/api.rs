@@ -48,6 +48,8 @@ pub enum Error {
     #[error(transparent)]
     TxError(#[from] ario_core::tx::TxError),
     #[error(transparent)]
+    BundleError(#[from] ario_core::bundle::Error),
+    #[error(transparent)]
     PayloadError(#[from] PayloadError),
     #[error("charset '{0:?}' unsupported")]
     UnsupportedCharset(Charset),

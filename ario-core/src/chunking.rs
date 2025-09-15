@@ -9,6 +9,7 @@ use derive_where::derive_where;
 use futures_lite::AsyncRead;
 use futures_lite::AsyncReadExt;
 use maybe_owned::MaybeOwned;
+use rangemap::RangeMap;
 use std::cmp::min;
 use std::fmt::Debug;
 use std::io::Cursor;
@@ -87,6 +88,30 @@ impl<H: Hasher> ChunkInfo for Digest<H> {
     type Len = <H::Output as Output>::Len;
 }
 
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct ChunkMap(RangeMap<u64, usize>);
+
+impl ChunkMap {
+    fn from_range_map(map: RangeMap<u64, usize>) -> Self {
+        Self(map)
+    }
+
+    pub fn get_by_offset(&self, offset: u64) -> Option<(&Range<u64>, usize)> {
+        self.0
+            .get_key_value(&offset)
+            .map(|(r, _)| (r, (offset - r.start) as usize))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 pub trait Chunker: Sized + Send {
     type Output: ChunkInfo;
     fn empty() -> Self::Output;
@@ -95,6 +120,7 @@ pub trait Chunker: Sized + Send {
     fn finalize(self) -> impl IntoIterator<Item = Chunk<Self>>;
     fn max_chunk_size() -> usize;
     fn min_chunk_size() -> usize;
+    fn chunk_map(len: u64) -> Option<ChunkMap>;
 }
 
 pub(crate) trait ChunkerExt
@@ -226,6 +252,53 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunke
     fn min_chunk_size() -> usize {
         MIN_CHUNK_SIZE
     }
+
+    fn chunk_map(len: u64) -> Option<ChunkMap> {
+        if len == 0 {
+            return None;
+        }
+
+        let max: u64 = MAX_CHUNK_SIZE as u64;
+        let min: u64 = MIN_CHUNK_SIZE as u64;
+
+        let mut map = RangeMap::new();
+        let mut pos = 0u64;
+        let mut chunk_idx = 0;
+
+        let mut num_full_chunks = len / max;
+        let remainder = len % max;
+
+        // If the remainder is too small, "borrow" the last full chunk to merge with it.
+        if remainder > 0 && remainder < min && num_full_chunks > 0 {
+            num_full_chunks -= 1;
+        }
+
+        // Add the guaranteed full-sized chunks.
+        for _ in 0..num_full_chunks {
+            map.insert(pos..(pos + max), chunk_idx);
+            pos += max;
+            chunk_idx += 1;
+        }
+
+        // Process the rest of the data, which may be one or two chunks.
+        let remaining_len = len - pos;
+        if remaining_len > 0 {
+            if remaining_len > max {
+                // This is a merged chunk (MAX + remainder). Split it into two.
+                let size1 = remaining_len / 2;
+                let size2 = remaining_len - size1; // Handles odd/even correctly.
+                map.insert(pos..(pos + size2), chunk_idx);
+                pos += size2;
+                chunk_idx += 1;
+                map.insert(pos..(pos + size1), chunk_idx);
+            } else {
+                // This is a single final chunk.
+                map.insert(pos..(pos + remaining_len), chunk_idx);
+            }
+        }
+
+        Some(ChunkMap::from_range_map(map))
+    }
 }
 
 impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
@@ -293,8 +366,8 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::chunking::ChunkerExt;
     use crate::chunking::DefaultChunker;
+    use crate::chunking::{Chunk, Chunker, ChunkerExt};
     use std::fs::File;
     use std::io::Cursor;
     use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -306,9 +379,22 @@ mod tests {
     static TX_ODD_DATA: &'static [u8] =
         include_bytes!("../testdata/trtu91u1kRVDrZI6WvWVxU3uvEjJRZcls2WSZvYJyBc.data");
 
+    fn verify_chunk_map<C: Chunker>(chunks: &Vec<Chunk<C>>) -> anyhow::Result<()> {
+        let len = chunks.iter().map(|c| c.len()).sum();
+        if len != 0 {
+            let map = C::chunk_map(len).unwrap();
+            assert_eq!(map.len(), chunks.len());
+            for (c, (range, _)) in chunks.iter().zip(map.0.iter()) {
+                assert_eq!(&c.offset, range);
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_chunking() -> anyhow::Result<()> {
         let chunks = DefaultChunker::new().single_input(&mut Cursor::new(ONE_MB));
+        verify_chunk_map(&chunks)?;
 
         assert_eq!(chunks.len(), 8);
 
@@ -332,6 +418,7 @@ mod tests {
     #[test]
     fn test_chunking_even() -> anyhow::Result<()> {
         let chunks = DefaultChunker::new().single_input(&mut Cursor::new(TX_EVEN_DATA));
+        verify_chunk_map(&chunks)?;
 
         assert_eq!(chunks.len(), 2);
 
@@ -355,6 +442,7 @@ mod tests {
     #[test]
     fn test_chunking_odd() -> anyhow::Result<()> {
         let chunks = DefaultChunker::new().single_input(&mut Cursor::new(TX_ODD_DATA));
+        verify_chunk_map(&chunks)?;
 
         assert_eq!(chunks.len(), 3);
 
@@ -380,6 +468,7 @@ mod tests {
         let data = vec![0; 256 * 1024 + 1];
 
         let chunks = DefaultChunker::new().single_input(&mut Cursor::new(data.as_slice()));
+        verify_chunk_map(&chunks)?;
 
         assert_eq!(chunks.len(), 2);
 
@@ -405,6 +494,7 @@ mod tests {
         let data = vec![0; 16 * 1024];
 
         let chunks = DefaultChunker::new().single_input(&mut Cursor::new(data.as_slice()));
+        verify_chunk_map(&chunks)?;
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].offset.start, 0);
@@ -421,6 +511,7 @@ mod tests {
     fn empty() -> anyhow::Result<()> {
         let data = vec![];
         let chunks = DefaultChunker::new().single_input(&mut Cursor::new(data.as_slice()));
+        verify_chunk_map(&chunks)?;
         assert!(chunks.is_empty());
         Ok(())
     }
@@ -431,6 +522,7 @@ mod tests {
 
         let mut file = File::open(ONE_MB_PATH)?;
         let chunks = DefaultChunker::new().try_from_reader(&mut file)?;
+        verify_chunk_map(&chunks)?;
 
         assert_eq!(&chunks, &reference);
 
@@ -447,6 +539,7 @@ mod tests {
             let chunks = DefaultChunker::new()
                 .try_from_async_reader(&mut file.compat())
                 .await?;
+            verify_chunk_map(&chunks)?;
 
             assert_eq!(&chunks, &reference);
 

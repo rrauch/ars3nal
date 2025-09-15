@@ -18,7 +18,7 @@ pub mod base64;
 pub mod blob;
 pub mod buffer;
 pub mod bundle;
-mod chunking;
+pub mod chunking;
 pub mod confidential;
 pub mod crypto;
 pub mod data;

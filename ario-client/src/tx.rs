@@ -8,7 +8,7 @@ use crate::{Client, api};
 use ario_core::blob::Blob;
 use ario_core::data::Verifier;
 use ario_core::data::{DataItem, ExternalDataItemVerifier, MaybeOwnedExternalDataItem};
-use ario_core::tx::{LastTx, Tx, TxAnchor, TxId, UnvalidatedTx, ValidatedTx};
+use ario_core::tx::{LastTx, Tx, TxAnchor, TxId, UnvalidatedTx, ValidatedTx, ValidationError};
 use ario_core::{BlockNumber, Gateway, JsonValue};
 use async_stream::try_stream;
 use bytesize::ByteSize;
