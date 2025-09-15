@@ -164,6 +164,18 @@ impl Client {
             .await?)
     }
 
+    pub async fn validated_tx_by_id(
+        &self,
+        tx_id: &TxId,
+    ) -> Result<Option<ValidatedTx<'_>>, super::Error> {
+        let tx = match self.tx_by_id(tx_id).await? {
+            Some(tx) => tx.validate(),
+            None => return Ok(None),
+        }
+        .map_err(|(_, e)| api::Error::TxError(e.into()))?;
+        Ok(Some(tx))
+    }
+
     pub async fn tx_status(&self, tx_id: &TxId) -> Result<Option<Status<'_>>, super::Error> {
         let api = &self.0.api;
         Ok(self

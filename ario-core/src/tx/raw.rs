@@ -6,7 +6,7 @@ use crate::json::JsonSource;
 use crate::tag::{Tag, TagName, TagValue};
 use crate::tx::{Format, SignatureType};
 use crate::typed::FromInner;
-use crate::validation::{SupportsValidation, Valid, Validator};
+use crate::validation::{SupportsValidation, Validator};
 use crate::{JsonError, JsonValue};
 use bigdecimal::{BigDecimal, Zero};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ use serde_with::formats::Unpadded;
 use serde_with::serde_as;
 use serde_with::{DeserializeAs, DisplayFromStr, SerializeAs};
 use std::fmt::Display;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -79,7 +80,10 @@ impl<'a> SupportsValidation for UnvalidatedRawTx<'a> {
     type Validated = ValidatedRawTx<'a>;
     type Validator = RawTxDataValidator;
 
-    fn into_valid(self, _token: Valid<Self>) -> Self::Validated {
+    fn into_valid(
+        self,
+        _token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
+    ) -> Self::Validated {
         RawTx(self.0)
     }
 }
@@ -253,10 +257,13 @@ pub enum RawTxDataError {
 
 pub struct RawTxDataValidator;
 
+pub struct RawTxValidationToken(PhantomData<()>);
+
 impl Validator<UnvalidatedRawTx<'_>> for RawTxDataValidator {
     type Error = RawTxDataError;
+    type Token = RawTxValidationToken;
 
-    fn validate(data: &UnvalidatedRawTx) -> Result<(), Self::Error> {
+    fn validate(data: &UnvalidatedRawTx) -> Result<Self::Token, Self::Error> {
         const VALID_ID_LENGTHS: &[usize] = &[32];
         const VALID_LAST_TX_LENGTHS: &[usize] = &[32, 48];
         const VALID_OWNER_LENGTHS: &[usize] = &[256, 512];
@@ -328,7 +335,7 @@ impl Validator<UnvalidatedRawTx<'_>> for RawTxDataValidator {
             return Err(RawTxDataError::IdSignatureMismatch);
         }
 
-        Ok(())
+        Ok(RawTxValidationToken(PhantomData))
     }
 }
 

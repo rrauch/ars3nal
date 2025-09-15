@@ -12,10 +12,11 @@ use crate::tx::{
     SignatureType, TxDeepHash, TxError, TxHash, TxId, TxShallowHash,
 };
 use crate::typed::FromInner;
-use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
+use crate::validation::{SupportsValidation, ValidateExt, Validator};
 use crate::wallet::WalletAddress;
 use crate::{JsonError, JsonValue, entity};
 use itertools::Either;
+use std::marker::PhantomData;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -93,7 +94,10 @@ impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
     type Validated = ValidatedV1Tx<'a>;
     type Validator = V1TxValidator;
 
-    fn into_valid(self, _token: Valid<Self>) -> Self::Validated {
+    fn into_valid(
+        self,
+        _: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
+    ) -> Self::Validated {
         V1Tx(self.0)
     }
 }
@@ -301,12 +305,15 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
 }
 
 pub struct V1TxValidator;
+pub struct V1TxValidationToken(PhantomData<()>);
 
 impl Validator<UnvalidatedV1Tx<'_>> for V1TxValidator {
     type Error = V1TxDataError;
+    type Token = V1TxValidationToken;
 
-    fn validate(data: &UnvalidatedV1Tx) -> Result<(), Self::Error> {
-        Ok(data.0.signature_data.verify_sig(&(data.0.tx_hash()))?)
+    fn validate(data: &UnvalidatedV1Tx) -> Result<Self::Token, Self::Error> {
+        data.0.signature_data.verify_sig(&(data.0.tx_hash()))?;
+        Ok(V1TxValidationToken(PhantomData))
     }
 }
 

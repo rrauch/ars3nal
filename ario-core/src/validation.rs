@@ -1,18 +1,19 @@
 use std::fmt::Display;
-use std::marker::PhantomData;
-
-pub struct Valid<T>(PhantomData<T>);
 
 pub trait SupportsValidation: Sized {
     type Validated;
     type Validator: Validator<Self>;
 
-    fn into_valid(self, token: Valid<Self>) -> Self::Validated;
+    fn into_valid(
+        self,
+        token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
+    ) -> Self::Validated;
 }
 
 pub trait Validator<T> {
     type Error: Display;
-    fn validate(data: &T) -> Result<(), Self::Error>;
+    type Token: Send;
+    fn validate(data: &T) -> Result<Self::Token, Self::Error>;
 }
 
 pub trait ValidateExt {
@@ -34,9 +35,10 @@ where
     where
         Self: Sized,
     {
-        if let Err(err) = T::Validator::validate(&self) {
-            return Err((self, err));
-        }
-        Ok(T::into_valid(self, Valid(PhantomData)))
+        let token = match T::Validator::validate(&self) {
+            Ok(token) => token,
+            Err(err) => return Err((self, err)),
+        };
+        Ok(T::into_valid(self, token))
     }
 }

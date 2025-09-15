@@ -1,7 +1,8 @@
 pub use item::BundleItem;
 
-pub(super) use reader::bundle::BundleReader;
+pub(super) use item::BundleItemValidator;
 pub(super) use reader::FlowExt;
+pub(super) use reader::bundle::BundleReader;
 
 use crate::blob::{AsBlob, Blob};
 use crate::buffer::{BufMutExt, HeapCircularBuffer};
@@ -818,9 +819,7 @@ mod tests {
 
         let data = BundleItemDataProcessor::from_single_value(ONE_MB);
 
-        let draft = BundleItemBuilder::v2()
-            .data_upload(&data)
-            .draft()?;
+        let draft = BundleItemBuilder::v2().data_upload(&data).draft()?;
 
         let valid_item = wallet.sign_bundle_item_draft::<Ed25519Scheme>(draft)?;
 

@@ -12,12 +12,13 @@ use crate::bundle::{
 };
 use crate::crypto::hash::HashableExt;
 use crate::tag::Tag;
-use crate::validation::{SupportsValidation, Valid, Validator};
+use crate::validation::{SupportsValidation, Validator};
 use crate::wallet::WalletAddress;
 use bytes::{BufMut, BytesMut};
 use futures_lite::AsyncRead;
 use maybe_owned::MaybeOwned;
 use std::io::Read;
+use std::marker::PhantomData;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BundleItem<'a, const VALIDATED: bool = false> {
@@ -157,7 +158,7 @@ impl<'a> SupportsValidation for UnvalidatedItem<'a> {
     type Validated = ValidatedItem<'a>;
     type Validator = BundleItemValidator;
 
-    fn into_valid(self, _token: Valid<Self>) -> Self::Validated {
+    fn into_valid(self, _token: BundleItemValidationToken) -> Self::Validated {
         ValidatedItem {
             id: self.id,
             anchor: self.anchor,
@@ -172,11 +173,13 @@ impl<'a> SupportsValidation for UnvalidatedItem<'a> {
 }
 
 pub struct BundleItemValidator;
+pub struct BundleItemValidationToken(PhantomData<()>);
 
 impl Validator<UnvalidatedItem<'_>> for BundleItemValidator {
     type Error = BundleItemError;
+    type Token = BundleItemValidationToken;
 
-    fn validate(data: &UnvalidatedItem) -> Result<(), Self::Error> {
+    fn validate(data: &UnvalidatedItem) -> Result<Self::Token, Self::Error> {
         data.signature_data.verify_sig(&data.hash)?;
         let id = data.signature_data.signature().digest();
         if &id != &data.id {
@@ -185,7 +188,7 @@ impl Validator<UnvalidatedItem<'_>> for BundleItemValidator {
                 actual: data.id.clone(),
             }))?;
         }
-        Ok(())
+        Ok(BundleItemValidationToken(PhantomData))
     }
 }
 

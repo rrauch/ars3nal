@@ -19,7 +19,7 @@ use crate::tx::{
 };
 use crate::tx::{RewardError, Transfer};
 use crate::typed::FromInner;
-use crate::validation::{SupportsValidation, Valid, ValidateExt, Validator};
+use crate::validation::{SupportsValidation, ValidateExt, Validator};
 use crate::wallet::{WalletAddress, WalletSk};
 use crate::{JsonError, JsonValue, entity};
 use anyhow::anyhow;
@@ -27,6 +27,7 @@ use bon::Builder;
 use itertools::Either;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
+use std::marker::PhantomData;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -107,7 +108,10 @@ impl<'a> SupportsValidation for UnvalidatedV2Tx<'a> {
     type Validated = ValidatedV2Tx<'a>;
     type Validator = V2TxValidator;
 
-    fn into_valid(self, _token: Valid<Self>) -> Self::Validated {
+    fn into_valid(
+        self,
+        _: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
+    ) -> Self::Validated {
         V2Tx(self.0)
     }
 }
@@ -419,12 +423,15 @@ pub enum V2TxDataError {
 }
 
 pub struct V2TxValidator;
+pub struct V2TxValidationToken(PhantomData<()>);
 
 impl Validator<UnvalidatedV2Tx<'_>> for V2TxValidator {
     type Error = V2TxDataError;
+    type Token = V2TxValidationToken;
 
-    fn validate(data: &UnvalidatedV2Tx) -> Result<(), Self::Error> {
-        data.0.signature_data.verify_sig(&(data.0.tx_hash()))
+    fn validate(data: &UnvalidatedV2Tx) -> Result<Self::Token, Self::Error> {
+        data.0.signature_data.verify_sig(&(data.0.tx_hash()))?;
+        Ok(V2TxValidationToken(PhantomData))
     }
 }
 

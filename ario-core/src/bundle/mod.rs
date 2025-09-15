@@ -11,8 +11,9 @@ use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
 use crate::bundle::v2::FlowExt;
 use crate::bundle::v2::{
-    BundleItemDataVerifier as V2BundleItemVerifier, MaybeOwnedDataRoot as V2MaybeOwnedDataRoot,
-    SignatureType, V2BundleItemBuilder, V2BundleItemHash,
+    BundleItemDataVerifier as V2BundleItemVerifier, BundleItemValidator as V2BundleItemValidator,
+    MaybeOwnedDataRoot as V2MaybeOwnedDataRoot, SignatureType, V2BundleItemBuilder,
+    V2BundleItemHash,
 };
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ethereum::{Eip191, Eip712};
@@ -37,15 +38,16 @@ use crate::entity::{
 use crate::tag::Tag;
 use crate::tx::{TxId, ValidatedTx};
 use crate::typed::{FromInner, Typed};
+use crate::validation::{SupportsValidation, ValidateExt, Validator};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk, WalletSk};
 use crate::{blob, data, entity};
-use futures_lite::{AsyncRead, AsyncSeek};
+use futures_lite::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use std::borrow::Cow;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
-use std::io::Read;
+use std::io::{Read, SeekFrom};
 use std::ops::Range;
 use std::str::FromStr;
 use thiserror::Error;
@@ -171,28 +173,28 @@ pub enum BundleEntry<'a> {
 
 impl BundleEntry<'_> {
     #[inline]
-    fn id(&self) -> &BundleItemId {
+    pub fn id(&self) -> &BundleItemId {
         match self {
             Self::V2(e) => e.id(),
         }
     }
 
     #[inline]
-    fn len(&self) -> u64 {
+    pub fn len(&self) -> u64 {
         match self {
             Self::V2(e) => e.len(),
         }
     }
 
     #[inline]
-    fn offset(&self) -> u64 {
+    pub fn offset(&self) -> u64 {
         match self {
             Self::V2(e) => e.offset(),
         }
     }
 
     #[inline]
-    fn into_owned(self) -> BundleEntry<'static> {
+    pub fn into_owned(self) -> BundleEntry<'static> {
         match self {
             Self::V2(e) => BundleEntry::V2(e.into_owned().into()),
         }
@@ -264,6 +266,23 @@ impl BundleReader {
     }
 }
 
+pub struct BundleItemReader;
+
+impl BundleItemReader {
+    pub async fn read_async<R: AsyncRead + AsyncSeek + Send + Unpin>(
+        entry: &BundleEntry<'_>,
+        mut reader: R,
+    ) -> Result<UnvalidatedBundleItem<'static>, Error> {
+        match entry {
+            BundleEntry::V2(entry) => {
+                reader.seek(SeekFrom::Start(entry.offset())).await?;
+                let (item, data_verifier) = v2::BundleItem::read_async(reader, entry.len()).await?;
+                UnvalidatedBundleItem::from_v2(item, entry.id())
+            }
+        }
+    }
+}
+
 pub struct BundleItemBuilder;
 
 impl BundleItemBuilder {
@@ -285,6 +304,47 @@ impl<'a, const VALIDATED: bool> From<V2BundleItem<'a, VALIDATED>> for BundleItem
 
 pub type UnvalidatedBundleItem<'a> = BundleItem<'a, false>;
 pub type ValidatedBundleItem<'a> = BundleItem<'a, true>;
+
+impl<'a> SupportsValidation for UnvalidatedBundleItem<'a> {
+    type Validated = ValidatedBundleItem<'a>;
+    type Validator = BundleItemValidator;
+
+    fn into_valid(
+        self,
+        token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
+    ) -> Self::Validated {
+        match self {
+            Self::V2(v2) => match token {
+                BundleItemValidationToken::V2(token) => Self::Validated::V2(v2.into_valid(token)),
+            },
+        }
+    }
+}
+
+pub struct BundleItemValidator;
+
+pub enum BundleItemValidationToken<'a> {
+    V2(<V2BundleItemValidator as Validator<V2BundleItem<'a>>>::Token),
+}
+
+impl<'a> Validator<UnvalidatedBundleItem<'a>> for BundleItemValidator {
+    type Error = BundleItemError;
+    type Token = BundleItemValidationToken<'a>;
+
+    fn validate(item: &UnvalidatedBundleItem<'a>) -> Result<Self::Token, Self::Error> {
+        match item {
+            UnvalidatedBundleItem::V2(v2) => Ok(BundleItemValidationToken::V2(
+                V2BundleItemValidator::validate(v2)?,
+            )),
+        }
+    }
+}
+
+impl<'a> UnvalidatedBundleItem<'a> {
+    pub fn validate(self) -> Result<ValidatedBundleItem<'a>, BundleItemError> {
+        ValidateExt::validate(self).map_err(|(_, e)| e)
+    }
+}
 
 impl UnvalidatedBundleItem<'static> {
     fn from_v2(
