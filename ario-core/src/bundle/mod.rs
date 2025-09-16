@@ -52,7 +52,7 @@ use std::fmt::{Display, Formatter};
 use std::io::{Read, SeekFrom};
 use std::ops::Range;
 use std::str::FromStr;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -129,7 +129,7 @@ pub enum TagError {
 
 #[derive(Debug, Clone)]
 pub enum Bundle {
-    V2(V2Bundle),
+    V2(Arc<V2Bundle>),
 }
 
 pub type BundleId = TxId;
@@ -265,13 +265,13 @@ impl BundleReader {
     ) -> Result<Bundle, Error> {
         let bundle_type = BundleType::from_tags(tx.tags()).ok_or(Error::UnsupportedFormat)?;
         match bundle_type {
-            BundleType::V2 => Ok(Bundle::V2(
+            BundleType::V2 => Ok(Bundle::V2(Arc::new(
                 v2::BundleReader::builder()
                     .id(tx.id().clone())
                     .build()
                     .process_async(reader)
                     .await?,
-            )),
+            ))),
         }
     }
 }
@@ -308,11 +308,19 @@ impl BundleItemBuilder {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BundleItem<'a, const VALIDATED: bool = false> {
-    V2(V2BundleItem<'a, VALIDATED>),
+    V2(Arc<V2BundleItem<'a, VALIDATED>>),
 }
 
 impl<'a, const VALIDATED: bool> From<V2BundleItem<'a, VALIDATED>> for BundleItem<'a, VALIDATED> {
     fn from(value: V2BundleItem<'a, VALIDATED>) -> Self {
+        Self::V2(Arc::new(value))
+    }
+}
+
+impl<'a, const VALIDATED: bool> From<Arc<V2BundleItem<'a, VALIDATED>>>
+    for BundleItem<'a, VALIDATED>
+{
+    fn from(value: Arc<V2BundleItem<'a, VALIDATED>>) -> Self {
         Self::V2(value)
     }
 }
@@ -330,7 +338,9 @@ impl<'a> SupportsValidation for UnvalidatedBundleItem<'a> {
     ) -> Self::Validated {
         match self {
             Self::V2(v2) => match token {
-                BundleItemValidationToken::V2(token) => Self::Validated::V2(v2.into_valid(token)),
+                BundleItemValidationToken::V2(token) => {
+                    Self::Validated::V2(Arc::unwrap_or_clone(v2).into_valid(token).into())
+                }
             },
         }
     }
@@ -372,7 +382,7 @@ impl UnvalidatedBundleItem<'static> {
                 actual: v2.id().clone(),
             }))?;
         }
-        Ok(Self::V2(v2))
+        Ok(Self::V2(v2.into()))
     }
 
     pub fn read<R: Read>(
