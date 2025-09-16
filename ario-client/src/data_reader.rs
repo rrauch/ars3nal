@@ -554,12 +554,7 @@ mod tests {
 
         let tx_id = TxId::from_str("ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk")?;
 
-        let tx = client
-            .tx_by_id(&tx_id)
-            .await?
-            .unwrap()
-            .validate()
-            .map_err(|(_, err)| err)?;
+        let tx = client.tx_by_id(&tx_id).await?.unwrap();
 
         let mut data_reader = AsyncTxReader::new(client.clone(), &tx).await?;
         let len = data_reader.len();

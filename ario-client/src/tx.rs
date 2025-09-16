@@ -160,18 +160,12 @@ impl Client {
     pub async fn tx_by_id(
         &self,
         tx_id: &TxId,
-    ) -> Result<Option<UnvalidatedTx<'static>>, super::Error> {
-        let api = &self.0.api;
-        Ok(self
-            .with_gw(async move |gw| api.tx_by_id(gw, tx_id).await)
-            .await?)
-    }
-
-    pub async fn validated_tx_by_id(
-        &self,
-        tx_id: &TxId,
     ) -> Result<Option<ValidatedTx<'static>>, super::Error> {
-        let tx = match self.tx_by_id(tx_id).await? {
+        let api = &self.0.api;
+        let tx = match self
+            .with_gw(async move |gw| api.tx_by_id(gw, tx_id).await)
+            .await?
+        {
             Some(tx) => tx.validate(),
             None => return Ok(None),
         }

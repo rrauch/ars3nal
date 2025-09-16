@@ -10,7 +10,7 @@ use crate::bundle::v2::item::RawBundleItem;
 use crate::bundle::v2::tag::to_avro;
 use crate::bundle::{
     BundleAnchor, BundleId, BundleItemError, BundleItemHash, BundleItemId, BundleItemKind,
-    BundleItemSignatureScheme, Error, KyveSignatureData, Owner, Signature,
+    BundleItemSignatureScheme, Error, KyveSignatureData, Owner, PLACEHOLDER_BUNDLE_ID, Signature,
 };
 use crate::chunking::{Chunk, Chunker, MostlyFixedChunker};
 use crate::crypto::ec::ethereum::{EthereumAddress, EthereumPublicKeyExt};
@@ -190,7 +190,7 @@ impl BundleItemDraft<'_> {
         let serialized = raw.as_blob();
         raw.data_offset = serialized.len() as u64;
 
-        let (unvalidated, _) = BundleItem::try_from_raw(raw)?;
+        let (unvalidated, _) = BundleItem::try_from_raw(raw, PLACEHOLDER_BUNDLE_ID.clone())?;
         let validated = unvalidated.validate().map_err(|(_, e)| e)?;
 
         Ok(super::ValidatedBundleItem::from(validated))
@@ -785,7 +785,8 @@ mod tests {
 
             for entry in bundle.entries {
                 input.seek(SeekFrom::Start(entry.offset)).await?;
-                let (item, data_verifier) = BundleItem::read_async(&mut input, entry.len).await?;
+                let (item, data_verifier) =
+                    BundleItem::read_async(&mut input, entry.len, bundle_id.clone()).await?;
                 let item = item.validate().map_err(|(_, e)| e)?;
                 assert_eq!(item.id(), &entry.id);
                 let data_root = data_verifier.data_item().data_root();
@@ -838,7 +839,11 @@ mod tests {
         buf.extend_from_slice(ONE_MB);
         let bytes = buf.freeze();
         let len = bytes.len() as u64;
-        let (unvalidated, _) = BundleItem::read(&mut std::io::Cursor::new(&bytes), len)?;
+        let (unvalidated, _) = BundleItem::read(
+            &mut std::io::Cursor::new(&bytes),
+            len,
+            BundleId::from_str("FTxzaw_jnVmU3LKOrkmBQ29Mhu9cFWQkhelsI4ZY1y8")?,
+        )?;
         let item = unvalidated.validate().map_err(|(_, e)| e)?;
         assert_eq!(item.id(), v2_item.id());
 

@@ -241,9 +241,7 @@ mod tests {
                 "-ynymmePYt7lZMOaCgcvkPUeaK0eFa_F7Ox7CJ629Ak",
             )?)
             .await?
-            .unwrap()
-            .validate()
-            .map_err(|(_, e)| e)?;
+            .unwrap();
 
         let data_item = tx.data_item().unwrap();
         let data = data_item.data();
@@ -288,9 +286,7 @@ mod tests {
                 "fU8dt860JoHpLQIq_n5b47OyPK9nDNTptRHFR_E1TAc",
             )?)
             .await?
-            .unwrap()
-            .validate()
-            .map_err(|(_, e)| e)?;
+            .unwrap();
 
         let data_item = tx.data_item().unwrap();
         let data = data_item.data();

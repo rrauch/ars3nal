@@ -52,6 +52,7 @@ use std::fmt::{Display, Formatter};
 use std::io::{Read, SeekFrom};
 use std::ops::Range;
 use std::str::FromStr;
+use std::sync::LazyLock;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -132,6 +133,11 @@ pub enum Bundle {
 }
 
 pub type BundleId = TxId;
+
+pub(crate) static PLACEHOLDER_BUNDLE_ID: LazyLock<BundleId> = LazyLock::new(|| {
+    BundleId::from_str("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        .expect("bundle id to be valid")
+});
 
 impl Bundle {
     #[inline]
@@ -276,11 +282,13 @@ impl BundleItemReader {
     pub async fn read_async<R: AsyncRead + AsyncSeek + Send + Unpin>(
         entry: &BundleEntry<'_>,
         mut reader: R,
+        bundle_id: BundleId,
     ) -> Result<(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>), Error> {
         match entry {
             BundleEntry::V2(entry) => {
                 reader.seek(SeekFrom::Start(entry.offset())).await?;
-                let (item, data_verifier) = v2::BundleItem::read_async(reader, entry.len()).await?;
+                let (item, data_verifier) =
+                    v2::BundleItem::read_async(reader, entry.len(), bundle_id).await?;
                 Ok((
                     UnvalidatedBundleItem::from_v2(item, entry.id())?,
                     data_verifier.into(),
@@ -370,10 +378,11 @@ impl UnvalidatedBundleItem<'static> {
     pub fn read<R: Read>(
         reader: R,
         entry: &BundleEntry<'_>,
+        bundle_id: BundleId,
     ) -> Result<(Self, BundleItemVerifier<'static>), Error> {
         match entry {
             BundleEntry::V2(e) => {
-                let (item, data_verifier) = V2BundleItem::read(reader, e.len())?;
+                let (item, data_verifier) = V2BundleItem::read(reader, e.len(), bundle_id)?;
                 let this = Self::from_v2(item, entry.id())?;
                 Ok((
                     this,
@@ -386,10 +395,12 @@ impl UnvalidatedBundleItem<'static> {
     pub async fn read_async<R: AsyncRead + Unpin>(
         reader: R,
         entry: &BundleEntry<'_>,
+        bundle_id: BundleId,
     ) -> Result<(Self, BundleItemVerifier<'static>), Error> {
         match entry {
             BundleEntry::V2(e) => {
-                let (item, data_verifier) = V2BundleItem::read_async(reader, e.len()).await?;
+                let (item, data_verifier) =
+                    V2BundleItem::read_async(reader, e.len(), bundle_id).await?;
                 let this = Self::from_v2(item, entry.id())?;
                 Ok((
                     this,
@@ -414,6 +425,13 @@ impl<'a, const VALIDATED: bool> BundleItem<'a, VALIDATED> {
     pub fn id(&self) -> &BundleItemId {
         match self {
             Self::V2(v2) => v2.id(),
+        }
+    }
+
+    #[inline]
+    pub fn bundle_id(&self) -> &BundleId {
+        match self {
+            Self::V2(v2) => v2.bundle_id(),
         }
     }
 

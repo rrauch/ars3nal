@@ -8,7 +8,8 @@ use crate::bundle::v2::{
     V2BundleItemHash,
 };
 use crate::bundle::{
-    BundleAnchor, BundleItemError, BundleItemHash, BundleItemId, BundleItemIdError, Error, TagError,
+    BundleAnchor, BundleId, BundleItemError, BundleItemHash, BundleItemId, BundleItemIdError,
+    Error, TagError,
 };
 use crate::crypto::hash::HashableExt;
 use crate::tag::Tag;
@@ -23,6 +24,7 @@ use std::marker::PhantomData;
 #[derive(Clone, Debug, PartialEq)]
 pub struct BundleItem<'a, const VALIDATED: bool = false> {
     id: BundleItemId,
+    bundle_id: BundleId,
     anchor: Option<BundleAnchor>,
     tags: Vec<Tag<'a>>,
     target: Option<WalletAddress>,
@@ -36,6 +38,11 @@ impl<'a, const VALIDATED: bool> BundleItem<'a, VALIDATED> {
     #[inline]
     pub fn id(&self) -> &BundleItemId {
         &self.id
+    }
+
+    #[inline]
+    pub fn bundle_id(&self) -> &BundleId {
+        &self.bundle_id
     }
 
     #[inline]
@@ -96,6 +103,7 @@ impl UnvalidatedItem<'static> {
     #[inline]
     pub(super) fn try_from_raw(
         raw: RawBundleItem<'static>,
+        bundle_id: BundleId,
     ) -> Result<(Self, BundleItemDataVerifier<'static>), BundleItemError> {
         let hash = BundleItemHash::from(raw.hash());
         let signature_data =
@@ -111,6 +119,7 @@ impl UnvalidatedItem<'static> {
         }
         let item = Self {
             id,
+            bundle_id,
             anchor: raw
                 .anchor
                 .map(|blob| BundleAnchor::try_from(blob))
@@ -134,15 +143,18 @@ impl UnvalidatedItem<'static> {
     pub(crate) fn read<R: Read>(
         reader: R,
         len: u64,
+        bundle_id: BundleId,
     ) -> Result<(Self, BundleItemDataVerifier<'static>), Error> {
         Ok(Self::try_from_raw(
             ItemReader::builder().len(len).build().process(reader)?,
+            bundle_id,
         )?)
     }
 
     pub(crate) async fn read_async<R: AsyncRead + Unpin>(
         reader: R,
         len: u64,
+        bundle_id: BundleId,
     ) -> Result<(Self, BundleItemDataVerifier<'static>), Error> {
         Ok(Self::try_from_raw(
             ItemReader::builder()
@@ -150,6 +162,7 @@ impl UnvalidatedItem<'static> {
                 .build()
                 .process_async(reader)
                 .await?,
+            bundle_id,
         )?)
     }
 }
@@ -161,6 +174,7 @@ impl<'a> SupportsValidation for UnvalidatedItem<'a> {
     fn into_valid(self, _token: BundleItemValidationToken) -> Self::Validated {
         ValidatedItem {
             id: self.id,
+            bundle_id: self.bundle_id,
             anchor: self.anchor,
             tags: self.tags,
             target: self.target,

@@ -59,7 +59,10 @@ impl Flow for ItemReader {
 #[bon]
 impl ItemReader {
     #[builder]
-    pub fn new(len: u64, #[builder(default = 64 * 1024)] buffer_capacity: usize) -> Self {
+    pub fn new(
+        len: u64,
+        #[builder(default = 64 * 1024)] buffer_capacity: usize,
+    ) -> Self {
         let ctx = ItemReaderCtx {
             len,
             pos: 0,

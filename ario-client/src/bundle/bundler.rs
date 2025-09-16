@@ -1047,12 +1047,7 @@ mod tests {
 
         println!("tx_id: {}, block_height: {}", tx_id, block_height);
 
-        let tx = client
-            .tx_by_id(&tx_id)
-            .await?
-            .unwrap()
-            .validate()
-            .map_err(|(_, err)| err)?;
+        let tx = client.tx_by_id(&tx_id).await?.unwrap();
 
         assert_eq!(tx.data_item().unwrap().size(), tx_data_size);
 

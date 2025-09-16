@@ -420,7 +420,7 @@ impl<'a, const FULL_CHUNK_SIZE: usize> Iterator for MostlyFixedChunkMapIter<'a, 
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::chunking::{Chunk, Chunker, ChunkerExt};
+    use crate::chunking::{Chunk, ChunkerExt};
     use crate::chunking::{DefaultChunker, MostlyFixedChunker};
     use crate::crypto::hash::Hasher;
     use std::fs::File;
