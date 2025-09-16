@@ -1,7 +1,7 @@
 use crate::Client;
 use crate::tx::Offset;
 use ario_core::blob::OwnedBlob;
-use ario_core::chunking::{ChunkMap, Chunker, DefaultChunker};
+use ario_core::chunking::{Chunker, DefaultChunker, MostlyFixedChunkMap};
 use ario_core::data::{DataItem, DataRoot, MaybeOwnedExternalDataItem};
 use ario_core::tx::{TxId, ValidatedTx};
 use bytes::Buf;
@@ -82,7 +82,7 @@ pub(crate) struct TxDataSource<'a> {
     tx: &'a ValidatedTx<'a>,
     tx_offset: Offset,
     data_item: MaybeOwnedExternalDataItem<'a>,
-    chunk_map: ChunkMap,
+    chunk_map: MostlyFixedChunkMap<{ 256 * 1024 }>,
 }
 
 pub type AsyncTxReader<'a> = AsyncDataReader<TxDataSource<'a>>;
@@ -95,8 +95,7 @@ impl<'a> AsyncTxReader<'a> {
             None => Err(Error::NoDataItem(tx.id().clone()))?,
         };
         let tx_offset = client.tx_offset(tx.id()).await?;
-        let chunk_map =
-            DefaultChunker::chunk_map(data_item.data_size()).ok_or(Error::UnsupportedDataItem)?;
+        let chunk_map = DefaultChunker::chunk_map(data_item.data_size());
         Ok(Self {
             pos: 0,
             len: data_item.data_size(),
@@ -118,7 +117,8 @@ trait DataSource: Send + Unpin {
 
 impl DataSource for TxDataSource<'_> {
     fn map_offset(&self, pos: u64) -> Option<(u128, u64, Range<usize>, &DataRoot)> {
-        let (chunk_range, rel_pos) = self.chunk_map.get_by_offset(pos)?;
+        let chunk_range = self.chunk_map.get_by_offset(pos)?;
+        let rel_pos = (pos - chunk_range.start) as usize;
         let len = (chunk_range.end - chunk_range.start) as usize;
 
         // chunk
