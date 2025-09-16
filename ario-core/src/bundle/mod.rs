@@ -21,6 +21,7 @@ use crate::crypto::edwards::multi_aptos::{MultiAptosEd25519, MultiAptosVerifying
 use crate::crypto::edwards::variants::{Aptos, Ed25519HexStr};
 use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
 use crate::crypto::hash::{HasherExt, Sha256, Sha384, TypedDigest};
+use crate::crypto::merkle::ProofError;
 use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::rsa::{RsaPublicKey, pss};
 use crate::crypto::signature::Scheme as SignatureScheme;
@@ -41,6 +42,7 @@ use crate::typed::{FromInner, Typed};
 use crate::validation::{SupportsValidation, ValidateExt, Validator};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk, WalletSk};
 use crate::{blob, data, entity};
+use bytes::Buf;
 use futures_lite::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
@@ -104,6 +106,8 @@ pub enum BundleItemError {
     TagError(#[from] TagError),
     #[error("data payload can not be empty")]
     EmptyPayload,
+    #[error(transparent)]
+    DataValidationFailure(#[from] ProofError),
     #[error("bundle item error: {0}")]
     Other(String),
 }
@@ -272,12 +276,15 @@ impl BundleItemReader {
     pub async fn read_async<R: AsyncRead + AsyncSeek + Send + Unpin>(
         entry: &BundleEntry<'_>,
         mut reader: R,
-    ) -> Result<UnvalidatedBundleItem<'static>, Error> {
+    ) -> Result<(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>), Error> {
         match entry {
             BundleEntry::V2(entry) => {
                 reader.seek(SeekFrom::Start(entry.offset())).await?;
                 let (item, data_verifier) = v2::BundleItem::read_async(reader, entry.len()).await?;
-                UnvalidatedBundleItem::from_v2(item, entry.id())
+                Ok((
+                    UnvalidatedBundleItem::from_v2(item, entry.id())?,
+                    data_verifier.into(),
+                ))
             }
         }
     }
@@ -889,9 +896,27 @@ pub enum BundleItemVerifier<'a> {
 }
 
 impl BundleItemVerifier<'_> {
+    #[inline]
     pub fn bundle_type(&self) -> BundleType {
         match self {
             Self::V2(_) => BundleType::V2,
+        }
+    }
+
+    #[inline]
+    pub fn verify(&self, mut data: impl Buf, proof: &BundleItemDataProof<'_>) -> Result<(), Error> {
+        match self {
+            Self::V2(v2) => match proof {
+                BundleItemDataProof::V2(proof) => Ok(v2
+                    .as_ref()
+                    .data_item()
+                    .data_root()
+                    .verify_data(&mut data, proof)
+                    .map_err(|e| Error::BundleItemError(e.into()))?),
+                /*_ => Err(BundleItemError::Other(
+                    "incorrect proof type supplied".to_string(),
+                ))?,*/
+            },
         }
     }
 }

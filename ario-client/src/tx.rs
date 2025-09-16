@@ -8,7 +8,7 @@ use crate::{Client, api};
 use ario_core::blob::Blob;
 use ario_core::data::Verifier;
 use ario_core::data::{DataItem, ExternalDataItemVerifier, MaybeOwnedExternalDataItem};
-use ario_core::tx::{LastTx, Tx, TxAnchor, TxId, UnvalidatedTx, ValidatedTx, ValidationError};
+use ario_core::tx::{LastTx, Tx, TxAnchor, TxId, UnvalidatedTx, ValidatedTx};
 use ario_core::{BlockNumber, Gateway, JsonValue};
 use async_stream::try_stream;
 use bytesize::ByteSize;
@@ -34,7 +34,7 @@ impl Api {
         &self,
         gateway: &Gateway,
         tx_id: &TxId,
-    ) -> Result<Option<UnvalidatedTx<'_>>, api::Error> {
+    ) -> Result<Option<UnvalidatedTx<'static>>, api::Error> {
         let req = ApiRequest::builder()
             .endpoint(
                 gateway
@@ -157,7 +157,10 @@ impl Api {
 }
 
 impl Client {
-    pub async fn tx_by_id(&self, tx_id: &TxId) -> Result<Option<UnvalidatedTx<'_>>, super::Error> {
+    pub async fn tx_by_id(
+        &self,
+        tx_id: &TxId,
+    ) -> Result<Option<UnvalidatedTx<'static>>, super::Error> {
         let api = &self.0.api;
         Ok(self
             .with_gw(async move |gw| api.tx_by_id(gw, tx_id).await)
@@ -167,7 +170,7 @@ impl Client {
     pub async fn validated_tx_by_id(
         &self,
         tx_id: &TxId,
-    ) -> Result<Option<ValidatedTx<'_>>, super::Error> {
+    ) -> Result<Option<ValidatedTx<'static>>, super::Error> {
         let tx = match self.tx_by_id(tx_id).await? {
             Some(tx) => tx.validate(),
             None => return Ok(None),
@@ -551,7 +554,7 @@ mod tests {
     use anyhow::bail;
     use ario_core::Gateway;
     use ario_core::crypto::hash::{Hasher, HasherExt, Sha256};
-    use ario_core::data::{ExternalDataItemVerifier, Verifier};
+    use ario_core::data::ExternalDataItemVerifier;
     use ario_core::jwk::Jwk;
     use ario_core::network::Network;
     use ario_core::tx::{Transfer, TxBuilder, TxId};

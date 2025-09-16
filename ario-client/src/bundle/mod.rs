@@ -1,11 +1,13 @@
 mod bundler;
 
-use crate::data_reader::{AsyncDataReader, AsyncTxReader};
+use crate::data_reader::{AsyncBundleItemReader, AsyncTxReader};
 use crate::{Client, api};
 use ario_core::bundle::{
-    Bundle, BundleItemId, BundleItemReader, BundleReader, UnvalidatedBundleItem,
+    Bundle, BundleEntry, BundleItemId, BundleItemReader, BundleItemVerifier, BundleReader,
+    UnvalidatedBundleItem,
 };
-use ario_core::tx::TxId;
+use ario_core::tx::{TxId, ValidatedTx};
+use futures_lite::{AsyncRead, AsyncSeek};
 
 impl Client {
     pub async fn bundle_by_tx(&self, tx_id: &TxId) -> Result<Option<Bundle>, super::Error> {
@@ -24,15 +26,34 @@ impl Client {
 
     pub async fn bundle_item_by_id_tx(
         &self,
-        id: &BundleItemId,
+        item_id: &BundleItemId,
         tx_id: &TxId,
     ) -> Result<Option<UnvalidatedBundleItem<'static>>, super::Error> {
+        match self._bundle_item(item_id, tx_id).await? {
+            Some((_, item, ..)) => Ok(Some(item)),
+            None => Ok(None),
+        }
+    }
+
+    async fn _bundle_item(
+        &self,
+        item_id: &BundleItemId,
+        tx_id: &TxId,
+    ) -> Result<
+        Option<(
+            BundleEntry<'static>,
+            UnvalidatedBundleItem<'static>,
+            BundleItemVerifier<'static>,
+            ValidatedTx<'static>,
+        )>,
+        super::Error,
+    > {
         let bundle = match self.bundle_by_tx(tx_id).await? {
             Some(bundle) => bundle,
             None => return Ok(None),
         };
 
-        let entry = match bundle.entries().find(|e| e.id() == id) {
+        let entry = match bundle.entries().find(|e| e.id() == item_id) {
             Some(entry) => entry,
             None => return Ok(None),
         };
@@ -42,12 +63,30 @@ impl Client {
             None => return Ok(None),
         };
 
-        let mut tx_reader = AsyncDataReader::new(self.clone(), &tx).await?;
+        let mut tx_reader = AsyncTxReader::new(self.clone(), &tx).await?;
+
+        let (item, verifier) = BundleItemReader::read_async(&entry, &mut tx_reader)
+            .await
+            .map_err(api::Error::BundleError)?;
+
+        Ok(Some((entry.into_owned(), item, verifier, tx)))
+    }
+
+    pub async fn read_bundle_item(
+        &self,
+        item_id: &BundleItemId,
+        tx_id: &TxId,
+    ) -> Result<Option<impl AsyncRead + AsyncSeek + Send + Unpin + 'static>, super::Error> {
+        let (entry, item, verifier, tx) = match self._bundle_item(item_id, tx_id).await? {
+            Some((entry, item, verifier, tx, ..)) => (entry, item, verifier, tx),
+            None => return Ok(None),
+        };
+        let item = item
+            .validate()
+            .map_err(|e| api::Error::BundleError(e.into()))?;
 
         Ok(Some(
-            BundleItemReader::read_async(&entry, &mut tx_reader)
-                .await
-                .map_err(api::Error::BundleError)?,
+            AsyncBundleItemReader::new(self.clone(), entry, item, verifier, tx).await?,
         ))
     }
 }
@@ -58,9 +97,13 @@ mod tests {
     use crate::api::Api;
     use ario_core::Gateway;
     use ario_core::bundle::{BundleItemId, BundleType};
+    use ario_core::crypto::hash::{Hasher, Sha256};
     use ario_core::network::Network;
     use ario_core::tx::TxId;
+    use futures_lite::AsyncReadExt;
+    use hex_literal::hex;
     use std::str::FromStr;
+    use tokio_util::compat::FuturesAsyncReadCompatExt;
 
     fn init_tracing() {
         let _ = tracing_subscriber::fmt()
@@ -105,8 +148,36 @@ mod tests {
         //let tx_id = TxId::from_str("ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk")?;
         //let item_id = BundleItemId::from_str("UHVB0gDKDiId6XAeZlCH_9h6h6Tz0we8MuGA0CUYxPE")?;
 
-        let item = client.bundle_item_by_id_tx(&item_id, &tx_id).await?.unwrap().validate()?;
+        let item = client
+            .bundle_item_by_id_tx(&item_id, &tx_id)
+            .await?
+            .unwrap()
+            .validate()?;
         assert_eq!(item.id(), &item_id);
+
+        let len = item.data_size() as usize;
+
+        let mut read = 0;
+        let mut reader = client.read_bundle_item(&item_id, &tx_id).await?.unwrap();
+
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 64 * 1024];
+
+        loop {
+            let n = reader.read(&mut buf).await?;
+            read += n;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[0..n]);
+        }
+        assert_eq!(read, len);
+        let hash = hasher.finalize();
+        assert_eq!(
+            hash.as_slice(),
+            hex!("77a1bea6e198f36b3267f0ce8c4fc8f96c36baceb367e9145e35fa2a330dd761")
+        );
+
         Ok(())
     }
 }
