@@ -1,8 +1,8 @@
 use crate::Client;
 use crate::tx::Offset;
 use ario_core::blob::OwnedBlob;
-use ario_core::chunking::{Chunker, DefaultChunker, MostlyFixedChunkMap};
-use ario_core::data::{DataItem, DataRoot, MaybeOwnedExternalDataItem};
+use ario_core::chunking::{DefaultChunker, MostlyFixedChunkMap};
+use ario_core::data::{DataItem, MaybeOwnedExternalDataItem};
 use ario_core::tx::{TxId, ValidatedTx};
 use bytes::Buf;
 use futures_lite::{AsyncRead, AsyncSeek};
@@ -26,56 +26,42 @@ pub enum Error {
 pub(crate) struct AsyncDataReader<D: DataSource> {
     pos: u64,
     len: u64,
-    client: Client,
     state: State,
     data_source: D,
 }
 
-type RetrieveFut =
-    Pin<Box<dyn Future<Output = Result<Option<(u64, OwnedBlob)>, super::Error>> + Send>>;
+type RetrieveFut = Pin<Box<dyn Future<Output = Result<Option<Chunk>, super::Error>> + Send>>;
 
 enum State {
     Ready(Option<Chunk>),
-    Retrieving(u64, Range<usize>, RetrieveFut),
+    Retrieving(u64, RetrieveFut),
 }
 
 #[derive(Clone)]
-struct Chunk {
-    inner: Arc<ChunkInner>,
-    range: Range<usize>,
-}
+#[repr(transparent)]
+struct Chunk(Arc<(OwnedBlob, Range<u64>)>);
 
 impl Chunk {
-    fn reader(&self, abs_pos: u64) -> Option<Cursor<&[u8]>> {
-        if abs_pos < self.inner.offset {
-            return None;
-        }
-        let data_start = self.inner.offset + self.range.start as u64;
-        let data_end = self.inner.offset + self.range.end as u64;
-        if data_start >= data_end {
-            return None;
-        }
-        if abs_pos >= data_start && abs_pos < data_end {
-            let rel_start = (abs_pos - self.inner.offset) as usize;
-
-            // falls within valid range
-            let len = (data_end - (data_start + rel_start as u64)) as usize;
-            if len == 0 {
-                // end of chunk
-                return None;
-            }
-            let rel_end = rel_start + len;
-            let bytes = &self.inner.data.bytes()[rel_start..rel_end];
-            Some(Cursor::new(bytes))
-        } else {
-            None
-        }
+    fn range(&self) -> &Range<u64> {
+        &self.0.as_ref().1
     }
-}
 
-struct ChunkInner {
-    data: OwnedBlob,
-    offset: u64,
+    fn reader(&self, pos: u64) -> Option<Cursor<&[u8]>> {
+        let range = self.range();
+        if !range.contains(&pos) {
+            return None;
+        }
+
+        let range = (pos - range.start) as usize..(range.end - range.start) as usize;
+
+        if range.is_empty() {
+            return None;
+        }
+
+        Some(Cursor::new(
+            &self.0.as_ref().0.bytes()[range.start..range.end],
+        ))
+    }
 }
 
 pub(crate) struct TxDataSource<'a> {
@@ -83,6 +69,7 @@ pub(crate) struct TxDataSource<'a> {
     tx_offset: Offset,
     data_item: MaybeOwnedExternalDataItem<'a>,
     chunk_map: MostlyFixedChunkMap<{ 256 * 1024 }>,
+    client: Client,
 }
 
 pub type AsyncTxReader<'a> = AsyncDataReader<TxDataSource<'a>>;
@@ -99,38 +86,40 @@ impl<'a> AsyncTxReader<'a> {
         Ok(Self {
             pos: 0,
             len: data_item.data_size(),
-            client,
             state: State::Ready(None),
             data_source: TxDataSource {
                 data_item,
                 tx,
                 tx_offset,
                 chunk_map,
+                client,
             },
         })
     }
 }
 
 trait DataSource: Send + Unpin {
-    fn map_offset(&self, pos: u64) -> Option<(u128, u64, Range<usize>, &DataRoot)>;
+    fn chunk_range(&self, pos: u64) -> Option<Range<u64>>;
+
+    fn retrieve_chunk(&self, chunk_range: Range<u64>) -> RetrieveFut;
 }
 
 impl DataSource for TxDataSource<'_> {
-    fn map_offset(&self, pos: u64) -> Option<(u128, u64, Range<usize>, &DataRoot)> {
-        let chunk_range = self.chunk_map.get_by_offset(pos)?;
-        let rel_pos = (pos - chunk_range.start) as usize;
-        let len = (chunk_range.end - chunk_range.start) as usize;
+    fn chunk_range(&self, pos: u64) -> Option<Range<u64>> {
+        self.chunk_map.get_by_offset(pos)
+    }
 
-        // chunk
-        let chunk_abs_pos = self.tx_offset.absolute(chunk_range.start);
-        let range = rel_pos..(rel_pos + len);
+    fn retrieve_chunk(&self, chunk: Range<u64>) -> RetrieveFut {
+        let chunk_abs_pos = self.tx_offset.absolute(chunk.start);
+        let client = self.client.clone();
+        let data_root = self.data_item.data_root().clone();
 
-        Some((
-            chunk_abs_pos,
-            chunk_range.start,
-            range,
-            self.data_item.data_root(),
-        ))
+        Box::pin(async move {
+            Ok(client
+                .retrieve_chunk(chunk_abs_pos, chunk.start, &data_root)
+                .await?
+                .map(|blob| Chunk(Arc::new((blob, chunk)))))
+        })
     }
 }
 
@@ -140,32 +129,24 @@ impl<D: DataSource> AsyncDataReader<D> {
     }
 
     fn retrieve_chunk(&mut self, pos: u64) -> Result<(), std::io::Error> {
-        let (tx_pos, chunk_pos, chunk_range, data_root) = self
+        let chunk_range = self
             .data_source
-            .map_offset(pos)
+            .chunk_range(pos)
             .ok_or(std::io::Error::other("seeking beyond eof is not allowed"))?;
-        let client = self.client.clone();
-        let data_root = data_root.clone();
-        let fut = Box::pin(async move {
-            client
-                .download_chunk(tx_pos, chunk_pos, &data_root)
-                .await
-                .map(|bytes| bytes.map(|bytes| (chunk_pos, bytes)))
-        });
-        self.state = State::Retrieving(pos, chunk_range, fut);
+        let fut = self.data_source.retrieve_chunk(chunk_range);
+        self.state = State::Retrieving(pos, fut);
         Ok(())
     }
 
     fn on_chunk(
         &mut self,
         retrieving_pos: u64,
-        range: Range<usize>,
         mut fut: RetrieveFut,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         match fut.poll(cx) {
             Poll::Pending => {
-                self.state = State::Retrieving(retrieving_pos, range, fut);
+                self.state = State::Retrieving(retrieving_pos, fut);
                 Poll::Pending
             }
             Poll::Ready(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
@@ -173,14 +154,8 @@ impl<D: DataSource> AsyncDataReader<D> {
                 ErrorKind::UnexpectedEof,
                 "chunk not found",
             ))),
-            Poll::Ready(Ok(Some((offset, bytes)))) => {
-                self.state = State::Ready(Some(Chunk {
-                    range,
-                    inner: Arc::new(ChunkInner {
-                        data: bytes,
-                        offset,
-                    }),
-                }));
+            Poll::Ready(Ok(Some(chunk))) => {
+                self.state = State::Ready(Some(chunk));
                 Poll::Ready(Ok(()))
             }
         }
@@ -232,11 +207,11 @@ impl<D: DataSource> AsyncRead for AsyncDataReader<D> {
                     }
                 }
                 State::Ready(None) => this.retrieve_chunk(pos)?,
-                State::Retrieving(retr_pos, range, fut) => {
+                State::Retrieving(retr_pos, fut) => {
                     if retr_pos != pos {
                         continue;
                     }
-                    ready!(this.on_chunk(retr_pos, range, fut, cx))?;
+                    ready!(this.on_chunk(retr_pos, fut, cx))?;
                 }
             }
         }
@@ -272,11 +247,11 @@ impl<D: DataSource> AsyncSeek for AsyncDataReader<D> {
                         return Poll::Ready(Ok(pos));
                     }
                 }
-                State::Retrieving(retrieving_pos, range, fut) => {
+                State::Retrieving(retrieving_pos, fut) => {
                     if retrieving_pos != pos {
                         continue;
                     }
-                    ready!(this.on_chunk(retrieving_pos, range, fut, cx))?;
+                    ready!(this.on_chunk(retrieving_pos, fut, cx))?;
                 }
                 State::Ready(None) => this.retrieve_chunk(pos)?,
             }
@@ -287,11 +262,9 @@ impl<D: DataSource> AsyncSeek for AsyncDataReader<D> {
 #[cfg(test)]
 mod tests {
     use crate::Client;
-    use crate::api::Api;
     use crate::data_reader::AsyncDataReader;
     use ario_core::Gateway;
     use ario_core::crypto::hash::{Hasher, Sha256};
-    use ario_core::network::Network;
     use ario_core::tx::TxId;
     use futures_lite::AsyncReadExt;
     use hex_literal::hex;
@@ -308,7 +281,6 @@ mod tests {
     #[tokio::test]
     async fn read_tx() -> anyhow::Result<()> {
         init_tracing();
-        let api = Api::new(reqwest::Client::new(), Network::default(), false);
         let client = Client::builder()
             .enable_netwatch(false)
             .gateways(vec![Gateway::from_str("https://arweave.net")?].into_iter())
@@ -339,7 +311,7 @@ mod tests {
             hasher.update(&buf[0..n]);
         }
 
-        let mut hash = hasher.finalize();
+        let hash = hasher.finalize();
         assert_eq!(
             hash.as_slice(),
             hex!("87a46b9a4720751cfe182b55c75ea49363e4dc55ec7c2d759c9c03ab62a64717")

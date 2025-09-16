@@ -746,7 +746,7 @@ mod tests {
         let data_root = verifier.data_item().data_root();
         let mut total = 0;
         while let Some(chunk) = client
-            .download_chunk(tx_offset.absolute(total), total, data_root)
+            .retrieve_chunk(tx_offset.absolute(total), total, data_root)
             .await?
         {
             total += chunk.len() as u64;

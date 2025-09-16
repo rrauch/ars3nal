@@ -127,7 +127,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn download_chunk(
+    pub async fn retrieve_chunk(
         &self,
         offset: u128,
         relative_offset: u64,
@@ -254,7 +254,7 @@ mod tests {
         let mut total = 0;
 
         while let Some(chunk) = client
-            .download_chunk(tx_offset.absolute(total), total, data_root)
+            .retrieve_chunk(tx_offset.absolute(total), total, data_root)
             .await?
         {
             total += chunk.len() as u64;
@@ -301,7 +301,7 @@ mod tests {
         let mut total = 0;
 
         while let Some(chunk) = client
-            .download_chunk(tx_offset.absolute(total), total, data_root)
+            .retrieve_chunk(tx_offset.absolute(total), total, data_root)
             .await?
         {
             total += chunk.len() as u64;
