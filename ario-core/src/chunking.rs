@@ -418,12 +418,117 @@ impl<'a, const FULL_CHUNK_SIZE: usize> Iterator for MostlyFixedChunkMapIter<'a, 
     }
 }
 
+pub struct AlignedChunker<H: Hasher, const MAX_CHUNK_SIZE: usize> {
+    offset: u64,
+    pos: u64,
+    current_chunk_start: u64,
+    current_chunk_remaining: usize,
+    hasher: H,
+    chunk_map: MostlyFixedChunkMap<MAX_CHUNK_SIZE>,
+}
+
+impl<H: Hasher, const MAX_CHUNK_SIZE: usize> AlignedChunker<H, MAX_CHUNK_SIZE> {
+    pub fn new(offset: u64, chunk_map: MostlyFixedChunkMap<MAX_CHUNK_SIZE>) -> Self {
+        let (current_chunk_start, current_chunk_remaining) = Self::calc_chunk(&chunk_map, offset);
+        Self {
+            offset,
+            pos: offset,
+            current_chunk_start,
+            current_chunk_remaining,
+            hasher: H::new(),
+            chunk_map,
+        }
+    }
+
+    fn calc_chunk(chunk_map: &MostlyFixedChunkMap<MAX_CHUNK_SIZE>, offset: u64) -> (u64, usize) {
+        let current_chunk = chunk_map
+            .get_by_offset(offset)
+            .unwrap_or_else(|| offset..offset + MAX_CHUNK_SIZE as u64);
+        let len = (current_chunk.end - offset) as usize;
+        (offset, len)
+    }
+
+    fn advance(&mut self, len: usize) -> Option<Chunk<Self>> {
+        assert!(len <= self.current_chunk_remaining);
+        let mut chunk = None;
+        self.current_chunk_remaining -= len;
+        self.pos += len as u64;
+        if self.current_chunk_remaining == 0 {
+            // chunk complete
+            let hasher = std::mem::replace(&mut self.hasher, H::new());
+            chunk = Some(Chunk::new(
+                hasher.finalize(),
+                self.current_chunk_start - self.offset,
+                (self.pos - self.current_chunk_start) as usize,
+            ));
+
+            let (next_chunk_start, next_chunk_len) = Self::calc_chunk(&self.chunk_map, self.pos);
+            self.current_chunk_remaining = next_chunk_len;
+            self.current_chunk_start = next_chunk_start;
+        }
+        chunk
+    }
+}
+
+impl<H: Hasher, const MAX_CHUNK_SIZE: usize> Chunker for AlignedChunker<H, MAX_CHUNK_SIZE> {
+    type Output = Digest<H>;
+
+    fn empty() -> Self::Output {
+        H::new().finalize()
+    }
+
+    fn single_chunk(input: &mut impl Buf, offset: u64) -> Chunk<Self> {
+        let mut hasher = H::new();
+        let len = (input.remaining() as u64) + offset;
+        while input.has_remaining() {
+            let data = input.chunk();
+            hasher.update(data);
+            input.advance(data.len());
+        }
+        Chunk {
+            output: hasher.finalize(),
+            offset: offset..len,
+        }
+    }
+
+    fn update(&mut self, input: &mut impl Buf) -> impl IntoIterator<Item = Chunk<Self>> {
+        let mut chunks = vec![];
+        while input.has_remaining() {
+            let data = input.chunk();
+            let len = min(data.len(), self.current_chunk_remaining);
+            self.hasher.update(&data[..len]);
+            if let Some(chunk) = self.advance(len) {
+                chunks.push(chunk);
+            }
+            input.advance(len);
+        }
+        chunks
+    }
+
+    fn finalize(self) -> impl IntoIterator<Item = Chunk<Self>> {
+        let mut chunks = vec![];
+        let len = (self.pos - self.current_chunk_start) as usize;
+        if len > 0 {
+            chunks.push(Chunk::new(
+                self.hasher.finalize(),
+                self.current_chunk_start - self.offset,
+                len,
+            ))
+        }
+        chunks
+    }
+
+    fn max_chunk_size() -> usize {
+        MAX_CHUNK_SIZE
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::chunking::{Chunk, ChunkerExt};
+    use crate::chunking::{AlignedChunker, Chunk, Chunker, ChunkerExt};
     use crate::chunking::{DefaultChunker, MostlyFixedChunker};
-    use crate::crypto::hash::Hasher;
+    use crate::crypto::hash::{Hasher, Sha256};
     use std::fs::File;
     use std::io::Cursor;
     use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -603,5 +708,19 @@ mod tests {
 
             Ok(())
         })
+    }
+
+    #[test]
+    fn aligned_chunker() -> anyhow::Result<()> {
+        let chunker = AlignedChunker::<Sha256, _>::new(
+            (DefaultChunker::max_chunk_size() - 100) as u64,
+            DefaultChunker::chunk_map(ONE_MB.len() as u64),
+        );
+        let data = vec![0x01u8; 256];
+        let chunks = chunker.try_from_reader(&mut Cursor::new(&data))?;
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks.get(0).as_ref().unwrap().offset, 0..100);
+        assert_eq!(chunks.get(1).as_ref().unwrap().offset, 100..256);
+        Ok(())
     }
 }
