@@ -3,6 +3,7 @@ use crate::{Client, tx};
 use ario_core::BlockNumber;
 use ario_core::blob::OwnedBlob;
 use ario_core::bundle::{BundleItemId, BundleItemVerifier, BundleType, ValidatedBundleItem};
+use ario_core::chunking::DefaultChunker;
 use ario_core::data::{DataItem, ExternalDataItemVerifier};
 use ario_core::tag::Tag;
 use ario_core::tx::v2::TxDraft;
@@ -726,7 +727,9 @@ impl Processor {
         let header = OwnedBlob::from(header.freeze());
 
         let mut combinator = BundleItemCombinator::new(header.bytes(), items.into_iter());
-        let verifier = ExternalDataItemVerifier::try_from_async_reader(&mut combinator).await?;
+        let verifier =
+            ExternalDataItemVerifier::try_from_async_reader(&mut combinator, DefaultChunker::new())
+                .await?;
         Ok((header, verifier))
     }
 }

@@ -61,9 +61,9 @@ impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize>
         }
     }
 
-    pub fn from_single_value<T: AsBlob>(value: T) -> Self {
+    pub fn from_single_value<T: AsBlob>(value: T, chunker: C) -> Self {
         Self::from_iter(
-            C::new()
+            chunker
                 .single_input(&mut value.as_blob().buf())
                 .into_iter()
                 .map(|c| MaybeOwned::from(ChunkedData::from_inner(c))),
@@ -72,9 +72,10 @@ impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize>
 
     pub async fn try_from_async_reader<T: AsyncRead + Send + Unpin>(
         reader: &mut T,
+        chunker: C,
     ) -> std::io::Result<Self> {
         Ok(Self::from_iter(
-            C::new()
+            chunker
                 .try_from_async_reader(reader)
                 .await?
                 .into_iter()

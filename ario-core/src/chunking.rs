@@ -90,7 +90,7 @@ impl<H: Hasher> ChunkInfo for Digest<H> {
 pub trait Chunker: Sized + Send {
     type Output: ChunkInfo;
     fn empty() -> Self::Output;
-    fn new() -> Self;
+    fn single_chunk(input: &mut impl Buf, offset: u64) -> Chunk<Self>;
     fn update(&mut self, input: &mut impl Buf) -> impl IntoIterator<Item = Chunk<Self>>;
     fn finalize(self) -> impl IntoIterator<Item = Chunk<Self>>;
     fn max_chunk_size() -> usize;
@@ -101,7 +101,6 @@ where
     Self: Chunker,
 {
     fn single_input(self, input: &mut impl Buf) -> Vec<Chunk<Self>>;
-    fn single_input_with_offset(self, input: &mut impl Buf, offset: u64) -> Vec<Chunk<Self>>;
     fn try_from_reader(self, reader: &mut impl Read) -> std::io::Result<Vec<Chunk<Self>>> {
         self.try_from_reader_with_buf_size::<{ 64 * 1024 }>(reader)
     }
@@ -129,14 +128,6 @@ impl<T: Chunker> ChunkerExt for T {
         let mut chunks = vec![];
         chunks.extend(self.update(input));
         chunks.extend(self.finalize());
-        chunks
-    }
-
-    fn single_input_with_offset(self, input: &mut impl Buf, offset: u64) -> Vec<Chunk<Self>> {
-        let mut chunks = self.single_input(input);
-        chunks.iter_mut().for_each(|c| {
-            c.offset = (c.offset.start + offset)..(c.offset.end + offset);
-        });
         chunks
     }
 
@@ -193,8 +184,18 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunke
         H::new().finalize()
     }
 
-    fn new() -> Self {
-        Self::new()
+    fn single_chunk(input: &mut impl Buf, offset: u64) -> Chunk<Self> {
+        let mut hasher = H::new();
+        let len = (input.remaining() as u64) + offset;
+        while input.has_remaining() {
+            let data = input.chunk();
+            hasher.update(data);
+            input.advance(data.len());
+        }
+        Chunk {
+            output: hasher.finalize(),
+            offset: offset..len,
+        }
     }
 
     fn update(&mut self, input: &mut impl Buf) -> impl IntoIterator<Item = Chunk<Self>> {

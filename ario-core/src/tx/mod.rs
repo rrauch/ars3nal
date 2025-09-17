@@ -853,6 +853,7 @@ impl Transfer {
 mod tests {
     use crate::base64::ToBase64;
     use crate::blob::Blob;
+    use crate::chunking::DefaultChunker;
     use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
     use crate::crypto::keys::SupportedSecretKey;
     use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
@@ -1076,7 +1077,7 @@ mod tests {
     fn upload_pss() -> anyhow::Result<()> {
         let wallet = Wallet::from_jwk(&Jwk::from_json(WALLET_RSA_JWK)?)?;
 
-        let data = ExternalDataItemVerifier::from_single_value(UPLOAD_DATA);
+        let data = ExternalDataItemVerifier::from_single_value(UPLOAD_DATA, DefaultChunker::new());
 
         let draft = TxBuilder::v2()
             .reward(12345)?

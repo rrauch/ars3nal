@@ -1,6 +1,6 @@
 use crate::blob::{AsBlob, Blob};
 use crate::chunking::{
-    Chunk, ChunkInfo, Chunker, ChunkerExt, DefaultChunker, IntoMaybeOwnedChunk, MaybeOwnedChunk,
+    Chunk, ChunkInfo, Chunker, DefaultChunker, IntoMaybeOwnedChunk, MaybeOwnedChunk,
 };
 use crate::crypto::hash::{Digest, Hashable, HashableExt, Hasher, Sha256};
 use crate::crypto::{Output, OutputLen};
@@ -43,11 +43,7 @@ impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleRoot<H, C, NOTE_SIZE> 
                 actual: data.remaining(),
             });
         }
-        let chunk = C::new()
-            .single_input_with_offset(data, proof.offset.start)
-            .into_iter()
-            .next()
-            .expect("chunk should exist");
+        let chunk = C::single_chunk(data, proof.offset.start);
         self.verify_chunk(&chunk, proof)
     }
 

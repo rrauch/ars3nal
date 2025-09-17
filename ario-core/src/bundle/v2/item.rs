@@ -4,8 +4,8 @@ use crate::bundle::v2::reader::FlowExt;
 use crate::bundle::v2::reader::item::ItemReader;
 use crate::bundle::v2::tag::{from_avro, to_avro};
 use crate::bundle::v2::{
-    BundleItemDataVerifier, BundleItemHashBuilder, DataDeepHash, SignatureData, SignatureType,
-    V2BundleItemHash,
+    BundleItemChunker, BundleItemDataVerifier, BundleItemHashBuilder, DataDeepHash, SignatureData,
+    SignatureType, V2BundleItemHash,
 };
 use crate::bundle::{
     BundleAnchor, BundleId, BundleItemError, BundleItemHash, BundleItemId, BundleItemIdError,
@@ -90,7 +90,10 @@ impl ValidatedItem<'_> {
             signature: signature.as_blob(),
             signature_type: self.signature_data.signature_type(),
             data_deep_hash: DataDeepHash::new_from_inner(b"".digest()), // dummy value
-            data_verifier: BundleItemDataVerifier::from_single_value(Blob::Slice(b"".as_slice())), // dummy value
+            data_verifier: BundleItemDataVerifier::from_single_value(
+                Blob::Slice(b"".as_slice()),
+                BundleItemChunker::new(),
+            ), // dummy value
         };
 
         Ok(raw.as_blob())

@@ -547,6 +547,7 @@ mod tests {
     use crate::tx::{Status, Submission};
     use anyhow::bail;
     use ario_core::Gateway;
+    use ario_core::chunking::DefaultChunker;
     use ario_core::crypto::hash::{Hasher, HasherExt, Sha256};
     use ario_core::data::ExternalDataItemVerifier;
     use ario_core::jwk::Jwk;
@@ -697,7 +698,11 @@ mod tests {
         let wallet = Wallet::from_jwk(&jwk)?;
 
         let file = tokio::fs::File::open(ONE_MB_PATH).await?;
-        let verifier = ExternalDataItemVerifier::try_from_async_reader(&mut file.compat()).await?;
+        let verifier = ExternalDataItemVerifier::try_from_async_reader(
+            &mut file.compat(),
+            DefaultChunker::new(),
+        )
+        .await?;
 
         let tx_sub = client.tx_begin().await?;
 
