@@ -8,6 +8,9 @@ use bytemuck::TransparentWrapper;
 use bytes::Bytes;
 use derive_where::derive_where;
 use digest::FixedOutputReset;
+use hybrid_array::Array;
+use hybrid_array::sizes::U32;
+use sha3::Keccak256;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use uuid::Uuid;
@@ -20,6 +23,30 @@ pub type Sha384Hash = Digest<Sha384>;
 
 pub type Sha512 = sha2::Sha512;
 pub type Sha512Hash = Digest<Sha512>;
+
+pub type Blake3 = blake3::Hasher;
+
+impl Hasher for blake3::Hasher {
+    type Output = Array<u8, U32>;
+
+    fn new() -> Self {
+        blake3::Hasher::new()
+    }
+
+    fn update(&mut self, data: impl AsRef<[u8]>) {
+        self.update(data.as_ref());
+    }
+
+    fn finalize(self) -> Digest<Self>
+    where
+        Self: Sized,
+    {
+        let hash: [u8; 32] = blake3::Hasher::finalize(&self).into();
+        Digest::from_inner(Array::from(hash))
+    }
+}
+
+pub type Blake3Hash = Digest<Blake3>;
 
 pub type TypedDigest<T, H: Hasher> = Typed<T, Digest<H>>;
 
@@ -168,10 +195,17 @@ pub trait Hasher: Send + Sync {
         Self: Sized;
 }
 
+trait SupportedDigest {}
+impl SupportedDigest for Sha256 {}
+impl SupportedDigest for Sha384 {}
+impl SupportedDigest for Sha512 {}
+impl SupportedDigest for Keccak256 {}
+
 impl<H> Hasher for H
 where
     H: digest::Digest + Send + Sync,
     <H as digest::OutputSizeUser>::OutputSize: Send + Sync,
+    H: SupportedDigest,
 {
     type Output = digest::Output<Self>;
 

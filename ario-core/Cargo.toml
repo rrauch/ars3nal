@@ -9,6 +9,7 @@ anyhow = { workspace = true }
 bigdecimal = { version = "0.4", features = ["serde-json"] }
 bip32 = { version = "0.5", features = ["k256"] }
 bip39 = { version = "2.2", features = ["zeroize"] }
+blake3 = { version = "1.8", default-features = false, features = ["std", "prefer_intrinsics"] }
 bon = { workspace = true }
 bytemuck = { version = "1.23", features = ["derive"] }
 bytes = { workspace = true }

@@ -16,7 +16,7 @@ use crate::chunking::{AlignedChunker, Chunk, Chunker, DefaultChunker};
 use crate::crypto::ec::ethereum::{EthereumAddress, EthereumPublicKeyExt};
 use crate::crypto::edwards::multi_aptos;
 use crate::crypto::hash::deep_hash::DeepHashable;
-use crate::crypto::hash::{Digest, Hasher, Sha256, Sha384, TypedDigest, deep_hash};
+use crate::crypto::hash::{Blake3, Digest, Hasher, Sha384, TypedDigest, deep_hash};
 use crate::crypto::keys::SecretKey;
 use crate::crypto::merkle::{MerkleRoot, MerkleTree, Proof};
 use crate::crypto::signature::Scheme as SignatureScheme;
@@ -747,17 +747,17 @@ type DataDeepHash = TypedDigest<BundleItemDataKind, Sha384>;
 struct BundleItemTagsKind;
 type TagsDeepHash = TypedDigest<BundleItemTagsKind, Sha384>;
 
-type BundleItemChunker = AlignedChunker<Sha256, { 256 * 1024 }>;
-pub(super) type BundleItemMerkleRoot = MerkleRoot<Sha256, BundleItemChunker, 32>;
-pub(super) type BundleItemMerkleTree<'a> = MerkleTree<'a, Sha256, BundleItemChunker, 32>;
+type BundleItemChunker = AlignedChunker<Blake3, { 256 * 1024 }>;
+pub(super) type BundleItemMerkleRoot = MerkleRoot<Blake3, BundleItemChunker, 32>;
+pub(super) type BundleItemMerkleTree<'a> = MerkleTree<'a, Blake3, BundleItemChunker, 32>;
 
 pub type DataRoot = BundleItemMerkleRoot;
 pub(super) type MaybeOwnedDataRoot<'a> = MaybeOwned<'a, DataRoot>;
-pub type BundleItemProof<'a> = Proof<'a, Sha256, BundleItemChunker, 32>;
+pub type BundleItemProof<'a> = Proof<'a, Blake3, BundleItemChunker, 32>;
 
-pub type BundleItemDataVerifier<'a> = MerkleDataItemVerifier<'a, Sha256, BundleItemChunker, 32>;
+pub type BundleItemDataVerifier<'a> = MerkleDataItemVerifier<'a, Blake3, BundleItemChunker, 32>;
 
-pub type BundleDataItem<'a> = MerkleVerifiableDataItem<'a, Sha256, BundleItemChunker, 32>;
+pub type BundleDataItem<'a> = MerkleVerifiableDataItem<'a, Blake3, BundleItemChunker, 32>;
 
 #[cfg(test)]
 mod tests {
