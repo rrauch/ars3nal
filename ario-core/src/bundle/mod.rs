@@ -9,12 +9,12 @@ pub use v2::{
 
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
-use crate::bundle::v2::FlowExt;
 use crate::bundle::v2::{
     BundleItemDataVerifier as V2BundleItemVerifier, BundleItemValidator as V2BundleItemValidator,
     MaybeOwnedDataRoot as V2MaybeOwnedDataRoot, SignatureType, V2BundleItemBuilder,
     V2BundleItemHash,
 };
+use crate::bundle::v2::{ContainerLocation, FlowExt};
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ethereum::{Eip191, Eip712};
 use crate::crypto::edwards::multi_aptos::{MultiAptosEd25519, MultiAptosVerifyingKey};
@@ -197,9 +197,9 @@ impl BundleEntry<'_> {
     }
 
     #[inline]
-    pub fn offset(&self) -> u64 {
+    pub fn container_location(&self) -> &ContainerLocation {
         match self {
-            Self::V2(e) => e.offset(),
+            Self::V2(e) => e.container_location(),
         }
     }
 
@@ -286,9 +286,14 @@ impl BundleItemReader {
     ) -> Result<(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>), Error> {
         match entry {
             BundleEntry::V2(entry) => {
-                reader.seek(SeekFrom::Start(entry.offset())).await?;
-                let (item, data_verifier) =
-                    v2::BundleItem::read_async(reader, entry.len(), bundle_id).await?;
+                reader.seek(SeekFrom::Start(entry.container_location().offset())).await?;
+                let (item, data_verifier) = v2::BundleItem::read_async(
+                    reader,
+                    entry.len(),
+                    Some(entry.container_location().clone()),
+                    bundle_id,
+                )
+                .await?;
                 Ok((
                     UnvalidatedBundleItem::from_v2(item, entry.id())?,
                     data_verifier.into(),
@@ -392,7 +397,12 @@ impl UnvalidatedBundleItem<'static> {
     ) -> Result<(Self, BundleItemVerifier<'static>), Error> {
         match entry {
             BundleEntry::V2(e) => {
-                let (item, data_verifier) = V2BundleItem::read(reader, e.len(), bundle_id)?;
+                let (item, data_verifier) = V2BundleItem::read(
+                    reader,
+                    e.len(),
+                    Some(entry.container_location().clone()),
+                    bundle_id,
+                )?;
                 let this = Self::from_v2(item, entry.id())?;
                 Ok((
                     this,
@@ -409,8 +419,13 @@ impl UnvalidatedBundleItem<'static> {
     ) -> Result<(Self, BundleItemVerifier<'static>), Error> {
         match entry {
             BundleEntry::V2(e) => {
-                let (item, data_verifier) =
-                    V2BundleItem::read_async(reader, e.len(), bundle_id).await?;
+                let (item, data_verifier) = V2BundleItem::read_async(
+                    reader,
+                    e.len(),
+                    Some(e.container_location().clone()),
+                    bundle_id,
+                )
+                .await?;
                 let this = Self::from_v2(item, entry.id())?;
                 Ok((
                     this,

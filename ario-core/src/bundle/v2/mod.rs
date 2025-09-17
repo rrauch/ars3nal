@@ -12,7 +12,7 @@ use crate::bundle::{
     BundleAnchor, BundleId, BundleItemError, BundleItemHash, BundleItemId, BundleItemKind,
     BundleItemSignatureScheme, Error, KyveSignatureData, Owner, PLACEHOLDER_BUNDLE_ID, Signature,
 };
-use crate::chunking::{Chunk, Chunker, MostlyFixedChunker};
+use crate::chunking::{AlignedChunker, Chunk, Chunker, DefaultChunker};
 use crate::crypto::ec::ethereum::{EthereumAddress, EthereumPublicKeyExt};
 use crate::crypto::edwards::multi_aptos;
 use crate::crypto::hash::deep_hash::DeepHashable;
@@ -94,7 +94,10 @@ impl Bundle {
 
     #[inline]
     pub fn total_size(&self) -> u64 {
-        self.entries.last().map(|e| e.offset + e.len).unwrap_or(0)
+        self.entries
+            .last()
+            .map(|e| e.container_location.offset + e.len)
+            .unwrap_or(0)
     }
 
     #[inline]
@@ -106,8 +109,8 @@ impl Bundle {
 #[derive(Debug, Clone)]
 pub struct BundleEntry {
     id: BundleItemId,
-    offset: u64,
     len: u64,
+    container_location: ContainerLocation,
 }
 
 impl BundleEntry {
@@ -117,13 +120,13 @@ impl BundleEntry {
     }
 
     #[inline]
-    pub fn offset(&self) -> u64 {
-        self.offset
+    pub fn len(&self) -> u64 {
+        self.len
     }
 
     #[inline]
-    pub fn len(&self) -> u64 {
-        self.len
+    pub fn container_location(&self) -> &ContainerLocation {
+        &self.container_location
     }
 }
 
@@ -277,10 +280,40 @@ pub struct BundleItemDataProcessor {
     processed: u64,
 }
 
-impl BundleItemDataProcessor {
-    pub(crate) fn new() -> Self {
+#[derive(Debug, Clone)]
+pub struct ContainerLocation {
+    offset: u64,
+    container_size: u64,
+}
+
+impl ContainerLocation {
+    pub fn new(container_size: u64, offset_in_container: u64) -> Self {
         Self {
-            chunker: BundleItemChunker::new(),
+            offset: offset_in_container,
+            container_size,
+        }
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+}
+
+impl Default for ContainerLocation {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            container_size: u64::MAX,
+        }
+    }
+}
+
+impl BundleItemDataProcessor {
+    pub(crate) fn new(container_location: Option<ContainerLocation>) -> Self {
+        let container_location = container_location.unwrap_or_default();
+        let chunk_map = DefaultChunker::chunk_map(container_location.container_size);
+        Self {
+            chunker: BundleItemChunker::new(container_location.offset, chunk_map),
             chunks: vec![],
             hasher: Sha384::new(),
             processed: 0,
@@ -313,7 +346,7 @@ impl BundleItemDataProcessor {
     }
 
     pub fn from_single_value<T: AsBlob>(value: T) -> ProcessedDataItem {
-        let mut this = Self::new();
+        let mut this = Self::new(None);
         this.update(&mut value.as_blob().buf());
         this.finalize()
     }
@@ -321,7 +354,7 @@ impl BundleItemDataProcessor {
     pub async fn try_from_async_reader<T: AsyncRead + Send + Unpin>(
         reader: &mut T,
     ) -> std::io::Result<ProcessedDataItem> {
-        let mut this = Self::new();
+        let mut this = Self::new(None);
         let mut buf = HeapCircularBuffer::new(1024 * 64);
         loop {
             buf.reset();
@@ -334,7 +367,7 @@ impl BundleItemDataProcessor {
     }
 
     pub fn try_from_reader<T: Read>(reader: &mut T) -> std::io::Result<ProcessedDataItem> {
-        let mut this = Self::new();
+        let mut this = Self::new(None);
         let mut buf = HeapCircularBuffer::new(1024 * 64);
         loop {
             buf.reset();
@@ -714,7 +747,7 @@ type DataDeepHash = TypedDigest<BundleItemDataKind, Sha384>;
 struct BundleItemTagsKind;
 type TagsDeepHash = TypedDigest<BundleItemTagsKind, Sha384>;
 
-type BundleItemChunker = MostlyFixedChunker<Sha256, DATA_CHUNK_SIZE, DATA_CHUNK_SIZE>;
+type BundleItemChunker = AlignedChunker<Sha256, { 256 * 1024 }>;
 pub(super) type BundleItemMerkleRoot = MerkleRoot<Sha256, BundleItemChunker, 32>;
 pub(super) type BundleItemMerkleTree<'a> = MerkleTree<'a, Sha256, BundleItemChunker, 32>;
 
@@ -784,9 +817,11 @@ mod tests {
                 .await?;
 
             for entry in bundle.entries {
-                input.seek(SeekFrom::Start(entry.offset)).await?;
+                input
+                    .seek(SeekFrom::Start(entry.container_location.offset))
+                    .await?;
                 let (item, data_verifier) =
-                    BundleItem::read_async(&mut input, entry.len, bundle_id.clone()).await?;
+                    BundleItem::read_async(&mut input, entry.len, None, bundle_id.clone()).await?;
                 let item = item.validate().map_err(|(_, e)| e)?;
                 assert_eq!(item.id(), &entry.id);
                 let data_root = data_verifier.data_item().data_root();
@@ -796,7 +831,7 @@ mod tests {
                 for chunk in data_verifier.chunks() {
                     input
                         .seek(SeekFrom::Start(
-                            entry.offset + item.data_offset() + chunk.start,
+                            entry.container_location.offset + item.data_offset() + chunk.start,
                         ))
                         .await?;
                     buf.reset();
@@ -842,6 +877,7 @@ mod tests {
         let (unvalidated, _) = BundleItem::read(
             &mut std::io::Cursor::new(&bytes),
             len,
+            None,
             BundleId::from_str("FTxzaw_jnVmU3LKOrkmBQ29Mhu9cFWQkhelsI4ZY1y8")?,
         )?;
         let item = unvalidated.validate().map_err(|(_, e)| e)?;

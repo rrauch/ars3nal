@@ -4,7 +4,9 @@ use crate::bundle::Error as BundleError;
 use crate::bundle::v2::reader::{
     Context, Flow, IncrementalInputProcessor, PollResult, Result, Step, parse_u16, parse_u64,
 };
-use crate::bundle::v2::{Bundle, BundleEntry, MAX_BUNDLE_SIZE, MAX_ITEM_COUNT, MAX_ITEM_SIZE};
+use crate::bundle::v2::{
+    Bundle, BundleEntry, ContainerLocation, MAX_BUNDLE_SIZE, MAX_ITEM_COUNT, MAX_ITEM_SIZE,
+};
 use crate::bundle::{BundleId, BundleItemId};
 use bon::bon;
 use bytes::BufMut;
@@ -166,7 +168,10 @@ impl Entries {
                 size = size.saturating_add(len);
                 BundleEntry {
                     id,
-                    offset: size.saturating_sub(len),
+                    container_location: ContainerLocation::new(
+                        0, // placeholder, updated to actual value below
+                        size.saturating_sub(len),
+                    ),
                     len,
                 }
             })
@@ -174,11 +179,11 @@ impl Entries {
 
         let header_len = (32 + (entries.len() * 64)) as u64;
 
-        entries
-            .iter_mut()
-            .for_each(|e| e.offset = e.offset.saturating_add(header_len));
+        entries.iter_mut().for_each(|e| {
+            e.container_location.offset = e.container_location.offset.saturating_add(header_len)
+        });
 
-        let bundle = Bundle {
+        let mut bundle = Bundle {
             id: id.clone(),
             entries,
         };
@@ -189,6 +194,12 @@ impl Entries {
                 actual: total_size,
             })?;
         }
+
+        bundle
+            .entries
+            .iter_mut()
+            .for_each(|e| e.container_location.container_size = total_size);
+
         Ok(bundle)
     }
 

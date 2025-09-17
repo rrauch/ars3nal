@@ -100,8 +100,9 @@ mod tests {
     use crate::Client;
     use crate::api::Api;
     use ario_core::Gateway;
+    use ario_core::blob::Blob;
     use ario_core::bundle::{BundleItemId, BundleType};
-    use ario_core::crypto::hash::{Hasher, Sha256};
+    use ario_core::crypto::hash::{Hasher, Sha256, Sha256Hash};
     use ario_core::network::Network;
     use ario_core::tx::TxId;
     use futures_lite::AsyncReadExt;
@@ -113,6 +114,44 @@ mod tests {
             .with_max_level(tracing::Level::TRACE)
             .with_test_writer()
             .try_init();
+    }
+
+    async fn read_bundle_item(
+        tx_id: TxId,
+        item_id: BundleItemId,
+        expected_hash: Sha256Hash,
+    ) -> anyhow::Result<()> {
+        init_tracing();
+        let api = Api::new(reqwest::Client::new(), Network::default(), false);
+        let client = Client::builder()
+            .enable_netwatch(false)
+            .gateways(vec![Gateway::from_str("https://arweave.net")?].into_iter())
+            .build();
+
+        let item = client.bundle_item(&item_id, &tx_id).await?.unwrap();
+        assert_eq!(item.id(), &item_id);
+
+        let len = item.data_size() as usize;
+
+        let mut read = 0;
+        let mut reader = client.read_bundle_item(&item).await?.unwrap();
+
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 64 * 1024];
+
+        loop {
+            let n = reader.read(&mut buf).await?;
+            read += n;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[0..n]);
+        }
+        assert_eq!(read, len);
+        let hash = hasher.finalize();
+        assert_eq!(hash.as_slice(), expected_hash.as_slice(),);
+
+        Ok(())
     }
 
     #[ignore]
@@ -137,46 +176,23 @@ mod tests {
 
     #[ignore]
     #[tokio::test]
-    async fn read_bundle_item() -> anyhow::Result<()> {
-        init_tracing();
-        let api = Api::new(reqwest::Client::new(), Network::default(), false);
-        let client = Client::builder()
-            .enable_netwatch(false)
-            .gateways(vec![Gateway::from_str("https://arweave.net")?].into_iter())
-            .build();
-
+    async fn read_small_bundle_item() -> anyhow::Result<()> {
         let tx_id = TxId::from_str("XthaAp3q8Akx1_nqwxSKUtc0JlE-4wAoIavJYv8Dvaw")?;
         let item_id = BundleItemId::from_str("jryeiuBu2rCeWwTUXzU24OPoV4VShl2HYVyjclFe0yQ")?;
+        let expected_hash = Sha256Hash::try_from(Blob::Slice(&hex!(
+            "77a1bea6e198f36b3267f0ce8c4fc8f96c36baceb367e9145e35fa2a330dd761"
+        )))?;
+        read_bundle_item(tx_id, item_id, expected_hash).await
+    }
 
-        //let tx_id = TxId::from_str("ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk")?;
-        //let item_id = BundleItemId::from_str("UHVB0gDKDiId6XAeZlCH_9h6h6Tz0we8MuGA0CUYxPE")?;
-
-        let item = client.bundle_item(&item_id, &tx_id).await?.unwrap();
-        assert_eq!(item.id(), &item_id);
-
-        let len = item.data_size() as usize;
-
-        let mut read = 0;
-        let mut reader = client.read_bundle_item(&item).await?.unwrap();
-
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; 64 * 1024];
-
-        loop {
-            let n = reader.read(&mut buf).await?;
-            read += n;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[0..n]);
-        }
-        assert_eq!(read, len);
-        let hash = hasher.finalize();
-        assert_eq!(
-            hash.as_slice(),
-            hex!("77a1bea6e198f36b3267f0ce8c4fc8f96c36baceb367e9145e35fa2a330dd761")
-        );
-
-        Ok(())
+    #[ignore]
+    #[tokio::test]
+    async fn read_larger_bundle_item() -> anyhow::Result<()> {
+        let tx_id = TxId::from_str("ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk")?;
+        let item_id = BundleItemId::from_str("UHVB0gDKDiId6XAeZlCH_9h6h6Tz0we8MuGA0CUYxPE")?;
+        let expected_hash = Sha256Hash::try_from(Blob::Slice(&hex!(
+            "4f76ec77b3476bcb2b37fbdf9f91ea52b407ee7d3c298d18439a1e53ff37aaf8"
+        )))?;
+        read_bundle_item(tx_id, item_id, expected_hash).await
     }
 }

@@ -4,11 +4,11 @@ mod tags;
 
 use super::{Flow, Result};
 use crate::buffer::HeapCircularBuffer;
-use crate::bundle::v2::RawBundleItem;
 use crate::bundle::v2::reader::item::data::Data;
 use crate::bundle::v2::reader::item::header::Header;
 use crate::bundle::v2::reader::item::tags::Tags;
 use crate::bundle::v2::reader::{Context, IncrementalInputProcessor};
+use crate::bundle::v2::{ContainerLocation, RawBundleItem};
 use bon::bon;
 use bytes::BufMut;
 use itertools::Either;
@@ -61,12 +61,14 @@ impl ItemReader {
     #[builder]
     pub fn new(
         len: u64,
+        container_location: Option<ContainerLocation>,
         #[builder(default = 64 * 1024)] buffer_capacity: usize,
     ) -> Self {
         let ctx = ItemReaderCtx {
             len,
             pos: 0,
             buf: HeapCircularBuffer::new(buffer_capacity),
+            container_location,
         };
         Self::Header(IncrementalInputProcessor::new(ctx, Header::new()))
     }
@@ -76,6 +78,7 @@ pub(super) struct ItemReaderCtx {
     len: u64,
     pos: u64,
     buf: HeapCircularBuffer,
+    container_location: Option<ContainerLocation>,
 }
 
 impl ItemReaderCtx {

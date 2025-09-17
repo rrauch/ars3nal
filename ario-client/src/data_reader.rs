@@ -11,7 +11,7 @@ use futures_lite::{FutureExt, ready};
 use itertools::Itertools;
 use maybe_owned::MaybeOwned;
 use rangemap::RangeMap;
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::collections::VecDeque;
 use std::io::{Cursor, ErrorKind, SeekFrom};
 use std::ops::Range;
@@ -57,14 +57,13 @@ trait Chunk: Send + Clone + Unpin {
 struct MultiChunk(Arc<(Vec<SimpleChunk>, Range<u64>)>);
 
 impl MultiChunk {
-    fn new(chunks: impl IntoIterator<Item = SimpleChunk>) -> Result<Self, Error> {
-        let mut chunks: Vec<_> = chunks.into_iter().collect();
-        chunks.sort_unstable_by(|a, b| Ord::cmp(&a.0.chunk_range.start, &b.0.chunk_range.start));
+    fn new(mut chunks: Vec<SimpleChunk>) -> Result<Self, Error> {
         if chunks.is_empty() {
             return Err(Error::IoError(std::io::Error::other(
                 "multichunk cannot be empty",
             )));
         }
+        chunks.sort_unstable_by(|a, b| Ord::cmp(&a.0.chunk_range.start, &b.0.chunk_range.start));
         let range =
             chunks.first().unwrap().0.chunk_range.start..chunks.last().unwrap().0.chunk_range.end;
         Ok(Self(Arc::new((chunks, range))))
@@ -84,7 +83,7 @@ impl<B: Buf> Buf for MultiBuf<B> {
 
     fn advance(&mut self, cnt: usize) {
         let mut remaining = cnt;
-        loop {
+        while remaining > 0 {
             match self.0.get_mut(0) {
                 Some(first) => {
                     let n = min(first.remaining(), remaining);
@@ -325,7 +324,7 @@ impl<'a> DataSource for BundleItemDataSource<'a> {
     }
 
     fn retrieve_chunk(&self, chunk_range: Range<u64>) -> RetrieveFut<Self::Chunk> {
-        let offset = self.entry.offset() + self.item.data_offset();
+        let offset = self.entry.container_location().offset() + self.item.data_offset();
         let tx_range = chunk_range.start + offset..chunk_range.end + offset;
 
         // get all underlying chunks
@@ -335,7 +334,7 @@ impl<'a> DataSource for BundleItemDataSource<'a> {
             .tx_data_source
             .chunk_map
             .iter()
-            .filter(|chunk| chunk.contains(&tx_range.start) || chunk.contains(&tx_range.end))
+            .filter(|chunk| max(tx_range.start, chunk.start) < min(tx_range.end, chunk.end))
             .collect_vec();
 
         let tx_data_source = self.tx_data_source.clone();
@@ -344,9 +343,14 @@ impl<'a> DataSource for BundleItemDataSource<'a> {
         Box::pin(async move {
             matching_chunks.sort_unstable_by(|a, b| Ord::cmp(&a.start, &b.start));
             let mut chunks = Vec::with_capacity(matching_chunks.len());
-            let mut remaining = (chunk_range.end - chunk_range.start) as usize;
+            let mut pos = chunk_range.start;
 
             for chunk in matching_chunks {
+                let remaining = (chunk_range.end - pos) as usize;
+                if remaining == 0 {
+                    break;
+                }
+
                 let mut chunk = tx_data_source
                     .retrieve_chunk(chunk)
                     .await?
@@ -356,8 +360,10 @@ impl<'a> DataSource for BundleItemDataSource<'a> {
                     )))?;
                 let inner = Arc::make_mut(&mut chunk.0);
 
-                let offset = (tx_range.start - inner.chunk_range.start) as usize;
-                inner.data_range.start = inner.data_range.start + offset;
+                let chunk_offset = (tx_range.start - inner.chunk_range.start) as usize;
+                inner.chunk_range.start =
+                    (inner.chunk_range.start + (chunk_offset as u64)) - offset;
+                inner.data_range.start = inner.data_range.start + chunk_offset;
                 let len = inner.data_range.end.saturating_sub(inner.data_range.start);
                 if len == 0 {
                     continue;
@@ -365,13 +371,8 @@ impl<'a> DataSource for BundleItemDataSource<'a> {
                 let len = min(len, remaining);
                 inner.data_range.end = inner.data_range.start + len;
                 inner.chunk_range.end = inner.chunk_range.start + (len as u64);
-                remaining -= len;
-
                 chunks.push(chunk);
-
-                if remaining == 0 {
-                    break;
-                }
+                pos += len as u64;
             }
 
             Ok(if chunks.is_empty() {
@@ -530,11 +531,15 @@ mod tests {
     use crate::Client;
     use crate::data_reader::AsyncTxReader;
     use ario_core::Gateway;
+    use ario_core::bundle::{BundleItemId, BundleItemReader, BundleReader};
     use ario_core::crypto::hash::{Hasher, Sha256};
+    use ario_core::data::Verifier;
     use ario_core::tx::TxId;
     use futures_lite::AsyncReadExt;
     use hex_literal::hex;
+    use itertools::Itertools;
     use std::str::FromStr;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
 
     fn init_tracing() {
         let _ = tracing_subscriber::fmt()
@@ -577,6 +582,42 @@ mod tests {
             hash.as_slice(),
             hex!("87a46b9a4720751cfe182b55c75ea49363e4dc55ec7c2d759c9c03ab62a64717")
         );
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn read_bundle_item_alignment_local_data() -> anyhow::Result<()> {
+        init_tracing();
+        let client = Client::builder()
+            .enable_netwatch(false)
+            .gateways(vec![Gateway::from_str("https://arweave.net")?].into_iter())
+            .build();
+
+        let tx_id = TxId::from_str("ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk")?;
+        let item_id = BundleItemId::from_str("UHVB0gDKDiId6XAeZlCH_9h6h6Tz0we8MuGA0CUYxPE")?;
+
+        let tx = client.tx_by_id(&tx_id).await?.unwrap();
+
+        let mut file =
+            tokio::fs::File::open("./testdata/ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk.tx")
+                .await?
+                .compat();
+        let bundle = BundleReader::new(&tx, &mut file).await?;
+
+        let entry = bundle.entries().find(|e| e.id() == &item_id).unwrap();
+
+        let (bundle_item, verifier) =
+            BundleItemReader::read_async(&entry, &mut file, bundle.id().clone()).await?;
+        let bundle_item = bundle_item.validate()?;
+
+        let chunks = verifier.chunks().collect_vec();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(**chunks.get(0).unwrap(), 0..204794);
+        assert_eq!(**chunks.get(1).unwrap(), 204794..466938);
+        assert_eq!(**chunks.get(2).unwrap(), 466938..598382);
+
+
         Ok(())
     }
 }

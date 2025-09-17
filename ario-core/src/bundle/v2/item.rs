@@ -4,13 +4,14 @@ use crate::bundle::v2::reader::FlowExt;
 use crate::bundle::v2::reader::item::ItemReader;
 use crate::bundle::v2::tag::{from_avro, to_avro};
 use crate::bundle::v2::{
-    BundleItemChunker, BundleItemDataVerifier, BundleItemHashBuilder, DataDeepHash, SignatureData,
-    SignatureType, V2BundleItemHash,
+    BundleItemChunker, BundleItemDataVerifier, BundleItemHashBuilder, ContainerLocation,
+    DataDeepHash, SignatureData, SignatureType, V2BundleItemHash,
 };
 use crate::bundle::{
     BundleAnchor, BundleId, BundleItemError, BundleItemHash, BundleItemId, BundleItemIdError,
     Error, TagError,
 };
+use crate::chunking::DefaultChunker;
 use crate::crypto::hash::HashableExt;
 use crate::tag::Tag;
 use crate::validation::{SupportsValidation, Validator};
@@ -92,7 +93,7 @@ impl ValidatedItem<'_> {
             data_deep_hash: DataDeepHash::new_from_inner(b"".digest()), // dummy value
             data_verifier: BundleItemDataVerifier::from_single_value(
                 Blob::Slice(b"".as_slice()),
-                BundleItemChunker::new(),
+                BundleItemChunker::new(0, DefaultChunker::chunk_map(self.data_size)),
             ), // dummy value
         };
 
@@ -146,10 +147,15 @@ impl UnvalidatedItem<'static> {
     pub(crate) fn read<R: Read>(
         reader: R,
         len: u64,
+        container_location: Option<ContainerLocation>,
         bundle_id: BundleId,
     ) -> Result<(Self, BundleItemDataVerifier<'static>), Error> {
         Ok(Self::try_from_raw(
-            ItemReader::builder().len(len).build().process(reader)?,
+            ItemReader::builder()
+                .len(len)
+                .maybe_container_location(container_location)
+                .build()
+                .process(reader)?,
             bundle_id,
         )?)
     }
@@ -157,11 +163,13 @@ impl UnvalidatedItem<'static> {
     pub(crate) async fn read_async<R: AsyncRead + Unpin>(
         reader: R,
         len: u64,
+        container_location: Option<ContainerLocation>,
         bundle_id: BundleId,
     ) -> Result<(Self, BundleItemDataVerifier<'static>), Error> {
         Ok(Self::try_from_raw(
             ItemReader::builder()
                 .len(len)
+                .maybe_container_location(container_location)
                 .build()
                 .process_async(reader)
                 .await?,

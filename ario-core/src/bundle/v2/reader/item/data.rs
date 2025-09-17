@@ -2,7 +2,7 @@ use crate::blob::OwnedBlob;
 use crate::bundle::BundleItemError;
 use crate::bundle::v2::reader::item::ItemReaderCtx;
 use crate::bundle::v2::reader::{PollResult, Result, Step};
-use crate::bundle::v2::{BundleItemDataProcessor, RawBundleItem, SignatureType};
+use crate::bundle::v2::{BundleItemDataProcessor, ContainerLocation, RawBundleItem, SignatureType};
 use bytes::Buf;
 use std::cmp::min;
 use std::io::Cursor;
@@ -24,6 +24,7 @@ impl Data {
     pub(super) fn new(
         pos: u64,
         len: u64,
+        container_location: Option<ContainerLocation>,
         owner: OwnedBlob,
         signature: OwnedBlob,
         signature_type: SignatureType,
@@ -46,7 +47,7 @@ impl Data {
             anchor,
             tag_data,
             tag_count,
-            processor: Some(BundleItemDataProcessor::new()),
+            processor: Some(BundleItemDataProcessor::new(container_location)),
             data_offset: pos,
         })
     }

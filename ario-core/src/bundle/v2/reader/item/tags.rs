@@ -97,9 +97,14 @@ impl Tags {
     fn transition(&mut self, ctx: &mut ItemReaderCtx) -> Result<Data> {
         let tag_data = self.tags(ctx).map_err(|e| BundleItemError::from(e))?;
         let data_size = ctx.remaining();
+        let container_location = ctx.container_location.take().map(|mut cl| {
+            cl.offset += ctx.pos;
+            cl
+        });
         Ok(Data::new(
             ctx.pos,
             data_size,
+            container_location,
             self.owner.clone(),
             self.signature.clone(),
             self.signature_type,
