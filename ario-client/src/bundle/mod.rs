@@ -3,14 +3,21 @@ mod bundler;
 use crate::data_reader::{AsyncBundleItemReader, AsyncTxReader};
 use crate::{Client, api};
 use ario_core::bundle::{
-    Bundle, BundleEntry, BundleItemId, BundleItemReader, BundleItemVerifier, BundleReader,
-    ValidatedBundleItem,
+    Bundle, BundleEntry, BundleId, BundleItemId, BundleItemReader, BundleItemVerifier,
+    BundleReader, ValidatedBundleItem,
 };
 use ario_core::tx::{TxId, ValidatedTx};
 use futures_lite::{AsyncRead, AsyncSeek};
 
 impl Client {
     pub async fn bundle_by_tx(&self, tx_id: &TxId) -> Result<Option<Bundle>, super::Error> {
+        self.0
+            .cache
+            .get_bundle_by_tx_id(tx_id, async |tx_id| self._bundle_by_tx_live(tx_id).await)
+            .await
+    }
+
+    async fn _bundle_by_tx_live(&self, tx_id: &TxId) -> Result<Option<Bundle>, super::Error> {
         let tx = match self.tx_by_id(tx_id).await? {
             Some(tx) => tx,
             None => return Ok(None),
@@ -35,6 +42,26 @@ impl Client {
         }
     }
 
+    async fn _bundle_item_live(
+        &self,
+        bundle_id: &BundleId,
+        entry: &BundleEntry<'_>,
+        tx: &ValidatedTx<'_>,
+    ) -> Result<(ValidatedBundleItem<'static>, BundleItemVerifier<'static>), super::Error> {
+        let mut tx_reader = AsyncTxReader::new(self.clone(), tx).await?;
+
+        let (item, verifier) =
+            BundleItemReader::read_async(&entry, &mut tx_reader, bundle_id.clone())
+                .await
+                .map_err(api::Error::BundleError)?;
+
+        let item = item
+            .validate()
+            .map_err(|e| api::Error::BundleError(e.into()))?;
+
+        Ok((item, verifier))
+    }
+
     async fn _bundle_item(
         &self,
         item_id: &BundleItemId,
@@ -48,6 +75,11 @@ impl Client {
         )>,
         super::Error,
     > {
+        let tx = match self.tx_by_id(tx_id).await? {
+            Some(tx) => tx,
+            None => return Ok(None),
+        };
+
         let bundle = match self.bundle_by_tx(tx_id).await? {
             Some(bundle) => bundle,
             None => return Ok(None),
@@ -58,25 +90,16 @@ impl Client {
             None => return Ok(None),
         };
 
-        let tx = match self.tx_by_id(tx_id).await? {
-            Some(tx) => tx,
-            None => return Ok(None),
-        };
-
-        let mut tx_reader = AsyncTxReader::new(self.clone(), &tx).await?;
-
-        let (item, verifier) =
-            BundleItemReader::read_async(&entry, &mut tx_reader, bundle.id().clone())
-                .await
-                .map_err(api::Error::BundleError)?;
-
-        Ok(Some((
-            entry.into_owned(),
-            item.validate()
-                .map_err(|e| api::Error::BundleError(e.into()))?,
-            verifier,
-            tx,
-        )))
+        Ok(self
+            .0
+            .cache
+            .get_bundle_item_by_id_tx(entry.id(), tx.id(), async |_, _| {
+                Ok(Some(
+                    self._bundle_item_live(bundle.id(), &entry, &tx).await?,
+                ))
+            })
+            .await?
+            .map(|(item, verifier)| (entry.into_owned(), item, verifier, tx)))
     }
 
     pub async fn read_bundle_item(

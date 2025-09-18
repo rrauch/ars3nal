@@ -41,9 +41,8 @@ impl Client {
         data_size: u64,
         target: Option<&WalletAddress>,
     ) -> Result<Money<Winston>, super::Error> {
-        let api = &self.0.api;
         Ok(self
-            .with_gw(async move |gw| api.price(gw, data_size, target).await)
+            .with_gw(async |gw| self.0.api.price(gw, data_size, target).await)
             .await?)
     }
 }

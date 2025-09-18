@@ -1,5 +1,6 @@
 mod api;
 mod bundle;
+mod cache;
 mod chunk;
 mod data_reader;
 mod gateway;
@@ -10,11 +11,13 @@ mod routemaster;
 mod tx;
 mod wallet;
 
+pub use crate::cache::Cache;
+pub use bytesize::ByteSize;
+
 use crate::api::Api;
 use crate::routemaster::{Handle, Routemaster};
 use ario_core::Gateway;
 use ario_core::network::Network;
-pub use bytesize::ByteSize;
 use reqwest::Client as ReqwestClient;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -29,6 +32,8 @@ pub enum Error {
     RoutemasterError(#[from] routemaster::Error),
     #[error(transparent)]
     ApiError(#[from] api::Error),
+    #[error(transparent)]
+    CacheError(#[from] cache::Error),
     #[error(transparent)]
     TxSubmissionError(#[from] tx::TxSubmissionError),
     #[error(transparent)]
@@ -54,6 +59,7 @@ impl Client {
         #[builder(default = Duration::from_secs(5))] regular_timeout: Duration,
         #[builder(default = true)] enable_netwatch: bool,
         #[builder(default = true)] allow_api_retry: bool,
+        #[builder(default)] cache: Cache,
     ) -> Self {
         let api = Api::new(reqwest_client, network, allow_api_retry);
         let routemaster = Routemaster::new(
@@ -64,7 +70,11 @@ impl Client {
             regular_timeout,
             enable_netwatch,
         );
-        Self(Arc::new(Inner { api, routemaster }))
+        Self(Arc::new(Inner {
+            api,
+            routemaster,
+            cache,
+        }))
     }
 
     pub(crate) async fn with_gw<T, E: Into<crate::Error>>(
@@ -100,4 +110,5 @@ impl Client {
 struct Inner {
     api: Api,
     routemaster: Routemaster,
+    cache: Cache,
 }

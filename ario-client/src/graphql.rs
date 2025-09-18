@@ -64,9 +64,8 @@ impl Client {
         &self,
         variables: V,
     ) -> Result<Option<Q>, super::Error> {
-        let api = &self.0.api;
         Ok(self
-            .with_gw(async move |gw| api.graphql_query(gw, variables).await)
+            .with_gw(async |gw| self.0.api.graphql_query(gw, variables).await)
             .await?)
     }
 }

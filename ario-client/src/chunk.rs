@@ -133,10 +133,23 @@ impl Client {
         relative_offset: u64,
         data_root: &DataRoot,
     ) -> Result<Option<Blob<'static>>, super::Error> {
-        let api = &self.0.api;
+        self.0
+            .cache
+            .get_chunk_by_offset(offset, async |offset| {
+                self._retrieve_chunk_live(offset, relative_offset, data_root)
+                    .await
+            })
+            .await
+    }
 
+    async fn _retrieve_chunk_live(
+        &self,
+        offset: u128,
+        relative_offset: u64,
+        data_root: &DataRoot,
+    ) -> Result<Option<Blob<'static>>, super::Error> {
         let chunk: DownloadChunk<'static> = match self
-            .with_gw(async move |gw| api.download_chunk(gw, offset).await)
+            .with_gw(async |gw| self.0.api.download_chunk(gw, offset).await)
             .await?
         {
             Some(chunk) => chunk,
@@ -255,6 +268,14 @@ mod tests {
             .retrieve_chunk(tx_offset.absolute(total), total, data_root)
             .await?
         {
+            // test cache
+            let chunk_2 = client
+                .retrieve_chunk(tx_offset.absolute(total), total, data_root)
+                .await?
+                .unwrap();
+
+            assert_eq!(chunk, chunk_2);
+
             total += chunk.len() as u64;
             if total >= data_item.size() {
                 break;

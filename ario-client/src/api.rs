@@ -7,7 +7,6 @@ use bytesize::ByteSize;
 use futures_lite::{Stream, StreamExt};
 use maybe_owned::MaybeOwned;
 use reqwest::Client as ReqwestClient;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
@@ -19,6 +18,9 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tracing::instrument;
 use url::Url;
+
+#[cfg(feature = "graphql")]
+use serde::Serialize;
 
 #[derive(Debug, Clone)]
 pub struct Api(Arc<Inner>);

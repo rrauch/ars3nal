@@ -60,9 +60,8 @@ impl Client {
         &self,
         address: &WalletAddress,
     ) -> Result<Money<Winston>, super::Error> {
-        let api = &self.0.api;
         Ok(self
-            .with_gw(async move |gw| api.wallet_balance(gw, address).await)
+            .with_gw(async |gw| self.0.api.wallet_balance(gw, address).await)
             .await?)
     }
 
@@ -70,9 +69,8 @@ impl Client {
         &self,
         address: &WalletAddress,
     ) -> Result<Option<TxId>, super::Error> {
-        let api = &self.0.api;
         Ok(self
-            .with_gw(async move |gw| api.wallet_last_tx(gw, address).await)
+            .with_gw(async |gw| self.0.api.wallet_last_tx(gw, address).await)
             .await?)
     }
 }

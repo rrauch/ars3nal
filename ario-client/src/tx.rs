@@ -161,9 +161,18 @@ impl Client {
         &self,
         tx_id: &TxId,
     ) -> Result<Option<ValidatedTx<'static>>, super::Error> {
-        let api = &self.0.api;
+        self.0
+            .cache
+            .get_tx_by_id(tx_id, async |tx_id| self._tx_by_id_live(tx_id).await)
+            .await
+    }
+
+    async fn _tx_by_id_live(
+        &self,
+        tx_id: &TxId,
+    ) -> Result<Option<ValidatedTx<'static>>, super::Error> {
         let tx = match self
-            .with_gw(async move |gw| api.tx_by_id(gw, tx_id).await)
+            .with_gw(async |gw| self.0.api.tx_by_id(gw, tx_id).await)
             .await?
         {
             Some(tx) => tx.validate(),
@@ -174,23 +183,20 @@ impl Client {
     }
 
     pub async fn tx_status(&self, tx_id: &TxId) -> Result<Option<Status<'_>>, super::Error> {
-        let api = &self.0.api;
         Ok(self
-            .with_gw(async move |gw| api.tx_status(gw, tx_id).await)
+            .with_gw(async |gw| self.0.api.tx_status(gw, tx_id).await)
             .await?)
     }
 
     pub async fn tx_offset(&self, tx_id: &TxId) -> Result<Offset, super::Error> {
-        let api = &self.0.api;
         Ok(self
-            .with_gw(async move |gw| api.tx_offset(gw, tx_id).await)
+            .with_gw(async |gw| self.0.api.tx_offset(gw, tx_id).await)
             .await?)
     }
 
     pub async fn tx_anchor(&self) -> Result<TxAnchor, super::Error> {
-        let api = &self.0.api;
         Ok(self
-            .with_gw(async move |gw| api.tx_anchor(gw).await)
+            .with_gw(async |gw| self.0.api.tx_anchor(gw).await)
             .await?)
     }
 
@@ -583,6 +589,22 @@ mod tests {
         let tx_id = TxId::from_str("Y0wIvUkHFhcJZAduC8wfaiaDMHkrEoqHMSkenHD75VU")?;
         assert!(api.tx_by_id(&gw, &tx_id).await?.is_none());
 
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn tx_by_id_client() -> anyhow::Result<()> {
+        let gw = Gateway::from_str("https://arweave.net")?;
+        let client = crate::Client::builder().gateways(vec![gw]).build();
+
+        let tx_id = TxId::from_str("Y0wJvUkHFhcJZAduC8wfaiaDMHkrCoqHMSkenHD75VU")?;
+        let tx = client.tx_by_id(&tx_id).await?.unwrap();
+        assert_eq!(tx.id(), &tx_id);
+
+        // from cache
+        let tx_2 = client.tx_by_id(&tx_id).await?.unwrap();
+        assert_eq!(tx, tx_2);
         Ok(())
     }
 
