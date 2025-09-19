@@ -1,6 +1,6 @@
 mod api;
 mod bundle;
-mod cache;
+pub mod cache;
 mod chunk;
 mod data_reader;
 mod gateway;
@@ -47,7 +47,7 @@ pub enum Error {
 #[bon::bon]
 impl Client {
     #[builder(derive(Debug))]
-    pub fn new(
+    pub async fn new(
         #[builder(default)] network: Network,
         #[builder(default)] reqwest_client: ReqwestClient,
         #[builder(with = |gws: impl IntoIterator<Item=Gateway>| {
@@ -59,9 +59,9 @@ impl Client {
         #[builder(default = Duration::from_secs(5))] regular_timeout: Duration,
         #[builder(default = true)] enable_netwatch: bool,
         #[builder(default = true)] allow_api_retry: bool,
-        #[builder(default)] cache: Cache,
-    ) -> Self {
-        let api = Api::new(reqwest_client, network, allow_api_retry);
+        #[builder(default)] mut cache: Cache,
+    ) -> Result<Self, Error> {
+        let api = Api::new(reqwest_client, network.clone(), allow_api_retry);
         let routemaster = Routemaster::new(
             api.clone(),
             gateways,
@@ -70,11 +70,14 @@ impl Client {
             regular_timeout,
             enable_netwatch,
         );
-        Self(Arc::new(Inner {
+
+        cache.init(network).await?;
+
+        Ok(Self(Arc::new(Inner {
             api,
             routemaster,
             cache,
-        }))
+        })))
     }
 
     pub(crate) async fn with_gw<T, E: Into<crate::Error>>(

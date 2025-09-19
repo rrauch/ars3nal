@@ -247,7 +247,8 @@ mod tests {
         let client = Client::builder()
             .gateways([Gateway::default()])
             .enable_netwatch(false)
-            .build();
+            .build()
+            .await?;
 
         let tx = client
             .tx_by_id(&TxId::from_str(
@@ -300,7 +301,8 @@ mod tests {
             .enable_netwatch(false)
             .network(Network::Local(network_id.try_into()?))
             .gateways([Gateway::from_str(arlocal.as_str())?])
-            .build();
+            .build()
+            .await?;
 
         let tx = client
             .tx_by_id(&TxId::from_str(

@@ -9,8 +9,8 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::Deref;
 
-pub(super) type MetadataCache = InnerCache<MetaKey, MetaValue, Box<dyn L2MetaCache + 'static>>;
-pub trait L2MetaCache: Send + Sync + Debug {}
+pub(super) type MetadataCache = InnerCache<MetaKey, MetaValue, Box<dyn L2Cache + 'static>>;
+pub trait L2Cache: Send + Sync + Debug {}
 
 impl Cache {
     pub(crate) async fn get_tx_by_id(
@@ -20,7 +20,6 @@ impl Cache {
     ) -> Result<Option<ValidatedTx<'static>>, crate::Error> {
         let key = TxByIdKey::from(tx_id);
         Ok(self
-            .0
             .metadata_cache
             .try_get_value(key, async |key| f(key.deref()).await)
             .await?)
@@ -33,7 +32,6 @@ impl Cache {
     ) -> Result<Option<Bundle>, crate::Error> {
         let key = BundleByTxIdKey::from(tx_id);
         Ok(self
-            .0
             .metadata_cache
             .try_get_value(key, async |key| f(key.deref()).await)
             .await?)
@@ -54,7 +52,6 @@ impl Cache {
     {
         let key = BundleItemByIdTxKey(MaybeOwned::Borrowed(item_id), MaybeOwned::Borrowed(tx_id));
         Ok(self
-            .0
             .metadata_cache
             .try_get_value(key, async |key| {
                 let item_id = key.0.deref();

@@ -1019,7 +1019,8 @@ mod tests {
         let client = Client::builder()
             .gateways([Gateway::default()])
             .enable_netwatch(false)
-            .build();
+            .build()
+            .await?;
 
         let resp: Option<TxByIdQuery> = client
             .graphql_query(TxByIdQueryVariables {

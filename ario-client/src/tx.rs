@@ -596,7 +596,7 @@ mod tests {
     #[tokio::test]
     async fn tx_by_id_client() -> anyhow::Result<()> {
         let gw = Gateway::from_str("https://arweave.net")?;
-        let client = crate::Client::builder().gateways(vec![gw]).build();
+        let client = crate::Client::builder().gateways(vec![gw]).build().await?;
 
         let tx_id = TxId::from_str("Y0wJvUkHFhcJZAduC8wfaiaDMHkrCoqHMSkenHD75VU")?;
         let tx = client.tx_by_id(&tx_id).await?.unwrap();
@@ -667,7 +667,8 @@ mod tests {
             .enable_netwatch(false)
             .network(Network::Local(network_id.try_into()?))
             .gateways([Gateway::from_str(arlocal.as_str())?])
-            .build();
+            .build()
+            .await?;
 
         let json =
             tokio::fs::read_to_string(<PathBuf as AsRef<Path>>::as_ref(&PathBuf::from(wallet_jwk)))
@@ -711,7 +712,8 @@ mod tests {
             .enable_netwatch(false)
             .network(Network::Local(network_id.try_into()?))
             .gateways([Gateway::from_str(arlocal.as_str())?])
-            .build();
+            .build()
+            .await?;
 
         let json =
             tokio::fs::read_to_string(<PathBuf as AsRef<Path>>::as_ref(&PathBuf::from(wallet_jwk)))

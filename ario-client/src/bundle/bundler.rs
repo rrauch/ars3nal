@@ -988,7 +988,8 @@ mod tests {
             .enable_netwatch(false)
             .network(Network::Local(network_id.try_into()?))
             .gateways([Gateway::from_str(arlocal.as_str())?])
-            .build();
+            .build()
+            .await?;
 
         let json =
             tokio::fs::read_to_string(<PathBuf as AsRef<Path>>::as_ref(&PathBuf::from(wallet_jwk)))

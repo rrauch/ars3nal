@@ -1,24 +1,36 @@
 mod chunk;
 mod metadata;
 
-use crate::cache::chunk::ChunkCache;
+pub use chunk::L2Cache as L2ChunkCache;
+pub use metadata::L2Cache as L2MetadataCache;
+
+use crate::cache::chunk::{ChunkCache, DynL2ChunkCache};
 use crate::cache::metadata::MetadataCache;
+use ario_core::network::Network;
 use bytesize::ByteSize;
 use moka::future::Cache as MokaCache;
 use moka::future::CacheBuilder as MokaCacheBuilder;
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter, Write};
 use std::hash::Hash;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Debug)]
-pub struct Cache(Arc<Inner>);
-
-#[derive(Debug)]
-struct Inner {
+pub struct Cache {
     metadata_cache: MetadataCache,
     chunk_cache: ChunkCache,
+}
+
+#[derive(Debug)]
+pub struct Context {
+    network: Network,
+}
+
+impl Context {
+    pub fn network(&self) -> &Network {
+        &self.network
+    }
 }
 
 impl Default for Cache {
@@ -33,11 +45,13 @@ pub enum Error {
     CachedError(Arc<super::Error>),
     #[error("cache returned invalid response. this is most likely a bug")]
     InvalidCachedResponse,
+    #[error(transparent)]
+    L2Error(#[from] std::io::Error),
 }
 
 #[bon::bon]
 impl Cache {
-    #[builder(derive(Debug))]
+    #[builder]
     pub fn new(
         #[builder(default = ByteSize::mib(8))] metadata_max_mem: ByteSize,
         #[builder(default = Duration::from_secs(3600 * 24))] metadata_max_ttl: Duration,
@@ -45,23 +59,39 @@ impl Cache {
         #[builder(default = ByteSize::mib(16))] chunk_max_mem: ByteSize,
         #[builder(default = Duration::from_secs(3600 * 24))] chunk_max_ttl: Duration,
         #[builder(default = Duration::from_secs(60))] chunk_max_negative_ttl: Duration,
+        #[builder(with = |l2: impl L2ChunkCache + 'static| DynL2ChunkCache::new_box(l2))]
+        chunk_l2_cache: Option<Box<DynL2ChunkCache<'static>>>,
     ) -> Self {
         let metadata_cache = MetadataCache::new(
             "meta_l1_cache",
             metadata_max_mem,
             metadata_max_ttl,
             metadata_max_negative_ttl,
+            None,
         );
+
         let chunk_cache = ChunkCache::new(
             "chunk_l1_cache",
             chunk_max_mem,
             chunk_max_ttl,
             chunk_max_negative_ttl,
+            chunk_l2_cache,
         );
-        Self(Arc::new(Inner {
+
+        Self {
             metadata_cache,
             chunk_cache,
-        }))
+        }
+    }
+
+    pub(crate) async fn init(&mut self, network: Network) -> Result<(), Error> {
+        let ctx = Context { network };
+
+        if let Some(l2) = self.chunk_cache.l2.as_mut() {
+            l2.init(&ctx).await?;
+        }
+
+        Ok(())
     }
 }
 
@@ -84,7 +114,6 @@ impl<K, V> moka::Expiry<K, Option<V>> for OptionExpiry {
     }
 }
 
-#[derive(Debug)]
 struct InnerCache<
     K: HasWeight + Eq + Hash + Send + Sync + 'static,
     V: HasWeight + Send + Sync + Clone + 'static,
@@ -104,7 +133,13 @@ impl<
     L2: Send + Sync,
 > InnerCache<K, V, L2>
 {
-    fn new(name: &str, max_mem: ByteSize, max_ttl: Duration, max_negative_ttl: Duration) -> Self {
+    fn new(
+        name: &str,
+        max_mem: ByteSize,
+        max_ttl: Duration,
+        max_negative_ttl: Duration,
+        l2: Option<L2>,
+    ) -> Self {
         let l1 = MokaCacheBuilder::new(max_mem.0)
             .name(name)
             .weigher(|k: &K, v: &Option<V>| {
@@ -116,6 +151,17 @@ impl<
                 none_expiration: max_negative_ttl,
             })
             .build();
-        Self { l1, l2: None }
+        Self { l1, l2 }
+    }
+}
+
+impl<
+    K: HasWeight + Eq + Hash + Send + Sync + 'static,
+    V: HasWeight + Send + Sync + Clone + 'static,
+    L2: Send + Sync,
+> Debug for InnerCache<K, V, L2>
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InnerCache")
     }
 }

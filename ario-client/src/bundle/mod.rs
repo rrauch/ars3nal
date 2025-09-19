@@ -121,12 +121,10 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use crate::Client;
-    use crate::api::Api;
     use ario_core::Gateway;
     use ario_core::blob::Blob;
     use ario_core::bundle::{BundleItemId, BundleType};
     use ario_core::crypto::hash::{Hasher, Sha256, Sha256Hash};
-    use ario_core::network::Network;
     use ario_core::tx::TxId;
     use futures_lite::AsyncReadExt;
     use hex_literal::hex;
@@ -145,11 +143,11 @@ mod tests {
         expected_hash: Sha256Hash,
     ) -> anyhow::Result<()> {
         init_tracing();
-        let api = Api::new(reqwest::Client::new(), Network::default(), false);
         let client = Client::builder()
             .enable_netwatch(false)
             .gateways(vec![Gateway::from_str("https://arweave.net")?].into_iter())
-            .build();
+            .build()
+            .await?;
 
         let item = client.bundle_item(&item_id, &tx_id).await?.unwrap();
         assert_eq!(item.id(), &item_id);
@@ -181,11 +179,11 @@ mod tests {
     #[tokio::test]
     async fn read_bundle() -> anyhow::Result<()> {
         init_tracing();
-        let api = Api::new(reqwest::Client::new(), Network::default(), false);
         let client = Client::builder()
             .enable_netwatch(false)
             .gateways(vec![Gateway::from_str("https://arweave.net")?].into_iter())
-            .build();
+            .build()
+            .await?;
 
         let tx_id = TxId::from_str("ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk")?;
 

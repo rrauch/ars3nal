@@ -555,7 +555,8 @@ mod tests {
         let client = Client::builder()
             .enable_netwatch(false)
             .gateways(vec![Gateway::from_str("https://arweave.net")?].into_iter())
-            .build();
+            .build()
+            .await?;
 
         let tx_id = TxId::from_str("ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk")?;
 
@@ -592,7 +593,8 @@ mod tests {
         let client = Client::builder()
             .enable_netwatch(false)
             .gateways(vec![Gateway::from_str("https://arweave.net")?].into_iter())
-            .build();
+            .build()
+            .await?;
 
         let tx_id = TxId::from_str("ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk")?;
         let item_id = BundleItemId::from_str("UHVB0gDKDiId6XAeZlCH_9h6h6Tz0we8MuGA0CUYxPE")?;
@@ -616,7 +618,6 @@ mod tests {
         assert_eq!(**chunks.get(0).unwrap(), 0..204794);
         assert_eq!(**chunks.get(1).unwrap(), 204794..466938);
         assert_eq!(**chunks.get(2).unwrap(), 466938..598382);
-
 
         Ok(())
     }
