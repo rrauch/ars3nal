@@ -10,6 +10,7 @@ use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
 use crate::jwk::{Jwk, KeyType as JwkKeyType};
 use crate::typed::Typed;
 use hybrid_array::ArraySize;
+use serde::Serialize;
 use std::fmt::{Debug, Display, Formatter};
 use thiserror::Error;
 
@@ -79,7 +80,7 @@ pub(crate) trait SecretKey {
 pub type TypedPublicKey<T, PK: PublicKey> = Typed<T, PK>;
 
 pub(crate) trait PublicKey:
-    Hashable + DeepHashable + AsBlob + PartialEq + Clone + Debug
+    Hashable + DeepHashable + AsBlob + PartialEq + Clone + Debug + Serialize
 {
     type Scheme: AsymmetricScheme;
 }

@@ -7,7 +7,10 @@ use derive_where::derive_where;
 use ecdsa::RecoveryId;
 use ecdsa::Signature as ExternalSignature;
 use hybrid_array::typenum::Unsigned;
+use serde::de::Error;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use signature::Verifier;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::ops::{Add, Range};
 use thiserror::Error;
@@ -29,11 +32,39 @@ impl Variant for () {
     }
 }
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EcdsaSignature<C: Curve, V: Variant = ()> {
     inner: ExternalSignature<C>,
+    #[serde(
+        serialize_with = "serialize_recovery_id",
+        deserialize_with = "deserialize_recovery_id"
+    )]
     rec_id: Option<RecoveryId>,
     _phantom: PhantomData<V>,
+}
+
+fn serialize_recovery_id<S: Serializer>(
+    recovery_id: &Option<RecoveryId>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    recovery_id.map(|r| r.to_byte()).serialize(serializer)
+}
+
+fn deserialize_recovery_id<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<RecoveryId>, D::Error> {
+    Option::<u8>::deserialize(deserializer)?
+        .map(|r| {
+            RecoveryId::from_byte(r)
+                .ok_or(D::Error::custom("invalid recovery id value".to_string()))
+        })
+        .transpose()
+}
+
+impl<C: Curve, V: Variant> Hash for EcdsaSignature<C, V> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_blob().hash(state)
+    }
 }
 
 impl<C: Curve, V: Variant> EcdsaSignature<C, V> {

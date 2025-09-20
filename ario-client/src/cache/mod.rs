@@ -3,9 +3,10 @@ mod metadata;
 
 pub use chunk::L2Cache as L2ChunkCache;
 pub use metadata::L2Cache as L2MetadataCache;
+pub use metadata::Offset;
 
 use crate::cache::chunk::{ChunkCache, DynL2ChunkCache};
-use crate::cache::metadata::MetadataCache;
+use crate::cache::metadata::{DynL2MetadataCache, MetadataCache};
 use ario_core::network::Network;
 use bytesize::ByteSize;
 use moka::future::Cache as MokaCache;
@@ -16,6 +17,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+const METADATA_DATA_VERSION: usize = 1;
+const CHUNK_DATA_VERSION: usize = 1;
+
 #[derive(Debug)]
 pub struct Cache {
     metadata_cache: MetadataCache,
@@ -25,11 +29,15 @@ pub struct Cache {
 #[derive(Debug)]
 pub struct Context {
     network: Network,
+    data_version: usize,
 }
 
 impl Context {
     pub fn network(&self) -> &Network {
         &self.network
+    }
+    pub fn data_version(&self) -> usize {
+        self.data_version
     }
 }
 
@@ -56,6 +64,8 @@ impl Cache {
         #[builder(default = ByteSize::mib(8))] metadata_max_mem: ByteSize,
         #[builder(default = Duration::from_secs(3600 * 24))] metadata_max_ttl: Duration,
         #[builder(default = Duration::from_secs(60))] metadata_max_negative_ttl: Duration,
+        #[builder(with = |l2: impl L2MetadataCache + 'static| DynL2MetadataCache::new_box(l2))]
+        metadata_l2_cache: Option<Box<DynL2MetadataCache<'static>>>,
         #[builder(default = ByteSize::mib(16))] chunk_max_mem: ByteSize,
         #[builder(default = Duration::from_secs(3600 * 24))] chunk_max_ttl: Duration,
         #[builder(default = Duration::from_secs(60))] chunk_max_negative_ttl: Duration,
@@ -67,7 +77,7 @@ impl Cache {
             metadata_max_mem,
             metadata_max_ttl,
             metadata_max_negative_ttl,
-            None,
+            metadata_l2_cache,
         );
 
         let chunk_cache = ChunkCache::new(
@@ -85,9 +95,21 @@ impl Cache {
     }
 
     pub(crate) async fn init(&mut self, network: Network) -> Result<(), Error> {
-        let ctx = Context { network };
+        if let Some(l2) = self.metadata_cache.l2.as_mut() {
+            let ctx = Context {
+                network: network.clone(),
+                data_version: METADATA_DATA_VERSION,
+            };
+
+            l2.init(&ctx).await?;
+        }
 
         if let Some(l2) = self.chunk_cache.l2.as_mut() {
+            let ctx = Context {
+                network,
+                data_version: CHUNK_DATA_VERSION,
+            };
+
             l2.init(&ctx).await?;
         }
 

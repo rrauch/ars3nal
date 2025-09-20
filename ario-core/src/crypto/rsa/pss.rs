@@ -43,7 +43,7 @@ impl<'a> Message<'a> {
     }
 }
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct PssSignature<L: OutputLen>(ExternalPssSignature, PhantomData<L>);
 

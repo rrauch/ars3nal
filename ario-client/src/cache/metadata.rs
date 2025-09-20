@@ -1,19 +1,118 @@
 use crate::Cache;
-use crate::cache::{Error, HasWeight, InnerCache};
-use ario_core::bundle::{Bundle, BundleItemId, BundleItemVerifier, ValidatedBundleItem};
-use ario_core::tx::{TxId, ValidatedTx};
+use crate::cache::Error::L2Error;
+use crate::cache::{Context, Error, HasWeight, InnerCache, L2MetadataCache};
+use crate::tx::Offset as TxOffset;
+use ario_core::bundle::{
+    Bundle, BundleId, BundleItemId, BundleItemVerifier, UnvalidatedBundleItem, ValidatedBundleItem,
+};
+use ario_core::tx::{TxId, UnvalidatedTx, ValidatedTx};
 use maybe_owned::MaybeOwned;
+use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::Deref;
 
-pub(super) type MetadataCache = InnerCache<MetaKey, MetaValue, Box<dyn L2Cache + 'static>>;
-pub trait L2Cache: Send + Sync + Debug {}
+pub(super) type MetadataCache = InnerCache<MetaKey, MetaValue, Box<DynL2MetadataCache<'static>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Offset {
+    size: u64,
+    offset: u128,
+}
+
+impl From<Offset> for TxOffset {
+    fn from(value: Offset) -> Self {
+        TxOffset {
+            size: value.size,
+            offset: value.offset,
+        }
+    }
+}
+
+impl From<TxOffset> for Offset {
+    fn from(value: TxOffset) -> Self {
+        Offset {
+            size: value.size,
+            offset: value.offset,
+        }
+    }
+}
+
+#[dynosaur::dynosaur(pub(super) DynL2MetadataCache = dyn(box) L2Cache)]
+pub trait L2Cache: Send + Sync {
+    fn init(&mut self, ctx: &Context) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn get_tx(
+        &self,
+        id: &TxId,
+    ) -> impl Future<Output = Result<Option<UnvalidatedTx<'static>>, std::io::Error>> + Send;
+
+    fn insert_tx(
+        &self,
+        tx: UnvalidatedTx<'static>,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn invalidate_tx(&self, id: &TxId) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn get_tx_offset(
+        &self,
+        id: &TxId,
+    ) -> impl Future<Output = Result<Option<Offset>, std::io::Error>> + Send;
+
+    fn insert_tx_offset(
+        &self,
+        tx_id: TxId,
+        offset: Offset,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn invalidate_tx_offset(
+        &self,
+        id: &TxId,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn get_bundle(
+        &self,
+        bundle_id: &BundleId,
+    ) -> impl Future<Output = Result<Option<Bundle>, std::io::Error>> + Send;
+
+    fn insert_bundle(
+        &self,
+        bundle: Bundle,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn invalidate_bundle(
+        &self,
+        id: &BundleId,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn get_bundle_item(
+        &self,
+        item_id: &BundleItemId,
+        bundle_id: &BundleId,
+    ) -> impl Future<
+        Output = Result<
+            Option<(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>)>,
+            std::io::Error,
+        >,
+    > + Send;
+
+    fn insert_bundle_item(
+        &self,
+        bundle_item: UnvalidatedBundleItem<'static>,
+        verifier: BundleItemVerifier<'static>,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn invalidate_bundle_item(
+        &self,
+        item_id: &BundleItemId,
+        bundle_id: &BundleId,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+}
 
 impl Cache {
-    pub(crate) async fn get_tx_by_id(
+    pub(crate) async fn get_tx(
         &self,
         tx_id: &TxId,
         f: impl AsyncFnOnce(&TxId) -> Result<Option<ValidatedTx<'static>>, crate::Error>,
@@ -21,43 +120,115 @@ impl Cache {
         let key = TxByIdKey::from(tx_id);
         Ok(self
             .metadata_cache
-            .try_get_value(key, async |key| f(key.deref()).await)
+            .try_get_value(
+                key,
+                async |key| f(key.deref()).await,
+                async |key, l2| {
+                    Ok(
+                        match l2.get_tx(key).await?.map(|tx| tx.validate()).transpose() {
+                            Ok(r) => r,
+                            Err(_) => {
+                                // corrupted cache entry
+                                l2.invalidate_tx(tx_id).await?;
+                                None
+                            }
+                        },
+                    )
+                },
+                async |_, value, l2| l2.insert_tx(value.invalidate()).await,
+            )
             .await?)
     }
 
-    pub(crate) async fn get_bundle_by_tx_id(
+    pub(crate) async fn get_tx_offset(
         &self,
         tx_id: &TxId,
-        f: impl AsyncFnOnce(&TxId) -> Result<Option<Bundle>, crate::Error>,
-    ) -> Result<Option<Bundle>, crate::Error> {
-        let key = BundleByTxIdKey::from(tx_id);
+        f: impl AsyncFnOnce(&TxId) -> Result<Option<TxOffset>, crate::Error>,
+    ) -> Result<Option<TxOffset>, crate::Error> {
+        let key = TxOffsetKey::from(tx_id);
         Ok(self
             .metadata_cache
-            .try_get_value(key, async |key| f(key.deref()).await)
+            .try_get_value(
+                key,
+                async |key| f(key.deref()).await.map(|v| v.map(|o| o.into())),
+                async |key, l2| l2.get_tx_offset(key).await,
+                async |key, offset, l2| {
+                    l2.insert_tx_offset(key.0.clone().into_owned(), offset.into())
+                        .await
+                },
+            )
+            .await?
+            .map(|o| o.into()))
+    }
+
+    pub(crate) async fn get_bundle(
+        &self,
+        bundle_id: &BundleId,
+        f: impl AsyncFnOnce(&TxId) -> Result<Option<Bundle>, crate::Error>,
+    ) -> Result<Option<Bundle>, crate::Error> {
+        let key = BundleByTxIdKey::from(bundle_id);
+        Ok(self
+            .metadata_cache
+            .try_get_value(
+                key,
+                async |key| f(key.deref()).await,
+                async |key, l2| l2.get_bundle(key).await,
+                async |_, value, l2| l2.insert_bundle(value).await,
+            )
             .await?)
     }
 
-    pub(crate) async fn get_bundle_item_by_id_tx(
+    pub(crate) async fn get_bundle_item(
         &self,
         item_id: &BundleItemId,
-        tx_id: &TxId,
+        bundle_id: &BundleId,
         f: impl AsyncFnOnce(
             &BundleItemId,
-            &TxId,
+            &BundleId,
         ) -> Result<
             Option<(ValidatedBundleItem<'static>, BundleItemVerifier<'static>)>,
             crate::Error,
         >,
     ) -> Result<Option<(ValidatedBundleItem<'static>, BundleItemVerifier<'static>)>, crate::Error>
     {
-        let key = BundleItemByIdTxKey(MaybeOwned::Borrowed(item_id), MaybeOwned::Borrowed(tx_id));
+        let key = BundleItemByIdKey(
+            MaybeOwned::Borrowed(item_id),
+            MaybeOwned::Borrowed(bundle_id),
+        );
         Ok(self
             .metadata_cache
-            .try_get_value(key, async |key| {
-                let item_id = key.0.deref();
-                let tx_id = key.1.deref();
-                f(item_id, tx_id).await
-            })
+            .try_get_value(
+                key,
+                async |key| {
+                    let item_id = key.0.deref();
+                    let bundle_id = key.1.deref();
+                    f(item_id, bundle_id).await
+                },
+                async |key, l2| {
+                    let item_id = key.0.deref();
+                    let bundle_id = key.1.deref();
+                    Ok(
+                        match l2
+                            .get_bundle_item(item_id, bundle_id)
+                            .await?
+                            .map(|(item, verifier)| item.validate().map(|item| (item, verifier)))
+                            .transpose()
+                        {
+                            Ok(r) => r,
+                            Err(_) => {
+                                // corrupted / invalid cache entry
+                                l2.invalidate_bundle_item(item_id, bundle_id).await?;
+                                None
+                            }
+                        },
+                    )
+                },
+                async |key, value, l2| {
+                    let item = value.0;
+                    let verifier = value.1;
+                    l2.insert_bundle_item(item.invalidate(), verifier).await
+                },
+            )
             .await?)
     }
 }
@@ -78,6 +249,7 @@ impl<'a> ToOwned for MaybeOwnedMetaKey<'a> {
     fn to_owned(&self) -> Self::Owned {
         match self {
             Self::TxById(o) => MetaKey(MaybeOwnedMetaKey::TxById(o.to_owned())),
+            Self::TxOffset(o) => MetaKey(MaybeOwnedMetaKey::TxOffset(o.to_owned())),
             Self::BundleByTxId(o) => MetaKey(MaybeOwnedMetaKey::BundleByTxId(o.to_owned())),
             Self::BundleItemByIdTx(o) => MetaKey(MaybeOwnedMetaKey::BundleItemByIdTx(o.to_owned())),
         }
@@ -93,6 +265,7 @@ impl<'a> Borrow<MaybeOwnedMetaKey<'a>> for MetaKey {
 #[derive(Debug, Clone)]
 pub(super) enum MetaValue {
     Tx(ValidatedTx<'static>),
+    TxOffset(Offset),
     Bundle(Bundle),
     BundleItem((ValidatedBundleItem<'static>, BundleItemVerifier<'static>)),
 }
@@ -103,7 +276,7 @@ impl HasWeight for MetaValue {
     }
 }
 
-trait Key: PartialEq + Eq + Hash {
+trait Key: PartialEq + Eq + Hash + Clone {
     type Value: Value;
 }
 
@@ -112,7 +285,7 @@ trait Value: Clone + Send {
     fn try_from_meta_value(value: MetaValue) -> Option<Self>;
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 #[repr(transparent)]
 struct KeyWrapper<'a, T, Variant = ()>(MaybeOwned<'a, T>, PhantomData<Variant>);
 impl<T, Variant> Deref for KeyWrapper<'_, T, Variant> {
@@ -175,7 +348,43 @@ impl Value for ValidatedTx<'static> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct TxOffsetVariant;
+
+type TxOffsetKey<'a> = KeyWrapper<'a, TxId, TxOffsetVariant>;
+impl Key for TxOffsetKey<'_> {
+    type Value = Offset;
+}
+
+impl<'a> From<TxOffsetKey<'a>> for MaybeOwnedMetaKey<'a> {
+    fn from(value: TxOffsetKey<'a>) -> Self {
+        Self::TxOffset(value)
+    }
+}
+
+impl<'a> MaybeAsRef<TxOffsetKey<'a>> for MaybeOwnedMetaKey<'a> {
+    fn maybe_as_ref(&self) -> Option<&TxOffsetKey<'a>> {
+        match self {
+            MaybeOwnedMetaKey::TxOffset(tx_offset) => Some(tx_offset),
+            _ => None,
+        }
+    }
+}
+
+impl Value for Offset {
+    fn into_meta_value(self) -> MetaValue {
+        MetaValue::TxOffset(self)
+    }
+
+    fn try_from_meta_value(value: MetaValue) -> Option<Self> {
+        match value {
+            MetaValue::TxOffset(offset) => Some(offset),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 struct BundleByTxIdVariant;
 
 type BundleByTxIdKey<'a> = KeyWrapper<'a, TxId, BundleByTxIdVariant>;
@@ -211,30 +420,30 @@ impl Value for Bundle {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct BundleItemByIdTxKey<'a>(MaybeOwned<'a, BundleItemId>, MaybeOwned<'a, TxId>);
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct BundleItemByIdKey<'a>(MaybeOwned<'a, BundleItemId>, MaybeOwned<'a, BundleId>);
 
-impl<'a> BundleItemByIdTxKey<'a> {
-    fn to_owned(&self) -> BundleItemByIdTxKey<'static> {
-        BundleItemByIdTxKey(
+impl<'a> BundleItemByIdKey<'a> {
+    fn to_owned(&self) -> BundleItemByIdKey<'static> {
+        BundleItemByIdKey(
             MaybeOwned::Owned(self.0.to_owned().into_owned()),
             MaybeOwned::Owned(self.1.to_owned().into_owned()),
         )
     }
 }
 
-impl Key for BundleItemByIdTxKey<'_> {
+impl Key for BundleItemByIdKey<'_> {
     type Value = (ValidatedBundleItem<'static>, BundleItemVerifier<'static>);
 }
 
-impl<'a> From<BundleItemByIdTxKey<'a>> for MaybeOwnedMetaKey<'a> {
-    fn from(value: BundleItemByIdTxKey<'a>) -> Self {
+impl<'a> From<BundleItemByIdKey<'a>> for MaybeOwnedMetaKey<'a> {
+    fn from(value: BundleItemByIdKey<'a>) -> Self {
         Self::BundleItemByIdTx(value)
     }
 }
 
-impl<'a> MaybeAsRef<BundleItemByIdTxKey<'a>> for MaybeOwnedMetaKey<'a> {
-    fn maybe_as_ref(&self) -> Option<&BundleItemByIdTxKey<'a>> {
+impl<'a> MaybeAsRef<BundleItemByIdKey<'a>> for MaybeOwnedMetaKey<'a> {
+    fn maybe_as_ref(&self) -> Option<&BundleItemByIdKey<'a>> {
         match self {
             MaybeOwnedMetaKey::BundleItemByIdTx(bundle_item_by_id_tx) => Some(bundle_item_by_id_tx),
             _ => None,
@@ -258,8 +467,9 @@ impl Value for (ValidatedBundleItem<'static>, BundleItemVerifier<'static>) {
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum MaybeOwnedMetaKey<'a> {
     TxById(TxByIdKey<'a>),
+    TxOffset(TxOffsetKey<'a>),
     BundleByTxId(BundleByTxIdKey<'a>),
-    BundleItemByIdTx(BundleItemByIdTxKey<'a>),
+    BundleItemByIdTx(BundleItemByIdKey<'a>),
 }
 
 trait MaybeAsRef<T: Sized> {
@@ -270,7 +480,12 @@ impl MetadataCache {
     async fn try_get_value<'a, T: Key>(
         &self,
         key: T,
-        f: impl AsyncFnOnce(&T) -> Result<Option<T::Value>, crate::Error>,
+        retrieve: impl AsyncFnOnce(&T) -> Result<Option<T::Value>, crate::Error>,
+        l2_get: impl AsyncFnOnce(
+            &T,
+            &Box<DynL2MetadataCache>,
+        ) -> Result<Option<T::Value>, std::io::Error>,
+        l2_insert: impl AsyncFnOnce(T, T::Value, &Box<DynL2MetadataCache>) -> Result<(), std::io::Error>,
     ) -> Result<Option<T::Value>, Error>
     where
         MaybeOwnedMetaKey<'a>: From<T>,
@@ -281,9 +496,22 @@ impl MetadataCache {
         let res = self
             .l1
             .try_get_with_by_ref(&key, async {
-                //todo: check l2 here
                 let key = key.maybe_as_ref().expect("key should always match");
-                Ok(f(key).await?.map(|v| v.into_meta_value()))
+                if let Some(l2) = self.l2.as_ref() {
+                    if let Some(value) = l2_get(key, l2).await.map_err(L2Error)? {
+                        return Ok(Some(value.into_meta_value()));
+                    }
+                }
+                // not in l2, retrieve
+                if let Some(value) = retrieve(key).await? {
+                    if let Some(l2) = self.l2.as_ref() {
+                        l2_insert(key.clone(), value.clone(), l2)
+                            .await
+                            .map_err(L2Error)?;
+                    }
+                    return Ok(Some(value.into_meta_value()));
+                }
+                Ok(None)
             })
             .await
             .map_err(Error::CachedError)?

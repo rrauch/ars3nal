@@ -1,6 +1,7 @@
 use crate::blob::{AsBlob, Blob};
 use ::aes::cipher::typenum::Unsigned;
 use hybrid_array::{Array, ArraySize};
+use serde::{Deserialize, Serialize};
 
 mod aes;
 pub mod ec;
@@ -27,7 +28,9 @@ where
     }
 }
 
-pub trait Output: Clone + AsBlob + for<'a> TryFrom<Blob<'a>> + Send + Sync {
+pub trait Output:
+    Clone + AsBlob + for<'a> TryFrom<Blob<'a>> + Send + Sync + Serialize + for<'a> Deserialize<'a>
+{
     type Len: OutputLen;
 }
 

@@ -12,6 +12,7 @@ use crate::jwk::{Jwk, KeyType};
 use derive_where::derive_where;
 use ed25519_dalek::{Signature as Ed25519Signature, ed25519};
 use hybrid_array::typenum::U64;
+use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use thiserror::Error;
@@ -126,7 +127,9 @@ pub trait SupportedCurves: Curve {
         + Send
         + Sync
         + Debug
-        + PartialEq;
+        + PartialEq
+        + Serialize
+        + for<'a> Deserialize<'a>;
     type SigningKey: for<'a> CanSign<Self::Message<'a>, Self::Signature> + Clone + Send + Sync;
     type Signature: Clone + Send + Sync + Debug + PartialEq + Output;
     type Message<'a>: ?Sized + ToOwned;
@@ -203,7 +206,7 @@ where
     }
 }
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct EddsaVerifyingKey<C: SupportedCurves>(C::VerifyingKey);
 
@@ -317,7 +320,7 @@ where
     }
 }
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct EddsaSignature<C: Curve + SupportedCurves>(<C as SupportedCurves>::Signature);
 

@@ -8,8 +8,9 @@ use bytemuck::TransparentWrapper;
 use bytes::Bytes;
 use derive_where::derive_where;
 use digest::FixedOutputReset;
-use hybrid_array::Array;
 use hybrid_array::sizes::U32;
+use hybrid_array::{Array, ArraySize};
+use serde::{Deserialize, Serialize};
 use sha3::Keccak256;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
@@ -50,7 +51,7 @@ pub type Blake3Hash = Digest<Blake3>;
 
 pub type TypedDigest<T, H: Hasher> = Typed<T, Digest<H>>;
 
-#[derive_where(Clone, PartialEq, Eq, Hash)]
+#[derive_where(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[derive(TransparentWrapper)]
 #[repr(transparent)]
 pub struct Digest<H: Hasher>(H::Output);
@@ -186,7 +187,7 @@ where
 }
 
 pub trait Hasher: Send + Sync {
-    type Output: Output + PartialEq + Eq + Hash + AsRef<[u8]>;
+    type Output: Output + PartialEq + Eq + Hash + AsRef<[u8]> + Serialize + for<'a> Deserialize<'a>;
 
     fn new() -> Self;
     fn update(&mut self, data: impl AsRef<[u8]>);
@@ -281,6 +282,12 @@ impl Hashable for Uuid {
 }
 
 impl<const N: usize> Hashable for [u8; N] {
+    fn feed<H: Hasher>(&self, hasher: &mut H) {
+        hasher.update(self.as_slice())
+    }
+}
+
+impl<N: ArraySize> Hashable for Array<u8, N> {
     fn feed<H: Hasher>(&self, hasher: &mut H) {
         hasher.update(self.as_slice())
     }

@@ -1,9 +1,8 @@
 use crate::Client;
 use crate::tx::Offset;
-use ario_core::blob::OwnedBlob;
 use ario_core::bundle::{BundleEntry, BundleItemVerifier, ValidatedBundleItem};
 use ario_core::chunking::{DefaultChunker, MostlyFixedChunkMap};
-use ario_core::data::{DataItem, DataRoot, Verifier};
+use ario_core::data::{DataItem, DataRoot, ValidatedTxDataChunk, Verifier};
 use ario_core::tx::{TxId, ValidatedTx};
 use bytes::Buf;
 use futures_lite::{AsyncRead, AsyncSeek};
@@ -54,10 +53,10 @@ trait Chunk: Send + Clone + Unpin {
 
 #[derive(Clone)]
 #[repr(transparent)]
-struct MultiChunk(Arc<(Vec<SimpleChunk>, Range<u64>)>);
+struct MultiChunk(Arc<(Vec<TxChunk>, Range<u64>)>);
 
 impl MultiChunk {
-    fn new(mut chunks: Vec<SimpleChunk>) -> Result<Self, Error> {
+    fn new(mut chunks: Vec<TxChunk>) -> Result<Self, Error> {
         if chunks.is_empty() {
             return Err(Error::IoError(std::io::Error::other(
                 "multichunk cannot be empty",
@@ -143,10 +142,14 @@ impl Chunk for MultiChunk {
 
 #[derive(Clone)]
 #[repr(transparent)]
-struct SimpleChunk(Arc<Inner>);
+struct TxChunk(Arc<Inner>);
 
-impl SimpleChunk {
-    fn new(data: OwnedBlob, chunk_offset: u64, data_range: Range<usize>) -> Self {
+impl TxChunk {
+    fn new(
+        data: ValidatedTxDataChunk<'static>,
+        chunk_offset: u64,
+        data_range: Range<usize>,
+    ) -> Self {
         Self(Arc::new(Inner {
             chunk_range: chunk_offset..chunk_offset + (data_range.end - data_range.start) as u64,
             data,
@@ -157,12 +160,12 @@ impl SimpleChunk {
 
 #[derive(Clone)]
 struct Inner {
-    data: OwnedBlob,
+    data: ValidatedTxDataChunk<'static>,
     chunk_range: Range<u64>,
     data_range: Range<usize>,
 }
 
-impl Chunk for SimpleChunk {
+impl Chunk for TxChunk {
     fn range(&self) -> &Range<u64> {
         &self.0.chunk_range
     }
@@ -182,7 +185,7 @@ impl Chunk for SimpleChunk {
         }
 
         Some(Cursor::new(
-            &self.0.as_ref().data.bytes()[range.start..range.end],
+            &self.0.as_ref().data.as_ref()[range.start..range.end],
         ))
     }
 }
@@ -249,7 +252,7 @@ trait DataSource: Send + Unpin {
 }
 
 impl DataSource for TxDataSource<'_> {
-    type Chunk = SimpleChunk;
+    type Chunk = TxChunk;
 
     fn chunk_range(&self, pos: u64) -> Option<Range<u64>> {
         self.chunk_map.get_by_offset(pos)
@@ -264,9 +267,9 @@ impl DataSource for TxDataSource<'_> {
             Ok(client
                 .retrieve_chunk(chunk_abs_pos, chunk.start, &data_root)
                 .await?
-                .map(|blob| {
-                    let len = blob.len();
-                    SimpleChunk::new(blob, chunk.start, 0..len)
+                .map(|validated_chunk| {
+                    let len = validated_chunk.len();
+                    TxChunk::new(validated_chunk, chunk.start, 0..len)
                 }))
         })
     }

@@ -1,11 +1,15 @@
 mod chunk;
+mod disk_cache;
+mod metadata;
 
 pub use chunk::FoyerChunkCache;
-pub use foyer::Error;
+pub use disk_cache::{DiskSpaceConfigError, Error, InvalidConfigError};
+pub use foyer::Error as FoyerError;
+pub use metadata::FoyerMetadataCache;
 
 #[cfg(test)]
 mod tests {
-    use crate::FoyerChunkCache;
+    use crate::{FoyerChunkCache, FoyerMetadataCache};
     use ario_client::{Cache, Client};
     use ario_core::Gateway;
     use ario_core::blob::Blob;
@@ -15,6 +19,7 @@ mod tests {
     use futures_lite::io::AsyncReadExt;
     use hex_literal::hex;
     use std::str::FromStr;
+    use std::time::Duration;
 
     fn init_tracing() {
         let _ = tracing_subscriber::fmt()
@@ -30,45 +35,57 @@ mod tests {
     ) -> anyhow::Result<()> {
         dotenv::dotenv().ok();
         init_tracing();
-
-        let client = Client::builder()
-            .cache(
-                Cache::builder()
-                    .chunk_l2_cache(
-                        FoyerChunkCache::new(
-                            1024 * 1024 * 100,
-                            std::env::var("ARTEST_L2_CHUNK_CACHE_PATH")?,
+        {
+            let client = Client::builder()
+                .cache(
+                    Cache::builder()
+                        .chunk_l2_cache(
+                            FoyerChunkCache::new(
+                                1024 * 1024 * 100,
+                                std::env::var("ARTEST_L2_CHUNK_CACHE_PATH")?,
+                                1 * 1024 * 1024,
+                            )
+                            .await?,
                         )
-                        .await?,
-                    )
-                    .build(),
-            )
-            .enable_netwatch(false)
-            .gateways(vec![Gateway::from_str("https://arweave.net")?].into_iter())
-            .build().await?;
+                        .metadata_l2_cache(
+                            FoyerMetadataCache::new(
+                                1024 * 1024 * 25,
+                                std::env::var("ARTEST_L2_METADATA_CACHE_PATH")?,
+                                1 * 1024 * 1024,
+                            )
+                            .await?,
+                        )
+                        .build(),
+                )
+                .enable_netwatch(false)
+                .gateways(vec![Gateway::from_str("https://arweave.net")?].into_iter())
+                .build()
+                .await?;
 
-        let item = client.bundle_item(&item_id, &tx_id).await?.unwrap();
-        assert_eq!(item.id(), &item_id);
+            let item = client.bundle_item(&item_id, &tx_id).await?.unwrap();
+            assert_eq!(item.id(), &item_id);
 
-        let len = item.data_size() as usize;
+            let len = item.data_size() as usize;
 
-        let mut read = 0;
-        let mut reader = client.read_bundle_item(&item).await?.unwrap();
+            let mut read = 0;
+            let mut reader = client.read_bundle_item(&item).await?.unwrap();
 
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; 64 * 1024];
+            let mut hasher = Sha256::new();
+            let mut buf = vec![0u8; 64 * 1024];
 
-        loop {
-            let n = reader.read(&mut buf).await?;
-            read += n;
-            if n == 0 {
-                break;
+            loop {
+                let n = reader.read(&mut buf).await?;
+                read += n;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[0..n]);
             }
-            hasher.update(&buf[0..n]);
+            assert_eq!(read, len);
+            let hash = hasher.finalize();
+            assert_eq!(hash.as_slice(), expected_hash.as_slice(),);
         }
-        assert_eq!(read, len);
-        let hash = hasher.finalize();
-        assert_eq!(hash.as_slice(), expected_hash.as_slice(),);
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         Ok(())
     }

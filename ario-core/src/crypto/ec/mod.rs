@@ -14,6 +14,7 @@ use ::ecdsa::EcdsaCurve;
 use ::ecdsa::hazmat::DigestAlgorithm;
 use derive_where::derive_where;
 use elliptic_curve::SecretKey as ExternalSecretKey;
+use elliptic_curve::pkcs8::AssociatedOid;
 use elliptic_curve::point::{DecompressPoint, PointCompression};
 use elliptic_curve::sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint};
 use elliptic_curve::{CurveArithmetic, PublicKey as ExternalPublicKey};
@@ -32,6 +33,7 @@ pub trait Curve:
     > + PointCompression
     + elliptic_curve::Curve<FieldBytesSize: Add<Output: ArraySize + Send + Sync>>
     + DigestAlgorithm
+    + AssociatedOid
 {
 }
 
@@ -176,7 +178,7 @@ impl EcSecretKey<Secp256k1> {
     }
 }
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct EcPublicKey<C: Curve>(ExternalPublicKey<C>);
 

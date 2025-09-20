@@ -14,6 +14,7 @@ use ct_codecs::Encoder;
 use ed25519_dalek::ed25519;
 use hybrid_array::typenum::{Sum, U4, U2048};
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use signature::Signer;
 use std::ops::Deref;
 use thiserror::Error;
@@ -107,7 +108,7 @@ impl Scheme for MultiAptosEd25519 {
 /// A 32-bit bitmap for tracking which participants have signed in a multisig scheme.
 ///
 /// Bits are indexed from left to right (MSB-first), from 0 to 31.
-#[derive(Copy, Clone, PartialEq, Default)]
+#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[repr(transparent)]
 struct Bitmap([u8; BITMAP_NUM_OF_BYTES]);
 
@@ -200,7 +201,7 @@ impl AsBlob for Bitmap {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultiAptosSignature {
     sigs: Vec<ed25519_dalek::Signature>,
     bitmap: Bitmap,
@@ -372,7 +373,7 @@ pub enum EntryError {
     InvalidNumberOfEntries(usize),
 }
 
-#[derive(Copy, Clone, Debug, Hash, PartialEq)]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
 #[repr(transparent)]
 pub(crate) struct Threshold(usize);
 
@@ -454,7 +455,7 @@ impl SecretKey for MultiAptosSigningKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Serialize, Deserialize)]
 pub struct MultiAptosVerifyingKey {
     keys: Vec<ed25519_dalek::VerifyingKey>,
     threshold: Threshold,

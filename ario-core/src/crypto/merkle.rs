@@ -4,7 +4,7 @@ use crate::chunking::{
 };
 use crate::crypto::hash::{Digest, Hashable, HashableExt, Hasher, Sha256};
 use crate::crypto::{Output, OutputLen};
-use crate::typed::{FromInner, Typed};
+use crate::typed::{FromInner, Typed, WithSerde};
 use bytemuck::TransparentWrapper;
 use bytes::{Buf, Bytes, BytesMut};
 use derive_where::derive_where;
@@ -20,6 +20,8 @@ pub type DefaultMerkleTree<'a> = MerkleTree<'a, Sha256, DefaultChunker, 32>;
 struct MerkleNodeIdKind;
 type NodeId<H: Hasher, C: Chunker, const NOTE_SIZE: usize, T = MerkleNodeIdKind> =
     Typed<(T, C, PhantomData<[(); NOTE_SIZE]>), Digest<H>>;
+
+impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize, T> WithSerde for NodeId<H, C, NOTE_SIZE, T> {}
 
 pub struct MerkleRootKind;
 pub type MerkleRoot<H: Hasher, C: Chunker, const NOTE_SIZE: usize> =
@@ -182,7 +184,7 @@ pub enum ProofError {
     VerificationFailed,
 }
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MerkleTree<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
     root: Node<'a, H, C, NOTE_SIZE>,
     proofs: RangeMap<u64, Proof<'static, H, C, NOTE_SIZE>>,
@@ -263,7 +265,7 @@ impl<'a, H: Hasher, C: Chunker, I: IntoMaybeOwnedChunk<'a, C>, const NOTE_SIZE: 
     }
 }
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum Node<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
     Leaf(Leaf<'a, H, C, NOTE_SIZE>),
     Branch(Branch<'a, H, C, NOTE_SIZE>),
@@ -310,9 +312,10 @@ impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> Node<'_, H, C, NOTE_SIZE> {
     }
 }
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Leaf<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
     id: NodeId<H, C, NOTE_SIZE>,
+    #[serde(with = "serde_arrays")]
     note: [u8; NOTE_SIZE],
     chunk: MaybeOwnedChunk<'a, C>,
 }
@@ -350,12 +353,13 @@ fn to_note<const NOTE_SIZE: usize>(value: u64) -> [u8; NOTE_SIZE] {
     note
 }
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Branch<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
     id: NodeId<H, C, NOTE_SIZE>,
     left: Box<Node<'a, H, C, NOTE_SIZE>>,
     right: Box<Node<'a, H, C, NOTE_SIZE>>,
     offset: Range<u64>, // Left child's min offset - Right child's max offset
+    #[serde(with = "serde_arrays")]
     note: [u8; NOTE_SIZE],
 }
 
@@ -426,7 +430,7 @@ fn generate_proofs<H: Hasher, C: Chunker, const NOTE_SIZE: usize>(
 
 pub type DefaultProof<'a> = Proof<'a, Sha256, DefaultChunker, 32>;
 
-#[derive_where(Clone, Debug, PartialEq, Eq)]
+#[derive_where(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proof<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
     offset: Range<u64>,
     proof: Blob<'a>,

@@ -38,14 +38,17 @@ use crate::entity::{
 };
 use crate::tag::Tag;
 use crate::tx::{TxId, ValidatedTx};
-use crate::typed::{FromInner, Typed};
-use crate::validation::{SupportsValidation, ValidateExt, Validator};
+use crate::typed::{FromInner, Typed, WithSerde};
+use crate::validation::{SupportsValidation, ValidateExt, Validator, ValidityToken};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk, WalletSk};
 use crate::{blob, data, entity};
 use bytes::Buf;
 use futures_lite::{AsyncRead, AsyncSeek, AsyncSeekExt};
+use hybrid_array::Array;
+use hybrid_array::sizes::U32;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::borrow::Cow;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
@@ -127,7 +130,7 @@ pub enum TagError {
     AvroDeError(#[from] serde_avro_fast::de::DeError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Bundle {
     V2(Arc<V2Bundle>),
 }
@@ -174,6 +177,17 @@ impl Bundle {
             Self::V2(_) => BundleType::V2,
         }
     }
+
+    #[inline]
+    pub fn read<R: Read>(
+        reader: R,
+        bundle_id: BundleId,
+        bundle_type: BundleType,
+    ) -> Result<Self, Error> {
+        match bundle_type {
+            BundleType::V2 => Ok(Self::V2(Arc::new(V2Bundle::read(reader, bundle_id)?))),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -211,7 +225,7 @@ impl BundleEntry<'_> {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum BundleType {
     V2 = 2,
@@ -286,7 +300,9 @@ impl BundleItemReader {
     ) -> Result<(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>), Error> {
         match entry {
             BundleEntry::V2(entry) => {
-                reader.seek(SeekFrom::Start(entry.container_location().offset())).await?;
+                reader
+                    .seek(SeekFrom::Start(entry.container_location().offset()))
+                    .await?;
                 let (item, data_verifier) = v2::BundleItem::read_async(
                     reader,
                     entry.len(),
@@ -311,7 +327,7 @@ impl BundleItemBuilder {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Serialize)]
 pub enum BundleItem<'a, const VALIDATED: bool = false> {
     V2(Arc<V2BundleItem<'a, VALIDATED>>),
 }
@@ -331,7 +347,33 @@ impl<'a, const VALIDATED: bool> From<Arc<V2BundleItem<'a, VALIDATED>>>
 }
 
 pub type UnvalidatedBundleItem<'a> = BundleItem<'a, false>;
+
+impl<'de, 'a> Deserialize<'de> for UnvalidatedBundleItem<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        enum Helper<'a> {
+            V2(Arc<V2BundleItem<'a, false>>),
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        match helper {
+            Helper::V2(item) => Ok(BundleItem::V2(item)),
+        }
+    }
+}
+
 pub type ValidatedBundleItem<'a> = BundleItem<'a, true>;
+
+impl<'a> ValidatedBundleItem<'a> {
+    pub fn invalidate(self) -> UnvalidatedBundleItem<'a> {
+        match self {
+            Self::V2(v2) => BundleItem::V2(Arc::new(Arc::unwrap_or_clone(v2).invalidate())),
+        }
+    }
+}
 
 impl<'a> SupportsValidation for UnvalidatedBundleItem<'a> {
     type Validated = ValidatedBundleItem<'a>;
@@ -340,12 +382,12 @@ impl<'a> SupportsValidation for UnvalidatedBundleItem<'a> {
     fn into_valid(
         self,
         token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
-    ) -> Self::Validated {
+    ) -> Option<Self::Validated> {
         match self {
             Self::V2(v2) => match token {
-                BundleItemValidationToken::V2(token) => {
-                    Self::Validated::V2(Arc::unwrap_or_clone(v2).into_valid(token).into())
-                }
+                BundleItemValidationToken::V2(token) => Arc::unwrap_or_clone(v2)
+                    .into_valid(token)
+                    .map(|v| Self::Validated::V2(v.into())),
             },
         }
     }
@@ -357,14 +399,25 @@ pub enum BundleItemValidationToken<'a> {
     V2(<V2BundleItemValidator as Validator<V2BundleItem<'a>>>::Token),
 }
 
+impl<'a> ValidityToken<UnvalidatedBundleItem<'a>> for BundleItemValidationToken<'a> {
+    fn is_valid_for(self, value: &UnvalidatedBundleItem<'a>) -> bool {
+        match self {
+            Self::V2(v2_token) => match value {
+                UnvalidatedBundleItem::V2(v2_item) => v2_token.is_valid_for(v2_item),
+            },
+        }
+    }
+}
+
 impl<'a> Validator<UnvalidatedBundleItem<'a>> for BundleItemValidator {
     type Error = BundleItemError;
+    type Reference<'r> = ();
     type Token = BundleItemValidationToken<'a>;
 
-    fn validate(item: &UnvalidatedBundleItem<'a>) -> Result<Self::Token, Self::Error> {
+    fn validate(item: &UnvalidatedBundleItem<'a>, _: &()) -> Result<Self::Token, Self::Error> {
         match item {
             UnvalidatedBundleItem::V2(v2) => Ok(BundleItemValidationToken::V2(
-                V2BundleItemValidator::validate(v2)?,
+                V2BundleItemValidator::validate(v2, &())?,
             )),
         }
     }
@@ -507,6 +560,8 @@ pub struct BundleItemKind;
 
 pub type BundleItemId = TypedDigest<BundleItemKind, Sha256>;
 
+impl WithSerde for BundleItemId {}
+
 #[derive(Error, Debug)]
 pub enum BundleItemIdError {
     #[error(transparent)]
@@ -535,7 +590,7 @@ impl Display for BundleItemId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Serialize, Deserialize)]
 pub enum BundleItemHash {
     V2(V2BundleItemHash),
 }
@@ -766,7 +821,8 @@ impl<S: SignatureScheme> BundleItemSignature<S> {
 }
 
 pub struct BundleAnchorKind;
-pub type BundleAnchor = Typed<BundleAnchorKind, [u8; 32]>;
+pub type BundleAnchor = Typed<BundleAnchorKind, Array<u8, U32>>;
+impl WithSerde for BundleAnchor {}
 
 impl Display for BundleAnchor {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -933,7 +989,7 @@ pub enum DataRoot<'a> {
     V2(V2MaybeOwnedDataRoot<'a>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum BundleItemVerifier<'a> {
     V2(MaybeOwned<'a, V2BundleItemVerifier<'a>>),
 }

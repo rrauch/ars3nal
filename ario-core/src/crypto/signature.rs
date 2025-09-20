@@ -7,11 +7,12 @@ use bytemuck::TransparentWrapper;
 use derive_where::derive_where;
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
+use std::hash::{Hash, Hasher};
 use thiserror::Error;
 
 pub type TypedSignature<T, SIGNER, S: Scheme> = Typed<(T, SIGNER), Signature<S>>;
 
-#[derive_where(Clone, PartialEq)]
+#[derive_where(Clone, PartialEq, Serialize, Deserialize)]
 #[derive(TransparentWrapper)]
 #[repr(transparent)]
 pub struct Signature<S: Scheme>(S::Output);
@@ -31,6 +32,12 @@ impl<S: Scheme> Debug for Signature<S> {
 impl<S: Scheme> AsBlob for Signature<S> {
     fn as_blob(&self) -> Blob<'_> {
         self.0.as_blob()
+    }
+}
+
+impl<S: Scheme> Hash for Signature<S> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_blob().hash(state)
     }
 }
 

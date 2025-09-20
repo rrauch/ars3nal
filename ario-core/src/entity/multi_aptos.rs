@@ -8,11 +8,22 @@ use crate::entity::{ArEntityHash, ArEntitySignature, Error, MessageFor, Owner};
 use crate::typed::FromInner;
 use crate::wallet::{WalletPk, WalletSk};
 use derive_where::derive_where;
+use std::hash::{Hash, Hasher};
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MultiAptosSignatureData<T: ArEntityHash> {
     owner: WalletPk<<MultiAptosEd25519 as Scheme>::Verifier>,
     signature: ArEntitySignature<T, MultiAptosEd25519>,
+}
+
+impl<T: ArEntityHash> Hash for MultiAptosSignatureData<T>
+where
+    T: MessageFor<MultiAptosEd25519>,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.owner.hash(state);
+        self.signature.hash(state);
+    }
 }
 
 impl<T: ArEntityHash> MultiAptosSignatureData<T>

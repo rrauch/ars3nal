@@ -29,13 +29,15 @@ use crate::entity::ed25519::{
 use crate::entity::multi_aptos::MultiAptosSignatureData;
 use crate::entity::pss::{PssSignatureData, Rsa4096SignatureData};
 use crate::tag::Tag;
-use crate::typed::FromInner;
+use crate::typed::{FromInner, WithSerde};
 use crate::validation::ValidateExt;
 use crate::wallet::{WalletAddress, WalletSk};
 use bon::Builder;
 use bytes::Buf;
 use futures_lite::AsyncRead;
 use maybe_owned::MaybeOwned;
+use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Display, Formatter};
 use std::io::Read;
 use std::ops::Deref;
@@ -55,7 +57,7 @@ const MAX_TAG_VALUE_SIZE: usize = 3072;
 
 const DATA_CHUNK_SIZE: usize = 64 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bundle {
     id: BundleId,
     entries: Vec<BundleEntry>,
@@ -106,7 +108,7 @@ impl Bundle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleEntry {
     id: BundleItemId,
     len: u64,
@@ -280,7 +282,7 @@ pub struct BundleItemDataProcessor {
     processed: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerLocation {
     offset: u64,
     container_size: u64,
@@ -392,7 +394,7 @@ impl BundleItemDataProcessor {
 //   7: TypedEthereumSigner
 // 101: KYVE
 //
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize_repr, Deserialize_repr)]
 #[repr(u16)]
 pub enum SignatureType {
     RsaPss = 1,
@@ -507,7 +509,7 @@ impl<'a> Signature<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
 pub(super) enum SignatureData {
     Rsa4096(Rsa4096SignatureData<BundleItemHash>),
     Eip191(Eip191SignatureData<BundleItemHash>),
@@ -741,8 +743,12 @@ impl SignatureData {
 
 pub(crate) type V2BundleItemHash = TypedDigest<BundleItemKind, Sha384>;
 
+impl WithSerde for V2BundleItemHash {}
+
 struct BundleItemDataKind;
 type DataDeepHash = TypedDigest<BundleItemDataKind, Sha384>;
+
+impl WithSerde for DataDeepHash {}
 
 struct BundleItemTagsKind;
 type TagsDeepHash = TypedDigest<BundleItemTagsKind, Sha384>;

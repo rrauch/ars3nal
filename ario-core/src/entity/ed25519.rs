@@ -1,4 +1,4 @@
-use crate::blob::Blob;
+use crate::blob::{AsBlob, Blob};
 use crate::crypto::edwards::eddsa::EddsaVerifyingKey;
 use crate::crypto::edwards::variants::{Aptos, Ed25519HexStr};
 use crate::crypto::edwards::{Ed25519, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
@@ -8,6 +8,7 @@ use crate::entity::{ArEntityHash, ArEntitySignature, Error, MessageFor, Owner};
 use crate::typed::FromInner;
 use crate::wallet::{WalletPk, WalletSk};
 use derive_where::derive_where;
+use std::hash::{Hash, Hasher};
 
 pub type Ed25519RegularSignatureData<T: ArEntityHash> = Ed25519SignatureData<T, Ed25519>;
 pub type Ed25519HexStrSignatureData<T: ArEntityHash> = Ed25519SignatureData<T, Ed25519HexStr>;
@@ -46,10 +47,20 @@ impl SupportedScheme for Aptos {
     }
 }
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Ed25519SignatureData<T: ArEntityHash, S: SupportedScheme> {
     owner: WalletPk<S::Verifier>,
     signature: ArEntitySignature<T, S>,
+}
+
+impl<T: ArEntityHash, S: SupportedScheme> Hash for Ed25519SignatureData<T, S>
+where
+    T: MessageFor<S>,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.owner.as_blob().hash(state);
+        self.signature.as_blob().hash(state);
+    }
 }
 
 impl<T: ArEntityHash, S: SupportedScheme> Ed25519SignatureData<T, S>

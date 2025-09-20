@@ -10,6 +10,7 @@ use crate::entity::{ArEntityHash, ArEntitySignature, Error, MessageFor, Owner, S
 use crate::typed::FromInner;
 use crate::wallet::{WalletPk, WalletSk};
 use itertools::Either;
+use serde::{Deserialize, Serialize};
 
 pub type Rsa4096SignatureData<T: ArEntityHash> = PssSignatureData<T, 4096>;
 pub type Rsa2048SignatureData<T: ArEntityHash> = PssSignatureData<T, 2048>;
@@ -33,10 +34,11 @@ where
     })
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
 pub(crate) struct PssSignatureData<T: ArEntityHash, const BIT: usize>
 where
     RsaPss<BIT>: Scheme,
+    Rsa<BIT>: SupportedRsaKeySize,
 {
     owner: WalletPk<RsaPublicKey<BIT>>,
     signature: ArEntitySignature<T, RsaPss<BIT>>,
@@ -107,6 +109,7 @@ impl<T: ArEntityHash> PssSignatureData<T, 2048> {
 impl<T: ArEntityHash, const BIT: usize> DeepHashable for PssSignatureData<T, BIT>
 where
     RsaPss<BIT>: Scheme,
+    Rsa<BIT>: SupportedRsaKeySize,
 {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
         self.owner.deep_hash()
@@ -116,6 +119,7 @@ where
 impl<T: ArEntityHash, const BIT: usize> Hashable for PssSignatureData<T, BIT>
 where
     RsaPss<BIT>: Scheme,
+    Rsa<BIT>: SupportedRsaKeySize,
 {
     fn feed<H: Hasher>(&self, hasher: &mut H) {
         self.owner.feed(hasher)

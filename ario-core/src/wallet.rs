@@ -22,7 +22,7 @@ use crate::entity::{ArEntityHash, ArEntitySignature, MessageFor};
 use crate::jwk::Jwk;
 use crate::tx::v2::TxDraft;
 use crate::tx::{TxError, ValidatedTx};
-use crate::typed::{FromInner, WithDisplay};
+use crate::typed::{FromInner, WithDisplay, WithSerde};
 use crate::{Address, blob};
 use bip39::Mnemonic;
 use bytemuck::TransparentWrapper;
@@ -189,6 +189,8 @@ pub struct WalletKind;
 pub type WalletSk<SK: SecretKey> = TypedSecretKey<WalletKind, SK>;
 pub type WalletPk<PK: PublicKey> = TypedPublicKey<WalletKind, PK>;
 
+impl<PK: PublicKey> WithSerde for WalletPk<PK> {}
+
 impl<SK: SecretKey> WalletSk<SK> {
     pub(crate) fn sign_entity_hash<S: SignatureScheme, T: ArEntityHash>(
         &self,
@@ -211,6 +213,8 @@ impl<SK: SecretKey> WalletSk<SK> {
 }
 
 pub type WalletAddress = Address<WalletKind>;
+
+impl WithSerde for WalletAddress {}
 
 impl WithDisplay for WalletAddress {}
 
@@ -279,7 +283,7 @@ mod tests {
 
         let draft = TxBuilder::v2()
             .reward(12345)?
-            .tx_anchor(TxAnchor::from_inner([0u8; 48]))
+            .tx_anchor(TxAnchor::from_inner([0u8; 48].into()))
             .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 999999)?)
             .draft();
 
@@ -302,7 +306,7 @@ mod tests {
 
         let draft = TxBuilder::v2()
             .reward(22345)?
-            .tx_anchor(TxAnchor::from_inner([0u8; 48]))
+            .tx_anchor(TxAnchor::from_inner([0u8; 48].into()))
             .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 99999)?)
             .draft();
 

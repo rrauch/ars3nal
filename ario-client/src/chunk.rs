@@ -8,7 +8,10 @@ use ario_core::Gateway;
 use ario_core::base64::OptionalBase64As;
 use ario_core::blob::{AsBlob, Blob};
 use ario_core::crypto::merkle::{DefaultProof, ProofError};
-use ario_core::data::{DataRoot, ExternalDataItemVerifier, Verifier};
+use ario_core::data::{
+    DataRoot, ExternalDataItemVerifier, TxDataChunk, TxDataValidityProof, ValidatedTxDataChunk,
+    Verifier,
+};
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
@@ -47,7 +50,7 @@ impl Api {
         &self,
         gateway: &Gateway,
         offset: u128,
-    ) -> Result<Option<DownloadChunk<'static>>, api::Error> {
+    ) -> Result<Option<RawTxDownloadChunk<'static>>, api::Error> {
         let req = ApiRequest::builder()
             .endpoint(
                 gateway
@@ -132,10 +135,10 @@ impl Client {
         offset: u128,
         relative_offset: u64,
         data_root: &DataRoot,
-    ) -> Result<Option<Blob<'static>>, super::Error> {
+    ) -> Result<Option<ValidatedTxDataChunk<'static>>, super::Error> {
         self.0
             .cache
-            .get_chunk_by_offset(offset, async |offset| {
+            .get_chunk(offset, data_root, relative_offset, async |offset| {
                 self._retrieve_chunk_live(offset, relative_offset, data_root)
                     .await
             })
@@ -147,28 +150,22 @@ impl Client {
         offset: u128,
         relative_offset: u64,
         data_root: &DataRoot,
-    ) -> Result<Option<Blob<'static>>, super::Error> {
-        let chunk: DownloadChunk<'static> = match self
+    ) -> Result<Option<ValidatedTxDownloadChunk<'static>>, super::Error> {
+        let chunk: UnvalidatedTxDownloadChunk<'static> = match self
             .with_gw(async |gw| self.0.api.download_chunk(gw, offset).await)
             .await?
         {
-            Some(chunk) => chunk,
+            Some(chunk) => chunk.into(),
             None => {
                 return Ok(None);
             }
         };
 
-        let proof = DefaultProof::new(
-            relative_offset..(relative_offset + chunk.chunk.len() as u64),
-            chunk.data_path,
-        );
-
-        data_root
-            .verify_data(&mut Cursor::new(chunk.chunk.as_ref()), &proof)
-            .map_err(|e| DownloadError::ProofError(e))?;
-
-        // verification passed, chunk data ok
-        Ok(Some(chunk.chunk))
+        Ok(Some(
+            chunk
+                .validate(data_root, relative_offset)
+                .map_err(DownloadError::ProofError)?,
+        ))
     }
 }
 
@@ -205,23 +202,80 @@ struct UploadChunk<'a> {
     chunk: Blob<'a>,
 }
 
-#[serde_as]
-#[derive(Clone, Deserialize, Debug)]
-struct DownloadChunk<'a> {
-    #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
-    chunk: Blob<'a>,
-    #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
+pub(crate) type UnvalidatedTxDownloadChunk<'a> = TxDownloadChunk<'a, false>;
+impl<'a> UnvalidatedTxDownloadChunk<'a> {
+    pub(crate) fn validate(
+        self,
+        data_root: &DataRoot,
+        relative_offset: u64,
+    ) -> Result<ValidatedTxDownloadChunk<'a>, ProofError> {
+        let proof = TxDataValidityProof::new(
+            data_root.into(),
+            DefaultProof::new(
+                relative_offset..(relative_offset + self.chunk.len() as u64),
+                Blob::Slice(self.data_path.bytes()),
+            ),
+        );
+
+        let validated = self.chunk.validate(&proof).map_err(|(_, e)| e)?;
+
+        Ok(TxDownloadChunk {
+            chunk: validated,
+            data_path: self.data_path,
+            tx_path: self.tx_path,
+        })
+    }
+}
+
+pub(crate) type ValidatedTxDownloadChunk<'a> = TxDownloadChunk<'a, true>;
+
+impl<'a> ValidatedTxDownloadChunk<'a> {
+    pub(crate) fn invalidate(self) -> UnvalidatedTxDownloadChunk<'a> {
+        TxDownloadChunk {
+            chunk: self.chunk.invalidate(),
+            data_path: self.data_path,
+            tx_path: self.tx_path,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TxDownloadChunk<'a, const VALIDATED: bool> {
+    pub(crate) chunk: TxDataChunk<'a, VALIDATED>,
     data_path: Blob<'a>,
+    tx_path: Option<Blob<'a>>,
+}
+
+impl<'a> From<RawTxDownloadChunk<'a>> for UnvalidatedTxDownloadChunk<'a> {
+    fn from(raw: RawTxDownloadChunk<'a>) -> Self {
+        Self {
+            chunk: TxDataChunk::from_blob(raw.chunk),
+            data_path: raw.data_path,
+            tx_path: raw.tx_path,
+        }
+    }
+}
+
+impl<'a> From<ValidatedTxDownloadChunk<'a>> for RawTxDownloadChunk<'a> {
+    fn from(value: ValidatedTxDownloadChunk<'a>) -> Self {
+        Self {
+            chunk: value.chunk.into_inner(),
+            data_path: value.data_path,
+            tx_path: value.tx_path,
+        }
+    }
+}
+
+#[serde_as]
+#[derive(Clone, Deserialize, Debug, PartialEq)]
+pub struct RawTxDownloadChunk<'a> {
+    #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
+    pub chunk: Blob<'a>,
+    #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
+    pub data_path: Blob<'a>,
     #[serde_as(as = "OptionalBase64As")]
     #[serde(default)]
-    tx_path: Option<Blob<'a>>,
-    /*#[serde_as(as = "OptionalBase64As")]
-    #[serde(default)]
-    data_root: Option<Blob<'a>>,
-    #[serde(default)]
-    data_size: Option<u64>,
-    #[serde(default)]
-    offset: Option<u128>,*/
+    pub tx_path: Option<Blob<'a>>,
 }
 
 #[cfg(test)]

@@ -3,13 +3,16 @@ use crate::bundle;
 use crate::bundle::MaybeOwnedBundledDataItem;
 use crate::chunking::{Chunker, ChunkerExt, DefaultChunker, MaybeOwnedChunk, TypedChunk};
 use crate::crypto::hash::{Hasher, Sha256};
-use crate::crypto::merkle::{DefaultMerkleRoot, MerkleRoot, MerkleTree, Proof};
-use crate::typed::FromInner;
+use crate::crypto::merkle;
+use crate::crypto::merkle::{DefaultMerkleRoot, DefaultProof, MerkleRoot, MerkleTree, Proof};
+use crate::typed::{FromInner, WithSerde};
+use crate::validation::{SupportsValidation, ValidateExt, Validator, ValidityProof, ValidityToken};
 use derive_where::derive_where;
 use futures_lite::AsyncRead;
 use maybe_owned::MaybeOwned;
 use std::borrow::Borrow;
 use std::fmt::Debug;
+use std::io::Cursor;
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
@@ -23,6 +26,106 @@ pub type MaybeOwnedDefaultChunkedData<'a> = MaybeOwned<'a, DefaultChunkedData>;
 pub type ExternalDataItem<'a> = MerkleVerifiableDataItem<'a, Sha256, DefaultChunker, 32>;
 pub type MaybeOwnedExternalDataItem<'a> = MaybeOwned<'a, ExternalDataItem<'a>>;
 
+#[derive(Clone, PartialEq, Hash, Debug)]
+pub struct TxDataChunk<'a, const VALIDATED: bool = false>(Blob<'a>);
+pub type ValidatedTxDataChunk<'a> = TxDataChunk<'a, true>;
+
+impl<'a> AsBlob for ValidatedTxDataChunk<'a> {
+    fn as_blob(&self) -> Blob<'_> {
+        self.0.as_blob()
+    }
+}
+
+impl AsRef<[u8]> for ValidatedTxDataChunk<'_> {
+    fn as_ref(&self) -> &[u8] {
+        self.0.bytes()
+    }
+}
+
+impl<'a> ValidatedTxDataChunk<'a> {
+    pub fn invalidate(self) -> UnvalidatedTxDataChunk<'a> {
+        TxDataChunk(self.0)
+    }
+
+    pub fn into_inner(self) -> Blob<'a> {
+        self.0
+    }
+}
+
+pub type UnvalidatedTxDataChunk<'a> = TxDataChunk<'a, false>;
+
+impl<'a, const VALIDATED: bool> TxDataChunk<'a, VALIDATED> {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl<'a> UnvalidatedTxDataChunk<'a> {
+    #[inline]
+    pub fn from_blob(data: Blob<'a>) -> Self {
+        Self(data)
+    }
+
+    #[inline]
+    pub fn validate(
+        self,
+        proof: &TxDataValidityProof<'_>,
+    ) -> Result<ValidatedTxDataChunk<'a>, (Self, merkle::ProofError)> {
+        self.validate_with(proof)
+    }
+}
+
+impl<'a> SupportsValidation for UnvalidatedTxDataChunk<'a> {
+    type Validated = ValidatedTxDataChunk<'a>;
+    type Validator = TxDataChunkValidator;
+
+    fn into_valid(
+        self,
+        token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
+    ) -> Option<Self::Validated> {
+        if !token.is_valid_for(&self) {
+            return None;
+        }
+        Some(TxDataChunk(self.0))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TxDataValidityProof<'a> {
+    data_root: MaybeOwnedDataRoot<'a>,
+    proof: DefaultProof<'a>,
+}
+
+impl<'a> TxDataValidityProof<'a> {
+    pub fn new(data_root: MaybeOwnedDataRoot<'a>, proof: DefaultProof<'a>) -> Self {
+        Self { data_root, proof }
+    }
+}
+
+pub struct TxDataChunkValidator;
+pub struct TxDataChunkValidationToken<'a>(ValidityProof<UnvalidatedTxDataChunk<'a>>);
+impl<'a> ValidityToken<UnvalidatedTxDataChunk<'a>> for TxDataChunkValidationToken<'a> {
+    fn is_valid_for(self, value: &UnvalidatedTxDataChunk<'a>) -> bool {
+        self.0.is_valid_for(value)
+    }
+}
+
+impl<'a> Validator<UnvalidatedTxDataChunk<'a>> for TxDataChunkValidator {
+    type Error = merkle::ProofError;
+    type Reference<'r> = TxDataValidityProof<'r>;
+    type Token = TxDataChunkValidationToken<'a>;
+
+    fn validate(
+        data: &UnvalidatedTxDataChunk<'a>,
+        reference: &Self::Reference<'_>,
+    ) -> Result<Self::Token, Self::Error> {
+        reference
+            .data_root
+            .verify_data(&mut Cursor::new(data.0.bytes()), &reference.proof)?;
+        Ok(TxDataChunkValidationToken(ValidityProof::new(data)))
+    }
+}
+
 pub trait Verifier<DataItem>: Sized {
     type Proof<'a>
     where
@@ -34,7 +137,7 @@ pub trait Verifier<DataItem>: Sized {
 
 pub type ExternalDataItemVerifier<'a> = MerkleDataItemVerifier<'a, Sha256, DefaultChunker, 32>;
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MerkleDataItemVerifier<'a, H: Hasher + 'a, C: Chunker, const NOTE_SIZE: usize> {
     data_item: MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE>,
     merkle_tree: Arc<MerkleTree<'a, H, C, NOTE_SIZE>>,
@@ -137,7 +240,7 @@ impl<
     }
 }
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MerkleVerifiableDataItem<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
     data_size: u64,
     data_root: MaybeOwned<'a, MerkleRoot<H, C, NOTE_SIZE>>,
@@ -167,6 +270,8 @@ impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize>
 
 pub struct EmbeddedDataItemKind;
 pub type EmbeddedDataItem<'a> = TypedBlob<'a, EmbeddedDataItemKind>;
+
+impl<'a> WithSerde for EmbeddedDataItem<'a> {}
 
 pub type MaybeOwnedEmbeddedDataItem<'a> = MaybeOwned<'a, EmbeddedDataItem<'a>>;
 

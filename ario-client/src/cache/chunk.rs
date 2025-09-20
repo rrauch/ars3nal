@@ -1,22 +1,24 @@
 use crate::Cache;
 use crate::cache::{Context, Error, HasWeight, InnerCache};
-use ario_core::blob::OwnedBlob;
+use crate::chunk::{RawTxDownloadChunk, UnvalidatedTxDownloadChunk, ValidatedTxDownloadChunk};
+use ario_core::data::{DataRoot, TxDataChunk, ValidatedTxDataChunk};
 use std::iter;
 
-pub(super) type ChunkCache = InnerCache<u128, OwnedBlob, Box<DynL2ChunkCache<'static>>>;
+pub(super) type ChunkCache =
+    InnerCache<u128, ValidatedTxDataChunk<'static>, Box<DynL2ChunkCache<'static>>>;
 
 #[dynosaur::dynosaur(pub(super) DynL2ChunkCache = dyn(box) L2Cache)]
 pub trait L2Cache: Send + Sync {
     fn init(&mut self, ctx: &Context) -> impl Future<Output = Result<(), std::io::Error>> + Send;
 
-    fn get_chunk_by_offset(
+    fn get_chunk(
         &self,
         offset: &u128,
-    ) -> impl Future<Output = Result<Option<OwnedBlob>, std::io::Error>> + Send;
-    fn insert_chunk_with_offset(
+    ) -> impl Future<Output = Result<Option<RawTxDownloadChunk<'static>>, std::io::Error>> + Send;
+    fn insert_chunk(
         &self,
         offset: u128,
-        value: OwnedBlob,
+        value: RawTxDownloadChunk<'static>,
     ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
     fn invalidate(&self, offset: &u128) -> impl Future<Output = Result<(), std::io::Error>> + Send {
         self.invalidate_many(iter::once(offset))
@@ -28,33 +30,37 @@ pub trait L2Cache: Send + Sync {
 }
 
 impl Cache {
-    pub(crate) async fn get_chunk_by_offset(
+    pub(crate) async fn get_chunk(
         &self,
         offset: u128,
-        f: impl AsyncFnOnce(u128) -> Result<Option<OwnedBlob>, crate::Error>,
-    ) -> Result<Option<OwnedBlob>, crate::Error> {
+        data_root: &DataRoot,
+        relative_offset: u64,
+        f: impl AsyncFnOnce(u128) -> Result<Option<ValidatedTxDownloadChunk<'static>>, crate::Error>,
+    ) -> Result<Option<ValidatedTxDataChunk<'static>>, crate::Error> {
         let chunk_cache = &self.chunk_cache;
         Ok(chunk_cache
             .l1
             .try_get_with_by_ref(&offset, async {
                 if let Some(l2) = self.chunk_cache.l2.as_ref() {
-                    if let Some(chunk) = l2
-                        .get_chunk_by_offset(&offset)
-                        .await
-                        .map_err(Error::L2Error)?
-                    {
-                        return Ok(Some(chunk));
+                    if let Some(raw) = l2.get_chunk(&offset).await.map_err(Error::L2Error)? {
+                        if let Ok(validated) = UnvalidatedTxDownloadChunk::from(raw)
+                            .validate(data_root, relative_offset)
+                        {
+                            return Ok(Some(validated.chunk));
+                        }
+                        // entry is invalid
+                        l2.invalidate(&offset).await.map_err(Error::L2Error)?;
                     }
                 }
                 let offset = offset.clone();
                 Ok(match f(offset).await? {
                     Some(value) => {
                         if let Some(l2) = self.chunk_cache.l2.as_ref() {
-                            l2.insert_chunk_with_offset(offset, value.clone())
+                            l2.insert_chunk(offset, value.clone().into())
                                 .await
                                 .map_err(Error::L2Error)?;
                         }
-                        Some(value)
+                        Some(value.chunk)
                     }
                     None => None,
                 })
@@ -70,7 +76,7 @@ impl HasWeight for u128 {
     }
 }
 
-impl HasWeight for OwnedBlob {
+impl<'a, const VALIDATED: bool> HasWeight for TxDataChunk<'a, VALIDATED> {
     fn weigh(&self) -> usize {
         self.len() + size_of_val(self)
     }

@@ -14,11 +14,13 @@ use crate::crypto::rsa::RsaPublicKey;
 use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature::Scheme as SignatureScheme;
 use crate::crypto::{keys, signature};
+use crate::typed::WithSerde;
 use crate::wallet::{WalletAddress, WalletKind, WalletPk};
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use std::borrow::Cow;
 use std::fmt::{Debug, Display};
+use std::hash::Hash;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -31,10 +33,12 @@ pub enum Error {
     SigningError(String),
 }
 
-pub trait ArEntityHash: ToSignableMessage + PartialEq + Clone + Send {}
+pub trait ArEntityHash: ToSignableMessage + PartialEq + Clone + Send + Hash {}
 
 pub type ArEntitySignature<T: ArEntityHash, S: SignatureScheme> =
     signature::TypedSignature<T, WalletKind, S>;
+
+impl<T: ArEntityHash, S: SignatureScheme> WithSerde for ArEntitySignature<T, S> {}
 
 pub trait ArEntity {
     type Id: PartialEq + Clone + Debug + Display + Send;

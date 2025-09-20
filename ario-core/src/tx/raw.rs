@@ -6,7 +6,7 @@ use crate::json::JsonSource;
 use crate::tag::{Tag, TagName, TagValue};
 use crate::tx::{Format, SignatureType};
 use crate::typed::FromInner;
-use crate::validation::{SupportsValidation, Validator};
+use crate::validation::{SupportsValidation, Validator, ValidityProof, ValidityToken};
 use crate::{JsonError, JsonValue};
 use bigdecimal::{BigDecimal, Zero};
 use serde::{Deserialize, Serialize};
@@ -17,19 +17,26 @@ use serde_with::formats::Unpadded;
 use serde_with::serde_as;
 use serde_with::{DeserializeAs, DisplayFromStr, SerializeAs};
 use std::fmt::Display;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::LazyLock;
 use thiserror::Error;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 #[repr(transparent)]
 pub(super) struct RawTx<'a, const VALIDATED: bool = false>(RawTxData<'a>);
 
 impl<'a, const VALIDATED: bool> RawTx<'a, VALIDATED> {
     pub(super) fn as_inner(&self) -> &RawTxData<'a> {
         &self.0
+    }
+
+    pub(super) fn to_json_string(&self) -> Result<String, JsonError> {
+        self.0.to_json_string()
+    }
+
+    pub(super) fn to_json(&self) -> Result<JsonValue, JsonError> {
+        self.0.to_json()
     }
 }
 
@@ -59,14 +66,6 @@ impl<'a> ValidatedRawTx<'a> {
     pub(super) fn into_inner(self) -> RawTxData<'a> {
         self.0
     }
-
-    pub(super) fn to_json_string(&self) -> Result<String, JsonError> {
-        self.0.to_json_string()
-    }
-
-    pub(super) fn to_json(&self) -> Result<JsonValue, JsonError> {
-        self.0.to_json()
-    }
 }
 
 impl UnvalidatedRawTx<'static> {
@@ -82,9 +81,12 @@ impl<'a> SupportsValidation for UnvalidatedRawTx<'a> {
 
     fn into_valid(
         self,
-        _token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
-    ) -> Self::Validated {
-        RawTx(self.0)
+        token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
+    ) -> Option<Self::Validated> {
+        if !token.is_valid_for(&self) {
+            return None;
+        }
+        Some(RawTx(self.0))
     }
 }
 
@@ -97,7 +99,7 @@ pub enum RawTxError {
 }
 
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Hash)]
 pub(super) struct RawTag<'a> {
     #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
     pub name: Blob<'a>,
@@ -132,7 +134,7 @@ impl<'a> From<Tag<'a>> for RawTag<'a> {
 // This follows the definition found here:
 // https://docs.arweave.org/developers/arweave-node-server/http-api#field-definitions
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Hash)]
 pub(super) struct RawTxData<'a> {
     pub format: Format,
     #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
@@ -257,13 +259,19 @@ pub enum RawTxDataError {
 
 pub struct RawTxDataValidator;
 
-pub struct RawTxValidationToken(PhantomData<()>);
+pub struct RawTxValidationToken<'a>(ValidityProof<UnvalidatedRawTx<'a>>);
+impl<'a> ValidityToken<UnvalidatedRawTx<'a>> for RawTxValidationToken<'a> {
+    fn is_valid_for(self, value: &UnvalidatedRawTx<'a>) -> bool {
+        self.0.is_valid_for(value)
+    }
+}
 
-impl Validator<UnvalidatedRawTx<'_>> for RawTxDataValidator {
+impl<'a> Validator<UnvalidatedRawTx<'a>> for RawTxDataValidator {
     type Error = RawTxDataError;
-    type Token = RawTxValidationToken;
+    type Reference<'r> = ();
+    type Token = RawTxValidationToken<'a>;
 
-    fn validate(data: &UnvalidatedRawTx) -> Result<Self::Token, Self::Error> {
+    fn validate(data: &UnvalidatedRawTx<'a>, _: &()) -> Result<Self::Token, Self::Error> {
         const VALID_ID_LENGTHS: &[usize] = &[32];
         const VALID_LAST_TX_LENGTHS: &[usize] = &[32, 48];
         const VALID_OWNER_LENGTHS: &[usize] = &[256, 512];
@@ -335,7 +343,7 @@ impl Validator<UnvalidatedRawTx<'_>> for RawTxDataValidator {
             return Err(RawTxDataError::IdSignatureMismatch);
         }
 
-        Ok(RawTxValidationToken(PhantomData))
+        Ok(RawTxValidationToken(ValidityProof::new(data)))
     }
 }
 

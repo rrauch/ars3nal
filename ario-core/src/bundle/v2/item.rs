@@ -14,16 +14,20 @@ use crate::bundle::{
 use crate::chunking::DefaultChunker;
 use crate::crypto::hash::HashableExt;
 use crate::tag::Tag;
-use crate::validation::{SupportsValidation, Validator};
+use crate::validation::{SupportsValidation, Validator, ValidityProof, ValidityToken};
 use crate::wallet::WalletAddress;
 use bytes::{BufMut, BytesMut};
 use futures_lite::AsyncRead;
 use maybe_owned::MaybeOwned;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::io::Read;
-use std::marker::PhantomData;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct BundleItem<'a, const VALIDATED: bool = false> {
+#[derive(Clone, Debug, PartialEq, Hash)]
+#[repr(transparent)]
+pub struct BundleItem<'a, const VALIDATED: bool = false>(BundleItemInner<'a>);
+
+#[derive(Clone, Debug, PartialEq, Hash, Serialize, Deserialize)]
+struct BundleItemInner<'a> {
     id: BundleItemId,
     bundle_id: BundleId,
     anchor: Option<BundleAnchor>,
@@ -38,37 +42,37 @@ pub struct BundleItem<'a, const VALIDATED: bool = false> {
 impl<'a, const VALIDATED: bool> BundleItem<'a, VALIDATED> {
     #[inline]
     pub fn id(&self) -> &BundleItemId {
-        &self.id
+        &self.0.id
     }
 
     #[inline]
     pub fn bundle_id(&self) -> &BundleId {
-        &self.bundle_id
+        &self.0.bundle_id
     }
 
     #[inline]
     pub fn anchor(&self) -> Option<&BundleAnchor> {
-        self.anchor.as_ref()
+        self.0.anchor.as_ref()
     }
 
     #[inline]
     pub fn tags(&self) -> &Vec<Tag<'a>> {
-        &self.tags
+        &self.0.tags
     }
 
     #[inline]
     pub fn target(&self) -> Option<&WalletAddress> {
-        self.target.as_ref()
+        self.0.target.as_ref()
     }
 
     #[inline]
     pub fn data_size(&self) -> u64 {
-        self.data_size
+        self.0.data_size
     }
 
     #[inline]
     pub fn data_offset(&self) -> u64 {
-        self.data_offset
+        self.0.data_offset
     }
 }
 
@@ -76,24 +80,24 @@ pub type ValidatedItem<'a> = BundleItem<'a, true>;
 
 impl ValidatedItem<'_> {
     pub fn try_as_blob(&self) -> Result<OwnedBlob, TagError> {
-        let tag_data = to_avro(self.tags.iter())?;
-        let owner = self.signature_data.owner();
-        let signature = self.signature_data.signature();
+        let tag_data = to_avro(self.0.tags.iter())?;
+        let owner = self.0.signature_data.owner();
+        let signature = self.0.signature_data.signature();
 
         let raw = RawBundleItem {
-            anchor: self.anchor.as_ref().map(|a| a.as_blob()),
+            anchor: self.0.anchor.as_ref().map(|a| a.as_blob()),
             tag_data,
-            tag_count: self.tags.len(),
-            target: self.target.as_ref().map(|t| t.as_blob()),
-            data_size: self.data_size,
-            data_offset: self.data_offset,
+            tag_count: self.0.tags.len(),
+            target: self.0.target.as_ref().map(|t| t.as_blob()),
+            data_size: self.0.data_size,
+            data_offset: self.0.data_offset,
             owner: owner.as_blob(),
             signature: signature.as_blob(),
-            signature_type: self.signature_data.signature_type(),
+            signature_type: self.0.signature_data.signature_type(),
             data_deep_hash: DataDeepHash::new_from_inner(b"".digest()), // dummy value
             data_verifier: BundleItemDataVerifier::from_single_value(
                 Blob::Slice(b"".as_slice()),
-                BundleItemChunker::new(0, DefaultChunker::chunk_map(self.data_size)),
+                BundleItemChunker::new(0, DefaultChunker::chunk_map(self.0.data_size)),
             ), // dummy value
         };
 
@@ -101,7 +105,31 @@ impl ValidatedItem<'_> {
     }
 }
 
+impl<'a> ValidatedItem<'a> {
+    pub fn invalidate(self) -> UnvalidatedItem<'a> {
+        BundleItem(self.0)
+    }
+}
+
 pub type UnvalidatedItem<'a> = BundleItem<'a, false>;
+
+impl<'a, const VALIDATED: bool> Serialize for BundleItem<'a, VALIDATED> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de, 'a> Deserialize<'de> for UnvalidatedItem<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self(BundleItemInner::deserialize(deserializer)?))
+    }
+}
 
 impl UnvalidatedItem<'static> {
     #[inline]
@@ -121,7 +149,7 @@ impl UnvalidatedItem<'static> {
             })
             .map_err(BundleItemError::from)?;
         }
-        let item = Self {
+        let item = Self(BundleItemInner {
             id,
             bundle_id,
             anchor: raw
@@ -139,7 +167,7 @@ impl UnvalidatedItem<'static> {
             signature_data,
             hash,
             data_offset: raw.data_offset,
-        };
+        });
 
         Ok((item, raw.data_verifier))
     }
@@ -182,42 +210,41 @@ impl<'a> SupportsValidation for UnvalidatedItem<'a> {
     type Validated = ValidatedItem<'a>;
     type Validator = BundleItemValidator;
 
-    fn into_valid(self, _token: BundleItemValidationToken) -> Self::Validated {
-        ValidatedItem {
-            id: self.id,
-            bundle_id: self.bundle_id,
-            anchor: self.anchor,
-            tags: self.tags,
-            target: self.target,
-            data_size: self.data_size,
-            data_offset: self.data_offset,
-            signature_data: self.signature_data,
-            hash: self.hash,
+    fn into_valid(self, token: BundleItemValidationToken) -> Option<Self::Validated> {
+        if !token.is_valid_for(&self) {
+            return None;
         }
+        Some(BundleItem(self.0))
     }
 }
 
 pub struct BundleItemValidator;
-pub struct BundleItemValidationToken(PhantomData<()>);
-
-impl Validator<UnvalidatedItem<'_>> for BundleItemValidator {
-    type Error = BundleItemError;
-    type Token = BundleItemValidationToken;
-
-    fn validate(data: &UnvalidatedItem) -> Result<Self::Token, Self::Error> {
-        data.signature_data.verify_sig(&data.hash)?;
-        let id = data.signature_data.signature().digest();
-        if &id != &data.id {
-            return Err(BundleItemError::IdError(BundleItemIdError::IdMismatch {
-                expected: id,
-                actual: data.id.clone(),
-            }))?;
-        }
-        Ok(BundleItemValidationToken(PhantomData))
+pub struct BundleItemValidationToken<'a>(ValidityProof<UnvalidatedItem<'a>>);
+impl<'a> ValidityToken<UnvalidatedItem<'a>> for BundleItemValidationToken<'a> {
+    fn is_valid_for(self, value: &UnvalidatedItem<'a>) -> bool {
+        self.0.is_valid_for(value)
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl<'a> Validator<UnvalidatedItem<'a>> for BundleItemValidator {
+    type Error = BundleItemError;
+    type Reference<'r> = ();
+    type Token = BundleItemValidationToken<'a>;
+
+    fn validate(data: &UnvalidatedItem<'a>, _: &()) -> Result<Self::Token, Self::Error> {
+        data.0.signature_data.verify_sig(&data.0.hash)?;
+        let id = data.0.signature_data.signature().digest();
+        if &id != &data.0.id {
+            return Err(BundleItemError::IdError(BundleItemIdError::IdMismatch {
+                expected: id,
+                actual: data.0.id.clone(),
+            }))?;
+        }
+        Ok(BundleItemValidationToken(ValidityProof::new(data)))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RawBundleItem<'a> {
     pub anchor: Option<Blob<'a>>,
     pub tag_data: Blob<'a>,

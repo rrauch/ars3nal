@@ -187,6 +187,7 @@ dependencies = [
  "rangemap",
  "rsa",
  "serde",
+ "serde_arrays",
  "serde_avro_fast",
  "serde_json",
  "serde_repr",
@@ -446,6 +447,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e59c1aab3e6c5e56afe1b7e8650be9b5a791cb997bdea449194ae62e4bf8c73"
 dependencies = [
  "hybrid-array",
+]
+
+[[package]]
+name = "blocking"
+version = "1.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e83f8d02be6967315521be875afa792a316e28d57b5a2d401897e2a7921b7f21"
+dependencies = [
+ "async-channel",
+ "async-task",
+ "futures-io",
+ "futures-lite",
+ "piper",
 ]
 
 [[package]]
@@ -736,7 +750,7 @@ dependencies = [
  "hybrid-array",
  "num-traits",
  "rand_core 0.9.3",
- "serdect",
+ "serdect 0.4.1",
  "subtle",
  "zeroize",
 ]
@@ -1169,6 +1183,7 @@ dependencies = [
  "digest 0.11.0-rc.1",
  "elliptic-curve 0.14.0-rc.13",
  "rfc6979 0.5.0-rc.1",
+ "serdect 0.4.1",
  "signature 3.0.0-rc.3",
  "spki",
  "zeroize",
@@ -1180,6 +1195,7 @@ version = "3.0.0-rc.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe639324ff99c3bf32144aaf79dc7e048305a6e82b6409644ddcbe7e0f5f5be9"
 dependencies = [
+ "serde",
  "signature 3.0.0-rc.3",
 ]
 
@@ -1191,6 +1207,7 @@ checksum = "ad207ed88a133091f83224265eac21109930db09bedcad05d5252f2af2de20a1"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "serde",
  "sha2 0.11.0-rc.2",
  "subtle",
  "zeroize",
@@ -1235,6 +1252,7 @@ dependencies = [
  "pkcs8",
  "rand_core 0.9.3",
  "sec1 0.8.0-rc.9",
+ "serdect 0.4.1",
  "subtle",
  "zeroize",
 ]
@@ -1393,9 +1411,9 @@ dependencies = [
 
 [[package]]
 name = "foyer"
-version = "0.19.2"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "928dc26fff649c700415bcfa565d300a48c666af160e0c6faede88c01a907a8b"
+checksum = "aa5d15035074ac205314ecc39ffb7697d59ba9deed2380fa12a7d54ddf35e9ba"
 dependencies = [
  "equivalent",
  "foyer-common",
@@ -1414,14 +1432,17 @@ dependencies = [
 name = "foyer-cache"
 version = "0.1.0"
 dependencies = [
- "ahash",
  "anyhow",
  "ario-client",
  "ario-core",
+ "blocking",
  "dotenv",
  "foyer",
  "futures-lite",
  "hex-literal",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.12",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1429,10 +1450,11 @@ dependencies = [
 
 [[package]]
 name = "foyer-common"
-version = "0.19.2"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "772c14e320ce46ff19abacb0444d328c26582837922f166f6382e451c6d3788b"
+checksum = "181bfdf387bd81442dd529e46b4cf632fd75076349d962b8a96aea24eddf5848"
 dependencies = [
+ "bincode",
  "bytes",
  "cfg-if",
  "itertools",
@@ -1440,6 +1462,7 @@ dependencies = [
  "mixtrics",
  "parking_lot",
  "pin-project",
+ "serde",
  "thiserror 2.0.12",
  "tokio",
  "twox-hash",
@@ -1456,9 +1479,9 @@ dependencies = [
 
 [[package]]
 name = "foyer-memory"
-version = "0.19.2"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0abc88dbc6efee20560821853455a6b8b25f7c70ffcc29c7a43a1f66085faab"
+checksum = "757d608277911c2292b7563638b5b7f804904ff71a4e4757d97a94cd6a067e57"
 dependencies = [
  "arc-swap",
  "bitflags",
@@ -1480,9 +1503,9 @@ dependencies = [
 
 [[package]]
 name = "foyer-storage"
-version = "0.19.2"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd70a9ccb1834160957d5ab74fcff58c04f5a7c0ab8552af4c4109f0c1880dfd"
+checksum = "4e1045dd1812baa313d8cb97b53f540bd8ed315f4585982f78ae7f6a1cdde4e2"
 dependencies = [
  "allocator-api2",
  "anyhow",
@@ -1505,6 +1528,7 @@ dependencies = [
  "parking_lot",
  "pin-project",
  "rand 0.9.2",
+ "serde",
  "thiserror 2.0.12",
  "tokio",
  "tracing",
@@ -2463,6 +2487,9 @@ name = "maybe-owned"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "memchr"
@@ -2987,6 +3014,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
+name = "piper"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96c8c490f422ef9a4efd2cb5b42b76c8613d7e7dfc1caf667b8a3350a5acc066"
+dependencies = [
+ "atomic-waker",
+ "fastrand",
+ "futures-io",
+]
+
+[[package]]
 name = "pkcs1"
 version = "0.8.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3237,6 +3275,9 @@ name = "rangemap"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f93e7e49bb0bf967717f7bd674458b3d6b0c5f48ec7e3038166026a69fc22223"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "redox_syscall"
@@ -3414,6 +3455,8 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.9.3",
+ "serde",
+ "serdect 0.3.0",
  "signature 3.0.0-rc.3",
  "spki",
  "subtle",
@@ -3579,6 +3622,7 @@ dependencies = [
  "base16ct 0.3.0",
  "der 0.8.0-rc.8",
  "hybrid-array",
+ "serdect 0.4.1",
  "subtle",
  "zeroize",
 ]
@@ -3660,6 +3704,15 @@ name = "serde-transcode"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "590c0e25c2a5bb6e85bf5c1bce768ceb86b316e7a01bdf07d2cb4ec2271990e2"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "serde_arrays"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94a16b99c5ea4fe3daccd14853ad260ec00ea043b2708d1fd1da3106dcd8d9df"
 dependencies = [
  "serde",
 ]
@@ -3784,6 +3837,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.104",
+]
+
+[[package]]
+name = "serdect"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f42f67da2385b51a5f9652db9c93d78aeaf7610bf5ec366080b6de810604af53"
+dependencies = [
+ "base16ct 0.2.0",
+ "serde",
 ]
 
 [[package]]

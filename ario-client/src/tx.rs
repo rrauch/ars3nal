@@ -163,7 +163,7 @@ impl Client {
     ) -> Result<Option<ValidatedTx<'static>>, super::Error> {
         self.0
             .cache
-            .get_tx_by_id(tx_id, async |tx_id| self._tx_by_id_live(tx_id).await)
+            .get_tx(tx_id, async |tx_id| self._tx_by_id_live(tx_id).await)
             .await
     }
 
@@ -189,6 +189,16 @@ impl Client {
     }
 
     pub async fn tx_offset(&self, tx_id: &TxId) -> Result<Offset, super::Error> {
+        self.0
+            .cache
+            .get_tx_offset(tx_id, async |tx_id| {
+                Ok(Some(self._tx_offset_live(tx_id).await?))
+            })
+            .await?
+            .ok_or(api::Error::NotFoundError.into())
+    }
+
+    async fn _tx_offset_live(&self, tx_id: &TxId) -> Result<Offset, super::Error> {
         Ok(self
             .with_gw(async |gw| self.0.api.tx_offset(gw, tx_id).await)
             .await?)
@@ -534,9 +544,9 @@ pub struct Accepted<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Offset {
     #[serde_as(as = "DisplayFromStr")]
-    size: u64,
+    pub(crate) size: u64,
     #[serde_as(as = "DisplayFromStr")]
-    offset: u128,
+    pub(crate) offset: u128,
 }
 
 impl Offset {

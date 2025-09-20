@@ -16,10 +16,10 @@ bytes = { workspace = true }
 circular-buffer = "1.1"
 ct-codecs = "1.1"
 ctr = { workspace = true, features = ["alloc", "zeroize", "block-padding"] }
-derive-where = { workspace = true, features = ["zeroize"] }
+derive-where = { workspace = true, features = ["zeroize", "serde"] }
 digest = { workspace = true }
-ecdsa = { workspace = true }
-ed25519-dalek = { workspace = true }
+ecdsa = { workspace = true, features = ["serde"] }
+ed25519-dalek = { workspace = true, features = ["serde"] }
 elliptic-curve = { workspace = true }
 futures-lite = { workspace = true, features = ["futures-io"] }
 ghash = { workspace = true, features = ["zeroize"] }
@@ -28,12 +28,13 @@ hybrid-array = { workspace = true, features = ["serde", "zeroize", "bytemuck"] }
 itertools = "0.14"
 k256 = { workspace = true }
 maybe-async = "0.2"
-maybe-owned = { workspace = true }
+maybe-owned = { workspace = true, features = ["serde"] }
 rand = { workspace = true, features = ["thread_rng"] }
 rand_chacha = { version = "0.9", features = ["std"] }
-rangemap = { workspace = true }
-rsa = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+rangemap = { workspace = true, features = ["serde1"] }
+rsa = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive", "rc"] }
+serde_arrays = "0.2"
 serde_avro_fast = "2.0"
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_repr = "0.1"

@@ -15,6 +15,7 @@ use rand_chacha::ChaCha20Rng;
 use rsa::rand_core::SeedableRng;
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey as ExternalRsaPrivateKey, RsaPublicKey as ExternalRsaPublicKey};
+use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 use std::sync::LazyLock;
 use thiserror::Error;
@@ -241,7 +242,7 @@ impl RsaPrivateKeyComponents {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, TransparentWrapper)]
+#[derive(Clone, Debug, PartialEq, TransparentWrapper, Hash, Serialize, Deserialize)]
 #[transparent(ExternalRsaPublicKey)]
 #[repr(transparent)]
 pub struct RsaPublicKey<const BIT: usize>(ExternalRsaPublicKey);

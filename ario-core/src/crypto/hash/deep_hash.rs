@@ -3,6 +3,7 @@ use crate::crypto::hash::{Digest, Hasher, HasherExt};
 use bytes::Bytes;
 use futures_lite::AsyncRead;
 use futures_lite::AsyncReadExt;
+use hybrid_array::{Array, ArraySize};
 use std::io::Read;
 use uuid::Uuid;
 
@@ -90,6 +91,12 @@ impl<'a> DeepHashable for &'a [u8] {
 }
 
 impl<const N: usize> DeepHashable for [u8; N] {
+    fn deep_hash<H: Hasher>(&self) -> Digest<H> {
+        self.as_slice().deep_hash()
+    }
+}
+
+impl<N: ArraySize> DeepHashable for Array<u8, N> {
     fn deep_hash<H: Hasher>(&self) -> Digest<H> {
         self.as_slice().deep_hash()
     }

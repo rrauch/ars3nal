@@ -104,7 +104,7 @@ impl From<Infallible> for MoneyError {
     }
 }
 
-#[derive_where(Clone)]
+#[derive_where(Clone, Hash)]
 #[repr(transparent)]
 pub struct Money<C: Currency>(BigDecimal, PhantomData<C>);
 
@@ -357,7 +357,7 @@ impl<'de, C: Currency> Deserialize<'de> for Money<C> {
             type Value = Money<C>;
 
             fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
-                formatter.write_str("a string")
+                formatter.write_str("a string or number")
             }
 
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
@@ -365,6 +365,15 @@ impl<'de, C: Currency> Deserialize<'de> for Money<C> {
                 E: serde::de::Error,
             {
                 Money::from_str(value)
+                    .map(Into::into)
+                    .map_err(serde::de::Error::custom)
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Money::from_str(value.as_str())
                     .map(Into::into)
                     .map_err(serde::de::Error::custom)
             }
@@ -388,7 +397,14 @@ impl<'de, C: Currency> Deserialize<'de> for Money<C> {
             }
         }
 
-        deserializer.deserialize_any(MoneyVisitor(PhantomData))
+        // todo: improve detection of best deserialization approach
+        if deserializer.is_human_readable() {
+            // Self-describing formats (JSON, etc.)
+            deserializer.deserialize_any(MoneyVisitor(PhantomData))
+        } else {
+            // Non-self-describing formats (bincode, etc.)
+            deserializer.deserialize_str(MoneyVisitor(PhantomData))
+        }
     }
 }
 

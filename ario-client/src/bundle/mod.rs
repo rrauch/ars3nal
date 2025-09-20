@@ -13,7 +13,7 @@ impl Client {
     pub async fn bundle_by_tx(&self, tx_id: &TxId) -> Result<Option<Bundle>, super::Error> {
         self.0
             .cache
-            .get_bundle_by_tx_id(tx_id, async |tx_id| self._bundle_by_tx_live(tx_id).await)
+            .get_bundle(tx_id, async |tx_id| self._bundle_by_tx_live(tx_id).await)
             .await
     }
 
@@ -93,7 +93,7 @@ impl Client {
         Ok(self
             .0
             .cache
-            .get_bundle_item_by_id_tx(entry.id(), tx.id(), async |_, _| {
+            .get_bundle_item(entry.id(), tx.id(), async |_, _| {
                 Ok(Some(
                     self._bundle_item_live(bundle.id(), &entry, &tx).await?,
                 ))

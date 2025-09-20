@@ -1,8 +1,10 @@
 use crate::blob::{Blob, OwnedBlob, TypedBlob};
 use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
+use crate::typed::WithSerde;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Tag<'a> {
     pub name: TagName<'a>,
     pub value: TagValue<'a>,
@@ -24,6 +26,8 @@ impl<'a> Tag<'a> {
 pub struct TagNameKind;
 pub type TagName<'a> = TypedBlob<'a, TagNameKind>;
 
+impl<'a> WithSerde for TagName<'a> {}
+
 impl<'a> TagName<'a> {
     pub fn as_str(&'a self) -> Option<&'a str> {
         std::str::from_utf8(self.0.as_ref()).ok()
@@ -32,6 +36,7 @@ impl<'a> TagName<'a> {
 
 pub struct TagValueKind;
 pub type TagValue<'a> = TypedBlob<'a, TagValueKind>;
+impl<'a> WithSerde for TagValue<'a> {}
 
 impl<'a> TagValue<'a> {
     pub fn as_str(&'a self) -> Option<&'a str> {

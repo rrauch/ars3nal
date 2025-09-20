@@ -7,9 +7,11 @@ edition = "2024"
 ario-client = { workspace = true }
 ario-core = { workspace = true }
 
-ahash = "0.8"
-foyer = { version = "0.19", features = ["default"] }
-tokio = { workspace = true, features = ["fs"] }
+blocking = "1.6"
+foyer = { version = "0.20", features = ["default", "serde"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

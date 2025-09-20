@@ -1,7 +1,7 @@
 use crate::typed::{FromInner, Typed};
 use bytes::{Buf, Bytes};
 use hybrid_array::{Array, ArraySize};
-use serde::de::Visitor;
+use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::array::TryFromSliceError;
 use std::fmt::{Debug, Formatter};
@@ -18,7 +18,7 @@ impl<'a, T> TypedBlob<'a, T> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Blob<'a> {
     Bytes(Bytes),
     Slice(&'a [u8]),
@@ -121,6 +121,22 @@ impl<'de, 'a> Deserialize<'de> for Blob<'a> {
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str("bytes")
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut bytes = if let Some(size) = seq.size_hint() {
+                    Vec::with_capacity(size)
+                } else {
+                    Vec::new()
+                };
+                let mut seq = seq;
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                Ok(Blob::from(bytes))
             }
 
             fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>

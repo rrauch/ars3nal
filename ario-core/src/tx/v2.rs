@@ -19,7 +19,7 @@ use crate::tx::{
 };
 use crate::tx::{RewardError, Transfer};
 use crate::typed::FromInner;
-use crate::validation::{SupportsValidation, ValidateExt, Validator};
+use crate::validation::{SupportsValidation, ValidateExt, Validator, ValidityProof, ValidityToken};
 use crate::wallet::{WalletAddress, WalletSk};
 use crate::{JsonError, JsonValue, entity};
 use anyhow::anyhow;
@@ -27,14 +27,24 @@ use bon::Builder;
 use itertools::Either;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
-use std::marker::PhantomData;
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Serialize)]
 #[repr(transparent)]
 pub(crate) struct V2Tx<'a, const VALIDATED: bool = false>(V2TxData<'a>);
 
 pub(crate) type UnvalidatedV2Tx<'a> = V2Tx<'a, false>;
+
+impl<'de, 'a> Deserialize<'de> for UnvalidatedV2Tx<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self(V2TxData::deserialize(deserializer)?))
+    }
+}
+
 pub(crate) type ValidatedV2Tx<'a> = V2Tx<'a, true>;
 
 impl<'a, const VALIDATED: bool> V2Tx<'a, VALIDATED> {
@@ -44,6 +54,14 @@ impl<'a, const VALIDATED: bool> V2Tx<'a, VALIDATED> {
 
     pub(super) fn into_owned(self) -> V2Tx<'static, VALIDATED> {
         V2Tx(self.0.into_owned())
+    }
+
+    pub(super) fn to_json_string(&self) -> Result<String, JsonError> {
+        RawTx::from(self.clone()).to_json_string()
+    }
+
+    pub(super) fn to_json(&self) -> Result<JsonValue, JsonError> {
+        RawTx::from(self.clone()).to_json()
     }
 }
 
@@ -77,14 +95,6 @@ impl<'a> ValidatedV2Tx<'a> {
     pub fn invalidate(self) -> UnvalidatedV2Tx<'a> {
         V2Tx(self.0)
     }
-
-    pub(super) fn to_json_string(&self) -> Result<String, JsonError> {
-        ValidatedRawTx::from(self.clone()).to_json_string()
-    }
-
-    pub(super) fn to_json(&self) -> Result<JsonValue, JsonError> {
-        ValidatedRawTx::from(self.clone()).to_json()
-    }
 }
 
 impl UnvalidatedV2Tx<'static> {
@@ -110,13 +120,16 @@ impl<'a> SupportsValidation for UnvalidatedV2Tx<'a> {
 
     fn into_valid(
         self,
-        _: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
-    ) -> Self::Validated {
-        V2Tx(self.0)
+        token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
+    ) -> Option<Self::Validated> {
+        if !token.is_valid_for(&self) {
+            return None;
+        }
+        Some(V2Tx(self.0))
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
 pub(super) enum V2SignatureData {
     Rsa4096(Rsa4096SignatureData<TxHash>),
     Rsa2048(Rsa2048SignatureData<TxHash>),
@@ -180,7 +193,7 @@ impl V2SignatureData {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
 pub(crate) struct V2TxData<'a> {
     id: TxId,
     last_tx: TxAnchor,
@@ -423,15 +436,21 @@ pub enum V2TxDataError {
 }
 
 pub struct V2TxValidator;
-pub struct V2TxValidationToken(PhantomData<()>);
+pub struct V2TxValidationToken<'a>(ValidityProof<UnvalidatedV2Tx<'a>>);
+impl<'a> ValidityToken<UnvalidatedV2Tx<'a>> for V2TxValidationToken<'a> {
+    fn is_valid_for(self, value: &UnvalidatedV2Tx<'a>) -> bool {
+        self.0.is_valid_for(value)
+    }
+}
 
-impl Validator<UnvalidatedV2Tx<'_>> for V2TxValidator {
+impl<'a> Validator<UnvalidatedV2Tx<'a>> for V2TxValidator {
     type Error = V2TxDataError;
-    type Token = V2TxValidationToken;
+    type Reference<'r> = ();
+    type Token = V2TxValidationToken<'a>;
 
-    fn validate(data: &UnvalidatedV2Tx) -> Result<Self::Token, Self::Error> {
+    fn validate(data: &UnvalidatedV2Tx<'a>, _: &()) -> Result<Self::Token, Self::Error> {
         data.0.signature_data.verify_sig(&(data.0.tx_hash()))?;
-        Ok(V2TxValidationToken(PhantomData))
+        Ok(V2TxValidationToken(ValidityProof::new(data)))
     }
 }
 

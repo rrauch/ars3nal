@@ -9,8 +9,10 @@ use derive_where::derive_where;
 use futures_lite::AsyncRead;
 use futures_lite::AsyncReadExt;
 use maybe_owned::MaybeOwned;
+use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::fmt::Debug;
+use std::hash::Hash;
 use std::io::Cursor;
 use std::io::Read;
 use std::ops::Range;
@@ -19,10 +21,17 @@ pub type DefaultChunker = MostlyFixedChunker<Sha256, { 256 * 1024 }, { 32 * 1024
 
 pub type TypedChunk<T, C: Chunker> = Typed<T, Chunk<C>>;
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Chunk<C: Chunker> {
     output: C::Output,
     offset: Range<u64>,
+}
+
+impl<C: Chunker> Hash for Chunk<C> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.output.as_blob().hash(state);
+        self.offset.hash(state)
+    }
 }
 
 pub type MaybeOwnedChunk<'a, C: Chunker> = MaybeOwned<'a, Chunk<C>>;
@@ -78,7 +87,16 @@ impl<C: Chunker> Chunk<C> {
 }
 
 pub trait ChunkInfo:
-    Hashable + AsBlob + for<'a> TryFrom<Blob<'a>> + Send + Sync + Debug + Clone + PartialEq
+    Hashable
+    + AsBlob
+    + for<'a> TryFrom<Blob<'a>>
+    + Send
+    + Sync
+    + Debug
+    + Clone
+    + PartialEq
+    + Serialize
+    + for<'a> Deserialize<'a>
 {
     type Len: OutputLen;
 }

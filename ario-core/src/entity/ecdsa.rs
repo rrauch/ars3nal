@@ -1,4 +1,4 @@
-use crate::blob::Blob;
+use crate::blob::{AsBlob, Blob};
 use crate::crypto::ec::ecdsa::{Ecdsa, EcdsaSignature, Variant};
 use crate::crypto::ec::ethereum::{Eip191Format, Eip712Format, EthereumVariant};
 use crate::crypto::ec::{Curve, EcPublicKey, EcSecretKey};
@@ -9,6 +9,7 @@ use crate::typed::FromInner;
 use crate::wallet::{WalletPk, WalletSk};
 use derive_where::derive_where;
 use k256::Secp256k1;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 pub type Secp256k1SignatureData<T: ArEntityHash> = EcdsaSignatureData<T, Secp256k1>;
@@ -25,7 +26,7 @@ pub type Eip712SignatureData<T: ArEntityHash, Ctx = ()> =
 trait SupportedCurve: Curve {}
 impl SupportedCurve for Secp256k1 {}
 
-#[derive_where(Clone, Debug, PartialEq)]
+#[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct EcdsaSignatureData<T: ArEntityHash, C: SupportedCurve, V: Variant = (), Ctx = ()>
 where
     for<'a> Ecdsa<C, V>: Scheme<
@@ -38,6 +39,21 @@ where
     owner: WalletPk<<Ecdsa<C, V> as Scheme>::Verifier>,
     signature: ArEntitySignature<T, Ecdsa<C, V>>,
     _phantom: PhantomData<Ctx>,
+}
+
+impl<T: ArEntityHash, C: SupportedCurve, V: Variant, Ctx> Hash for EcdsaSignatureData<T, C, V, Ctx>
+where
+    for<'a> Ecdsa<C, V>: Scheme<
+            Signer = EcSecretKey<C>,
+            Verifier = EcPublicKey<C>,
+            Output = EcdsaSignature<C, V>,
+            Message<'a> = [u8],
+        >,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.owner.as_blob().hash(state);
+        self.signature.hash(state);
+    }
 }
 
 impl<T: ArEntityHash, C: SupportedCurve, V: Variant, Ctx> EcdsaSignatureData<T, C, V, Ctx>

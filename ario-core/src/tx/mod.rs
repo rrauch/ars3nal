@@ -24,13 +24,16 @@ use crate::tag::Tag;
 use crate::tx::raw::{RawTag, RawTx, RawTxDataError, UnvalidatedRawTx, ValidatedRawTx};
 use crate::tx::v1::{UnvalidatedV1Tx, V1Tx, V1TxDataError};
 use crate::tx::v2::{TxDraft, UnvalidatedV2Tx, V2Tx, V2TxBuilder, V2TxDataError};
-use crate::typed::{FromInner, Typed};
+use crate::typed::{FromInner, Typed, WithSerde};
 use crate::validation::ValidateExt;
 use crate::wallet::{WalletAddress, WalletPk};
 use crate::{JsonError, JsonValue, blob};
 use bigdecimal::BigDecimal;
+use hybrid_array::Array;
+use hybrid_array::sizes::U48;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::borrow::Cow;
 use std::convert::Infallible;
@@ -42,7 +45,7 @@ use thiserror::Error;
 
 static ZERO_WINSTON: LazyLock<Money<Winston>> = LazyLock::new(|| Winston::zero());
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[repr(transparent)]
 pub struct Tx<'a, const VALIDATED: bool>(TxInner<'a, VALIDATED>);
 
@@ -55,10 +58,29 @@ impl<'a, const VALIDATED: bool> ArEntity for Tx<'a, VALIDATED> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 enum TxInner<'a, const VALIDATED: bool> {
     V1(V1Tx<'a, VALIDATED>),
     V2(V2Tx<'a, VALIDATED>),
+}
+
+impl<'de, 'a> Deserialize<'de> for TxInner<'a, false> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        enum Helper<'a> {
+            V1(V1Tx<'a, false>),
+            V2(V2Tx<'a, false>),
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        Ok(match helper {
+            Helper::V1(v1) => TxInner::V1(v1),
+            Helper::V2(v2) => TxInner::V2(v2),
+        })
+    }
 }
 
 impl<'a, const VALIDATED: bool> TxInner<'a, VALIDATED> {
@@ -79,6 +101,16 @@ impl TxBuilder {
 }
 
 pub type UnvalidatedTx<'a> = Tx<'a, false>;
+
+impl<'de, 'a> Deserialize<'de> for UnvalidatedTx<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self(TxInner::deserialize(deserializer)?))
+    }
+}
+
 pub type ValidatedTx<'a> = Tx<'a, true>;
 
 impl<'a, const VALIDATED: bool> From<V1Tx<'a, VALIDATED>> for Tx<'a, VALIDATED> {
@@ -312,6 +344,20 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
     pub fn into_owned(self) -> Tx<'static, VALIDATED> {
         Tx(self.0.into_owned())
     }
+
+    pub fn to_json_string(&self) -> Result<String, JsonError> {
+        match &self.0 {
+            TxInner::V1(v1) => v1.to_json_string(),
+            TxInner::V2(v2) => v2.to_json_string(),
+        }
+    }
+
+    pub fn to_json(&self) -> Result<JsonValue, JsonError> {
+        match &self.0 {
+            TxInner::V1(v1) => v1.to_json(),
+            TxInner::V2(v2) => v2.to_json(),
+        }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -352,20 +398,6 @@ impl<'a> ValidatedTx<'a> {
             TxInner::V2(v2) => v2.invalidate().into(),
         }
     }
-
-    pub fn to_json_string(&self) -> Result<String, JsonError> {
-        match &self.0 {
-            TxInner::V1(v1) => v1.to_json_string(),
-            TxInner::V2(v2) => v2.to_json_string(),
-        }
-    }
-
-    pub fn to_json(&self) -> Result<JsonValue, JsonError> {
-        match &self.0 {
-            TxInner::V1(v1) => v1.to_json(),
-            TxInner::V2(v2) => v2.to_json(),
-        }
-    }
 }
 
 impl<'a> TryFrom<UnvalidatedRawTx<'a>> for UnvalidatedTx<'a> {
@@ -391,6 +423,8 @@ pub struct TxKind;
 pub struct TxSignatureKind;
 
 pub type TxId = TypedDigest<TxSignatureKind, Sha256>;
+
+impl WithSerde for TxId {}
 
 #[derive(Error, Debug)]
 pub enum TxIdError {
@@ -444,9 +478,14 @@ impl SupportedSignatureScheme for RsaPss<2048> {}
 
 pub type TxSignature<S: TxSignatureScheme> = ArEntitySignature<TxHash, S>;
 pub type TxDeepHash = TypedDigest<TxKind, Sha384>;
+
+impl WithSerde for TxDeepHash {}
+
 pub type TxShallowHash = TypedDigest<TxKind, Sha256>;
 
-#[derive(Clone, Debug, PartialEq)]
+impl WithSerde for TxShallowHash {}
+
+#[derive(Clone, Debug, PartialEq, Hash, Serialize, Deserialize)]
 pub enum TxHash {
     DeepHash(TxDeepHash),
     Shallow(TxShallowHash),
@@ -581,7 +620,9 @@ impl<'a> CommonData<'a> {
 }
 
 pub struct TxAnchorKind;
-pub type TxAnchor = Typed<TxAnchorKind, [u8; 48]>;
+pub type TxAnchor = Typed<TxAnchorKind, Array<u8, U48>>;
+
+impl WithSerde for TxAnchor {}
 
 impl Display for TxAnchor {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -606,7 +647,7 @@ impl FromStr for TxAnchor {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Serialize, Deserialize)]
 pub enum LastTx<'a> {
     TxId(MaybeOwned<'a, TxId>),
     TxAnchor(MaybeOwned<'a, TxAnchor>),
@@ -702,7 +743,7 @@ pub enum LastTxError<E1, E2> {
     V2Error(E2),
 }
 
-#[derive(Debug, Clone, Serialize_repr, Deserialize_repr, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Serialize_repr, Deserialize_repr, PartialEq, PartialOrd, Hash)]
 #[repr(u8)]
 pub enum Format {
     V1 = 1,
@@ -733,7 +774,7 @@ impl DeepHashable for Format {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub enum SignatureType {
     RsaPss,
     EcdsaSecp256k1,
@@ -784,6 +825,8 @@ impl DeepHashable for SignatureType {
 pub struct TxQuantityKind;
 pub type Quantity = TypedMoney<TxQuantityKind, Winston>;
 
+impl WithSerde for Quantity {}
+
 impl Quantity {
     pub(crate) fn try_from<I, E>(money: I) -> Result<Self, QuantityError>
     where
@@ -808,6 +851,8 @@ pub enum QuantityError {
 
 pub struct TxRewardKind;
 pub type Reward = TypedMoney<TxRewardKind, Winston>;
+
+impl WithSerde for Reward {}
 
 impl Reward {
     pub(crate) fn try_from<I, E>(money: I) -> Result<Self, RewardError>
@@ -989,7 +1034,7 @@ mod tests {
 
         let draft = TxBuilder::v2()
             .reward(1234)?
-            .tx_anchor(TxAnchor::from_inner([0u8; 48]))
+            .tx_anchor(TxAnchor::from_inner([0u8; 48].into()))
             .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 101)?)
             .data_upload((&data).into())
             .draft();
@@ -1037,7 +1082,7 @@ mod tests {
 
         let draft = TxBuilder::v2()
             .reward(21234)?
-            .tx_anchor(TxAnchor::from_inner([0u8; 48]))
+            .tx_anchor(TxAnchor::from_inner([0u8; 48].into()))
             .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 2101)?)
             .draft();
 
@@ -1081,7 +1126,7 @@ mod tests {
 
         let draft = TxBuilder::v2()
             .reward(12345)?
-            .tx_anchor(TxAnchor::from_inner([0u8; 48]))
+            .tx_anchor(TxAnchor::from_inner([0u8; 48].into()))
             .data_upload(data.data_item().into())
             .draft();
 
