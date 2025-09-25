@@ -9,7 +9,8 @@ ario-core = { workspace = true }
 
 blocking = "1.6"
 bon = { workspace = true }
-foyer = { version = "0.20", features = ["default", "serde"] }
+equivalent = "1"
+foyer = { git = "https://github.com/rrauch/foyer.git", branch = "storage_load_non_static_key", features = ["default", "serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -2,6 +2,7 @@ use crate::FoyerError;
 use crate::disk_cache::Error::InvalidConfig;
 use ario_client::cache::Context;
 use blocking::unblock;
+use equivalent::Equivalent;
 use foyer::{
     AdmitAll, BlockEngineBuilder, Compression, DeviceBuilder, FifoPicker, FsDeviceBuilder,
     HybridCache, HybridCacheBuilder, HybridCachePolicy, IoEngineBuilder, Load,
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cmp::{max, min};
 use std::fs::File;
+use std::hash::Hash;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -58,9 +60,7 @@ impl<K: StorageKey, V: StorageValue + Clone> DiskCache<K, V> {
         Ok(())
     }
 
-    pub async fn get(&self, key: impl Into<K>) -> Result<Option<V>, std::io::Error> {
-        let key = key.into();
-
+    pub async fn get(&self, key: impl Equivalent<K> + Hash) -> Result<Option<V>, std::io::Error> {
         let value = match self
             .hybrid_cache
             .storage()
@@ -93,8 +93,7 @@ impl<K: StorageKey, V: StorageValue + Clone> DiskCache<K, V> {
         Ok(())
     }
 
-    pub async fn invalidate(&self, key: impl Into<K>) -> Result<(), std::io::Error> {
-        let key = key.into();
+    pub async fn invalidate(&self, key: impl Equivalent<K> + Hash) -> Result<(), std::io::Error> {
         self.hybrid_cache.storage().delete(&key);
         Ok(())
     }

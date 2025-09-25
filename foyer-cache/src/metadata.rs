@@ -6,6 +6,7 @@ use ario_core::bundle::{
 };
 use ario_core::tx::{TxId, UnvalidatedTx};
 use bon::bon;
+use equivalent::Equivalent;
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 use std::io::Error as IoError;
@@ -22,6 +23,49 @@ enum CacheKey {
     TxOffset(TxId),
     BundleId(BundleId),
     BundleItem(BundleItemId, BundleId),
+}
+
+#[derive(Hash)]
+enum BorrowedCacheKey<'a> {
+    TxId(&'a TxId),
+    TxOffset(&'a TxId),
+    BundleId(&'a BundleId),
+    BundleItem(&'a BundleItemId, &'a BundleId),
+}
+
+impl Equivalent<CacheKey> for BorrowedCacheKey<'_> {
+    fn equivalent(&self, key: &CacheKey) -> bool {
+        match key {
+            CacheKey::TxId(other) => {
+                if let Self::TxId(this) = self {
+                    *this == other
+                } else {
+                    false
+                }
+            }
+            CacheKey::TxOffset(other) => {
+                if let Self::TxOffset(this) = self {
+                    *this == other
+                } else {
+                    false
+                }
+            }
+            CacheKey::BundleId(other) => {
+                if let Self::BundleId(this) = self {
+                    *this == other
+                } else {
+                    false
+                }
+            }
+            CacheKey::BundleItem(other_id, other_bundle) => {
+                if let Self::BundleItem(this_id, this_bundle) = self {
+                    *this_id == other_id && *this_bundle == other_bundle
+                } else {
+                    false
+                }
+            }
+        }
+    }
 }
 
 impl From<(BundleItemId, BundleId)> for CacheKey {
@@ -131,7 +175,7 @@ impl FoyerMetadataCache {
 
     async fn get<T: TryFrom<CacheValue>>(
         &self,
-        key: impl Into<CacheKey>,
+        key: impl Equivalent<CacheKey> + Hash,
     ) -> Result<Option<T>, IoError> {
         self.0
             .get(key)
@@ -148,7 +192,7 @@ impl L2MetadataCache for FoyerMetadataCache {
     }
 
     async fn get_tx(&self, id: &TxId) -> Result<Option<UnvalidatedTx<'static>>, std::io::Error> {
-        self.get(CacheKey::TxId(id.clone())).await
+        self.get(BorrowedCacheKey::TxId(id)).await
     }
 
     async fn insert_tx(&self, tx: UnvalidatedTx<'static>) -> Result<(), std::io::Error> {
@@ -156,11 +200,11 @@ impl L2MetadataCache for FoyerMetadataCache {
     }
 
     async fn invalidate_tx(&self, id: &TxId) -> Result<(), std::io::Error> {
-        self.0.invalidate(CacheKey::TxId(id.clone())).await
+        self.0.invalidate(BorrowedCacheKey::TxId(id)).await
     }
 
     async fn get_tx_offset(&self, id: &TxId) -> Result<Option<Offset>, std::io::Error> {
-        self.get(CacheKey::TxOffset(id.clone())).await
+        self.get(BorrowedCacheKey::TxOffset(id)).await
     }
 
     async fn insert_tx_offset(&self, tx_id: TxId, offset: Offset) -> Result<(), std::io::Error> {
@@ -168,11 +212,11 @@ impl L2MetadataCache for FoyerMetadataCache {
     }
 
     async fn invalidate_tx_offset(&self, id: &TxId) -> Result<(), std::io::Error> {
-        self.0.invalidate(CacheKey::TxOffset(id.clone())).await
+        self.0.invalidate(BorrowedCacheKey::TxOffset(id)).await
     }
 
     async fn get_bundle(&self, bundle_id: &BundleId) -> Result<Option<Bundle>, std::io::Error> {
-        self.get(CacheKey::BundleId(bundle_id.clone())).await
+        self.get(BorrowedCacheKey::BundleId(bundle_id)).await
     }
 
     async fn insert_bundle(&self, bundle: Bundle) -> Result<(), std::io::Error> {
@@ -182,7 +226,7 @@ impl L2MetadataCache for FoyerMetadataCache {
     }
 
     async fn invalidate_bundle(&self, id: &BundleId) -> Result<(), std::io::Error> {
-        self.0.invalidate(CacheKey::BundleId(id.clone())).await
+        self.0.invalidate(BorrowedCacheKey::BundleId(id)).await
     }
 
     async fn get_bundle_item(
@@ -191,7 +235,8 @@ impl L2MetadataCache for FoyerMetadataCache {
         bundle_id: &BundleId,
     ) -> Result<Option<(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>)>, std::io::Error>
     {
-        self.get((item_id.clone(), bundle_id.clone())).await
+        self.get(BorrowedCacheKey::BundleItem(item_id, bundle_id))
+            .await
     }
 
     async fn insert_bundle_item(
@@ -213,7 +258,7 @@ impl L2MetadataCache for FoyerMetadataCache {
         bundle_id: &BundleId,
     ) -> Result<(), std::io::Error> {
         self.0
-            .invalidate((item_id.clone(), bundle_id.clone()))
+            .invalidate(BorrowedCacheKey::BundleItem(item_id, bundle_id))
             .await
     }
 }

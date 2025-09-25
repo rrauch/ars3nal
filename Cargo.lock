@@ -1381,9 +1381,9 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
-version = "0.1.5"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "foreign-types"
@@ -1411,9 +1411,8 @@ dependencies = [
 
 [[package]]
 name = "foyer"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa5d15035074ac205314ecc39ffb7697d59ba9deed2380fa12a7d54ddf35e9ba"
+version = "0.21.0-dev"
+source = "git+https://github.com/rrauch/foyer.git?branch=storage_load_non_static_key#db480b9a733efd317b4cf6f658af88e1c5723057"
 dependencies = [
  "equivalent",
  "foyer-common",
@@ -1438,6 +1437,7 @@ dependencies = [
  "blocking",
  "bon",
  "dotenv",
+ "equivalent",
  "foyer",
  "futures-lite",
  "hex-literal",
@@ -1451,9 +1451,8 @@ dependencies = [
 
 [[package]]
 name = "foyer-common"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "181bfdf387bd81442dd529e46b4cf632fd75076349d962b8a96aea24eddf5848"
+version = "0.21.0-dev"
+source = "git+https://github.com/rrauch/foyer.git?branch=storage_load_non_static_key#db480b9a733efd317b4cf6f658af88e1c5723057"
 dependencies = [
  "bincode",
  "bytes",
@@ -1480,9 +1479,8 @@ dependencies = [
 
 [[package]]
 name = "foyer-memory"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "757d608277911c2292b7563638b5b7f804904ff71a4e4757d97a94cd6a067e57"
+version = "0.21.0-dev"
+source = "git+https://github.com/rrauch/foyer.git?branch=storage_load_non_static_key#db480b9a733efd317b4cf6f658af88e1c5723057"
 dependencies = [
  "arc-swap",
  "bitflags",
@@ -1490,7 +1488,7 @@ dependencies = [
  "equivalent",
  "foyer-common",
  "foyer-intrusive-collections",
- "hashbrown 0.15.4",
+ "hashbrown 0.16.0",
  "itertools",
  "madsim-tokio",
  "mixtrics",
@@ -1504,9 +1502,8 @@ dependencies = [
 
 [[package]]
 name = "foyer-storage"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e1045dd1812baa313d8cb97b53f540bd8ed315f4585982f78ae7f6a1cdde4e2"
+version = "0.21.0-dev"
+source = "git+https://github.com/rrauch/foyer.git?branch=storage_load_non_static_key#db480b9a733efd317b4cf6f658af88e1c5723057"
 dependencies = [
  "allocator-api2",
  "anyhow",
@@ -1520,7 +1517,7 @@ dependencies = [
  "fs4",
  "futures-core",
  "futures-util",
- "hashbrown 0.15.4",
+ "hashbrown 0.16.0",
  "io-uring",
  "itertools",
  "libc",
@@ -1797,6 +1794,12 @@ name = "hashbrown"
 version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5971ac85611da7067dbfcabef3c70ebb5606018acd9e2a3903a0da507521e0d5"
+
+[[package]]
+name = "hashbrown"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5419bdc4f6a9207fbeba6d11b604d481addf78ecd10c11ad51e76c2f6482748d"
 dependencies = [
  "allocator-api2",
  "equivalent",
