@@ -1,10 +1,11 @@
-use crate::Error;
 use crate::disk_cache::DiskCache;
+use crate::{DEFAULT_MEM_BUF_SIZE, Error};
 use ario_client::cache::{Context, L2MetadataCache, Offset};
 use ario_core::bundle::{
     Bundle, BundleId, BundleItemId, BundleItemVerifier, UnvalidatedBundleItem,
 };
 use ario_core::tx::{TxId, UnvalidatedTx};
+use bon::bon;
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 use std::io::Error as IoError;
@@ -107,11 +108,13 @@ impl From<(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>)> for Cac
 
 pub struct FoyerMetadataCache(DiskCache<CacheKey, CacheValue>);
 
+#[bon]
 impl FoyerMetadataCache {
+    #[builder]
     pub async fn new(
         max_disk_space: u64,
         disk_path: impl AsRef<Path>,
-        mem_buf: usize,
+        #[builder(default = DEFAULT_MEM_BUF_SIZE)] mem_buf: usize,
     ) -> Result<Self, Error> {
         Ok(Self(
             DiskCache::new(

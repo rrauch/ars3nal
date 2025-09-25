@@ -7,6 +7,8 @@ pub use disk_cache::{DiskSpaceConfigError, Error, InvalidConfigError};
 pub use foyer::Error as FoyerError;
 pub use metadata::FoyerMetadataCache;
 
+const DEFAULT_MEM_BUF_SIZE: usize = 1024 * 1024;
+
 #[cfg(test)]
 mod tests {
     use crate::{FoyerChunkCache, FoyerMetadataCache};
@@ -40,20 +42,18 @@ mod tests {
                 .cache(
                     Cache::builder()
                         .chunk_l2_cache(
-                            FoyerChunkCache::new(
-                                1024 * 1024 * 100,
-                                std::env::var("ARTEST_L2_CHUNK_CACHE_PATH")?,
-                                1 * 1024 * 1024,
-                            )
-                            .await?,
+                            FoyerChunkCache::builder()
+                                .disk_path(std::env::var("ARTEST_L2_CHUNK_CACHE_PATH")?)
+                                .max_disk_space(1024 * 1024 * 100)
+                                .build()
+                                .await?,
                         )
                         .metadata_l2_cache(
-                            FoyerMetadataCache::new(
-                                1024 * 1024 * 25,
-                                std::env::var("ARTEST_L2_METADATA_CACHE_PATH")?,
-                                1 * 1024 * 1024,
-                            )
-                            .await?,
+                            FoyerMetadataCache::builder()
+                                .disk_path(std::env::var("ARTEST_L2_METADATA_CACHE_PATH")?)
+                                .max_disk_space(1024 * 1024 * 25)
+                                .build()
+                                .await?,
                         )
                         .build(),
                 )

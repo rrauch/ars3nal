@@ -8,6 +8,7 @@ ario-client = { workspace = true }
 ario-core = { workspace = true }
 
 blocking = "1.6"
+bon = { workspace = true }
 foyer = { version = "0.20", features = ["default", "serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

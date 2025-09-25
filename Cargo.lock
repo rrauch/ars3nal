@@ -1436,6 +1436,7 @@ dependencies = [
  "ario-client",
  "ario-core",
  "blocking",
+ "bon",
  "dotenv",
  "foyer",
  "futures-lite",

@@ -1,8 +1,9 @@
-use crate::Error;
 use crate::disk_cache::DiskCache;
+use crate::{DEFAULT_MEM_BUF_SIZE, Error};
 use ario_client::cache::{Context, L2ChunkCache};
 use ario_client::chunk::RawTxDownloadChunk;
 use ario_core::blob::OwnedBlob;
+use bon::bon;
 use foyer::{Code, CodeError};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -17,11 +18,13 @@ pub struct FoyerChunkCache(DiskCache<u128, Chunk>);
 const CTX_FILE_CONTENT_TYPE: &'static str = "chunk";
 const CTX_FILE_COMP_VERSION: usize = 1;
 
+#[bon]
 impl FoyerChunkCache {
+    #[builder]
     pub async fn new(
         max_disk_space: u64,
         disk_path: impl AsRef<Path>,
-        mem_buf: usize,
+        #[builder(default = DEFAULT_MEM_BUF_SIZE)] mem_buf: usize,
     ) -> Result<Self, Error> {
         Ok(Self(
             DiskCache::new(
