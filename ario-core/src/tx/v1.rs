@@ -12,7 +12,7 @@ use crate::tx::{
     SignatureType, TxDeepHash, TxError, TxHash, TxId, TxShallowHash,
 };
 use crate::typed::FromInner;
-use crate::validation::{SupportsValidation, ValidateExt, Validator, ValidityProof, ValidityToken};
+use crate::validation::{SupportsValidation, ValidateExt};
 use crate::wallet::WalletAddress;
 use crate::{JsonError, JsonValue, entity};
 use itertools::Either;
@@ -102,16 +102,17 @@ impl<'a> UnvalidatedV1Tx<'a> {
 
 impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
     type Validated = ValidatedV1Tx<'a>;
-    type Validator = V1TxValidator;
+    type Error = V1TxDataError;
+    type Reference<'r> = ();
 
-    fn into_valid(
+    fn validate_with(
         self,
-        token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
-    ) -> Option<Self::Validated> {
-        if !token.is_valid_for(&self) {
-            return None;
+        _: &Self::Reference<'_>,
+    ) -> Result<Self::Validated, (Self, Self::Error)> {
+        if let Err(err) = self.0.signature_data.verify_sig(&(self.0.tx_hash())) {
+            return Err((self, err.into()));
         }
-        Some(V1Tx(self.0))
+        Ok(V1Tx(self.0))
     }
 }
 
@@ -314,26 +315,6 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V1TxData<'a> {
             signature_data,
             denomination: common_data.denomination,
         })
-    }
-}
-
-pub struct V1TxValidator;
-pub struct V1TxValidationToken<'a>(ValidityProof<UnvalidatedV1Tx<'a>>);
-impl<'a> ValidityToken<UnvalidatedV1Tx<'a>> for V1TxValidationToken<'a> {
-    fn is_valid_for(self, value: &UnvalidatedV1Tx<'a>) -> bool {
-        self.0.is_valid_for(value)
-    }
-}
-
-impl<'a> Validator<UnvalidatedV1Tx<'a>> for V1TxValidator {
-    type Error = V1TxDataError;
-    type Reference<'r> = ();
-
-    type Token = V1TxValidationToken<'a>;
-
-    fn validate(data: &UnvalidatedV1Tx<'a>, _: &()) -> Result<Self::Token, Self::Error> {
-        data.0.signature_data.verify_sig(&(data.0.tx_hash()))?;
-        Ok(V1TxValidationToken(ValidityProof::new(data)))
     }
 }
 

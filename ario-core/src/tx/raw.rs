@@ -6,7 +6,7 @@ use crate::json::JsonSource;
 use crate::tag::{Tag, TagName, TagValue};
 use crate::tx::{Format, SignatureType};
 use crate::typed::FromInner;
-use crate::validation::{SupportsValidation, Validator, ValidityProof, ValidityToken};
+use crate::validation::SupportsValidation;
 use crate::{JsonError, JsonValue};
 use bigdecimal::{BigDecimal, Zero};
 use serde::{Deserialize, Serialize};
@@ -75,18 +75,96 @@ impl UnvalidatedRawTx<'static> {
     }
 }
 
+impl<'a> UnvalidatedRawTx<'a> {
+    fn is_valid(&self) -> Result<(), <Self as SupportsValidation>::Error> {
+        const VALID_ID_LENGTHS: &[usize] = &[32];
+        const VALID_LAST_TX_LENGTHS: &[usize] = &[32, 48];
+        const VALID_OWNER_LENGTHS: &[usize] = &[256, 512];
+        const MAX_TAGS_TOTAL_LEN: usize = 2048;
+        const VALID_TARGET_LENGTHS: &[usize] = &[32];
+        const MAX_EMBEDDED_DATA_LEN: usize = 1024 * 1024 * 12;
+        const VALID_SIG_LENGTHS: &[usize] = &[
+            65,  // Secp256k1
+            256, // Rsa<2048>
+            512, // Rsa<4096>
+        ];
+        const VALID_DATA_ROOT_LENGTHS: &[usize] = &[32];
+
+        validate_byte_len(self.0.id.bytes(), VALID_ID_LENGTHS, "id")?;
+        validate_byte_len(self.0.last_tx.bytes(), VALID_LAST_TX_LENGTHS, "last_tx")?;
+
+        if let Some(owner) = &self.0.owner {
+            validate_byte_len(owner.bytes(), VALID_OWNER_LENGTHS, "owner")?;
+        }
+
+        if self.0.tags_byte_len() > MAX_TAGS_TOTAL_LEN {
+            return Err(RawTxDataError::TagsMaxLenExceeded {
+                max: MAX_TAGS_TOTAL_LEN,
+                actual: self.0.tags_byte_len(),
+            });
+        }
+
+        if let Some(target) = &self.0.target {
+            validate_byte_len(target.bytes(), VALID_TARGET_LENGTHS, "target")?;
+        }
+
+        if let Some(data) = &self.0.data {
+            if data.len() > MAX_EMBEDDED_DATA_LEN {
+                return Err(RawTxDataError::EmbeddedDataMaxLenExceeded {
+                    max: MAX_EMBEDDED_DATA_LEN,
+                    actual: data.len(),
+                });
+            }
+        }
+
+        validate_byte_len(self.0.signature.bytes(), VALID_SIG_LENGTHS, "signature")?;
+
+        if let Some(data_root) = &self.0.data_root {
+            validate_byte_len(data_root.bytes(), VALID_DATA_ROOT_LENGTHS, "data_root")?;
+        }
+
+        let mut positive_quantity = false;
+        if let Some(quantity) = &self.0.quantity {
+            validate_positive_integer(quantity, "quantity")?;
+
+            if quantity != ZERO_BD.deref() {
+                if self.0.target.is_none() {
+                    return Err(RawTxDataError::MissingTarget);
+                }
+                positive_quantity = true;
+            }
+        }
+
+        validate_positive_integer(&self.0.reward, "reward")?;
+
+        if self.0.target.is_some() {
+            if !positive_quantity {
+                return Err(RawTxDataError::MissingQuantity);
+            }
+        }
+
+        let expected_tx_id = self.0.signature.bytes().digest::<Sha256>();
+        if expected_tx_id.as_slice() != self.0.id.bytes() {
+            return Err(RawTxDataError::IdSignatureMismatch);
+        }
+
+        Ok(())
+    }
+}
+
 impl<'a> SupportsValidation for UnvalidatedRawTx<'a> {
     type Validated = ValidatedRawTx<'a>;
-    type Validator = RawTxDataValidator;
+    type Error = RawTxDataError;
+    type Reference<'r> = ();
 
-    fn into_valid(
+    fn validate_with(
         self,
-        token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
-    ) -> Option<Self::Validated> {
-        if !token.is_valid_for(&self) {
-            return None;
+        _: &Self::Reference<'_>,
+    ) -> Result<Self::Validated, (Self, Self::Error)> {
+        if let Err(err) = self.is_valid() {
+            return Err((self, err));
         }
-        Some(RawTx(self.0))
+        Ok(RawTx(self.0))
     }
 }
 
@@ -255,96 +333,6 @@ pub enum RawTxDataError {
     MissingTarget,
     #[error("tx id does not match the signature")]
     IdSignatureMismatch,
-}
-
-pub struct RawTxDataValidator;
-
-pub struct RawTxValidationToken<'a>(ValidityProof<UnvalidatedRawTx<'a>>);
-impl<'a> ValidityToken<UnvalidatedRawTx<'a>> for RawTxValidationToken<'a> {
-    fn is_valid_for(self, value: &UnvalidatedRawTx<'a>) -> bool {
-        self.0.is_valid_for(value)
-    }
-}
-
-impl<'a> Validator<UnvalidatedRawTx<'a>> for RawTxDataValidator {
-    type Error = RawTxDataError;
-    type Reference<'r> = ();
-    type Token = RawTxValidationToken<'a>;
-
-    fn validate(data: &UnvalidatedRawTx<'a>, _: &()) -> Result<Self::Token, Self::Error> {
-        const VALID_ID_LENGTHS: &[usize] = &[32];
-        const VALID_LAST_TX_LENGTHS: &[usize] = &[32, 48];
-        const VALID_OWNER_LENGTHS: &[usize] = &[256, 512];
-        const MAX_TAGS_TOTAL_LEN: usize = 2048;
-        const VALID_TARGET_LENGTHS: &[usize] = &[32];
-        const MAX_EMBEDDED_DATA_LEN: usize = 1024 * 1024 * 12;
-        const VALID_SIG_LENGTHS: &[usize] = &[
-            65,  // Secp256k1
-            256, // Rsa<2048>
-            512, // Rsa<4096>
-        ];
-        const VALID_DATA_ROOT_LENGTHS: &[usize] = &[32];
-
-        validate_byte_len(data.0.id.bytes(), VALID_ID_LENGTHS, "id")?;
-        validate_byte_len(data.0.last_tx.bytes(), VALID_LAST_TX_LENGTHS, "last_tx")?;
-
-        if let Some(owner) = &data.0.owner {
-            validate_byte_len(owner.bytes(), VALID_OWNER_LENGTHS, "owner")?;
-        }
-
-        if data.0.tags_byte_len() > MAX_TAGS_TOTAL_LEN {
-            return Err(RawTxDataError::TagsMaxLenExceeded {
-                max: MAX_TAGS_TOTAL_LEN,
-                actual: data.0.tags_byte_len(),
-            });
-        }
-
-        if let Some(target) = &data.0.target {
-            validate_byte_len(target.bytes(), VALID_TARGET_LENGTHS, "target")?;
-        }
-
-        if let Some(data) = &data.0.data {
-            if data.len() > MAX_EMBEDDED_DATA_LEN {
-                return Err(RawTxDataError::EmbeddedDataMaxLenExceeded {
-                    max: MAX_EMBEDDED_DATA_LEN,
-                    actual: data.len(),
-                });
-            }
-        }
-
-        validate_byte_len(data.0.signature.bytes(), VALID_SIG_LENGTHS, "signature")?;
-
-        if let Some(data_root) = &data.0.data_root {
-            validate_byte_len(data_root.bytes(), VALID_DATA_ROOT_LENGTHS, "data_root")?;
-        }
-
-        let mut positive_quantity = false;
-        if let Some(quantity) = &data.0.quantity {
-            validate_positive_integer(quantity, "quantity")?;
-
-            if quantity != ZERO_BD.deref() {
-                if data.0.target.is_none() {
-                    return Err(RawTxDataError::MissingTarget);
-                }
-                positive_quantity = true;
-            }
-        }
-
-        validate_positive_integer(&data.0.reward, "reward")?;
-
-        if data.0.target.is_some() {
-            if !positive_quantity {
-                return Err(RawTxDataError::MissingQuantity);
-            }
-        }
-
-        let expected_tx_id = data.0.signature.bytes().digest::<Sha256>();
-        if expected_tx_id.as_slice() != data.0.id.bytes() {
-            return Err(RawTxDataError::IdSignatureMismatch);
-        }
-
-        Ok(RawTxValidationToken(ValidityProof::new(data)))
-    }
 }
 
 static ZERO_BD: LazyLock<BigDecimal> = LazyLock::new(|| BigDecimal::zero());

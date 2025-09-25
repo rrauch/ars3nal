@@ -14,7 +14,7 @@ use crate::bundle::{
 use crate::chunking::DefaultChunker;
 use crate::crypto::hash::HashableExt;
 use crate::tag::Tag;
-use crate::validation::{SupportsValidation, Validator, ValidityProof, ValidityToken};
+use crate::validation::SupportsValidation;
 use crate::wallet::WalletAddress;
 use bytes::{BufMut, BytesMut};
 use futures_lite::AsyncRead;
@@ -208,39 +208,28 @@ impl UnvalidatedItem<'static> {
 
 impl<'a> SupportsValidation for UnvalidatedItem<'a> {
     type Validated = ValidatedItem<'a>;
-    type Validator = BundleItemValidator;
-
-    fn into_valid(self, token: BundleItemValidationToken) -> Option<Self::Validated> {
-        if !token.is_valid_for(&self) {
-            return None;
-        }
-        Some(BundleItem(self.0))
-    }
-}
-
-pub struct BundleItemValidator;
-pub struct BundleItemValidationToken<'a>(ValidityProof<UnvalidatedItem<'a>>);
-impl<'a> ValidityToken<UnvalidatedItem<'a>> for BundleItemValidationToken<'a> {
-    fn is_valid_for(self, value: &UnvalidatedItem<'a>) -> bool {
-        self.0.is_valid_for(value)
-    }
-}
-
-impl<'a> Validator<UnvalidatedItem<'a>> for BundleItemValidator {
     type Error = BundleItemError;
     type Reference<'r> = ();
-    type Token = BundleItemValidationToken<'a>;
 
-    fn validate(data: &UnvalidatedItem<'a>, _: &()) -> Result<Self::Token, Self::Error> {
-        data.0.signature_data.verify_sig(&data.0.hash)?;
-        let id = data.0.signature_data.signature().digest();
-        if &id != &data.0.id {
-            return Err(BundleItemError::IdError(BundleItemIdError::IdMismatch {
-                expected: id,
-                actual: data.0.id.clone(),
-            }))?;
+    fn validate_with(
+        self,
+        _: &Self::Reference<'_>,
+    ) -> Result<Self::Validated, (Self, Self::Error)> {
+        if let Err(err) = self.0.signature_data.verify_sig(&self.0.hash) {
+            return Err((self, err));
         }
-        Ok(BundleItemValidationToken(ValidityProof::new(data)))
+        let id = self.0.signature_data.signature().digest();
+        if &id != &self.0.id {
+            let actual = self.0.id.clone();
+            return Err((
+                self,
+                BundleItemError::IdError(BundleItemIdError::IdMismatch {
+                    expected: id,
+                    actual,
+                }),
+            ));
+        }
+        Ok(BundleItem(self.0))
     }
 }
 

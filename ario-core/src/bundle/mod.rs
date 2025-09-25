@@ -10,9 +10,8 @@ pub use v2::{
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
 use crate::bundle::v2::{
-    BundleItemDataVerifier as V2BundleItemVerifier, BundleItemValidator as V2BundleItemValidator,
-    MaybeOwnedDataRoot as V2MaybeOwnedDataRoot, SignatureType, V2BundleItemBuilder,
-    V2BundleItemHash,
+    BundleItemDataVerifier as V2BundleItemVerifier, MaybeOwnedDataRoot as V2MaybeOwnedDataRoot,
+    SignatureType, V2BundleItemBuilder, V2BundleItemHash,
 };
 use crate::bundle::v2::{ContainerLocation, FlowExt};
 use crate::crypto::ec::EcPublicKey;
@@ -39,7 +38,7 @@ use crate::entity::{
 use crate::tag::Tag;
 use crate::tx::{TxId, ValidatedTx};
 use crate::typed::{FromInner, Typed, WithSerde};
-use crate::validation::{SupportsValidation, ValidateExt, Validator, ValidityToken};
+use crate::validation::{SupportsValidation, ValidateExt};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk, WalletSk};
 use crate::{blob, data, entity};
 use bytes::Buf;
@@ -377,48 +376,21 @@ impl<'a> ValidatedBundleItem<'a> {
 
 impl<'a> SupportsValidation for UnvalidatedBundleItem<'a> {
     type Validated = ValidatedBundleItem<'a>;
-    type Validator = BundleItemValidator;
-
-    fn into_valid(
-        self,
-        token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
-    ) -> Option<Self::Validated> {
-        match self {
-            Self::V2(v2) => match token {
-                BundleItemValidationToken::V2(token) => Arc::unwrap_or_clone(v2)
-                    .into_valid(token)
-                    .map(|v| Self::Validated::V2(v.into())),
-            },
-        }
-    }
-}
-
-pub struct BundleItemValidator;
-
-pub enum BundleItemValidationToken<'a> {
-    V2(<V2BundleItemValidator as Validator<V2BundleItem<'a>>>::Token),
-}
-
-impl<'a> ValidityToken<UnvalidatedBundleItem<'a>> for BundleItemValidationToken<'a> {
-    fn is_valid_for(self, value: &UnvalidatedBundleItem<'a>) -> bool {
-        match self {
-            Self::V2(v2_token) => match value {
-                UnvalidatedBundleItem::V2(v2_item) => v2_token.is_valid_for(v2_item),
-            },
-        }
-    }
-}
-
-impl<'a> Validator<UnvalidatedBundleItem<'a>> for BundleItemValidator {
     type Error = BundleItemError;
     type Reference<'r> = ();
-    type Token = BundleItemValidationToken<'a>;
 
-    fn validate(item: &UnvalidatedBundleItem<'a>, _: &()) -> Result<Self::Token, Self::Error> {
-        match item {
-            UnvalidatedBundleItem::V2(v2) => Ok(BundleItemValidationToken::V2(
-                V2BundleItemValidator::validate(v2, &())?,
-            )),
+    fn validate_with(
+        self,
+        reference: &Self::Reference<'_>,
+    ) -> Result<Self::Validated, (Self, Self::Error)> {
+        match self {
+            UnvalidatedBundleItem::V2(v2) => {
+                let v2 = Arc::unwrap_or_clone(v2);
+                match v2.validate_with(reference) {
+                    Ok(valid) => Ok(Self::Validated::V2(Arc::new(valid))),
+                    Err((invalid, err)) => Err((Self::V2(Arc::new(invalid)), err)),
+                }
+            }
         }
     }
 }

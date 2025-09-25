@@ -1,6 +1,5 @@
 pub use item::BundleItem;
 
-pub(super) use item::BundleItemValidator;
 pub(super) use reader::FlowExt;
 pub(super) use reader::bundle::BundleReader;
 

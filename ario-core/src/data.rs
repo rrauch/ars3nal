@@ -6,7 +6,7 @@ use crate::crypto::hash::{Hasher, Sha256};
 use crate::crypto::merkle;
 use crate::crypto::merkle::{DefaultMerkleRoot, DefaultProof, MerkleRoot, MerkleTree, Proof};
 use crate::typed::{FromInner, WithSerde};
-use crate::validation::{SupportsValidation, ValidateExt, Validator, ValidityProof, ValidityToken};
+use crate::validation::SupportsValidation;
 use derive_where::derive_where;
 use futures_lite::AsyncRead;
 use maybe_owned::MaybeOwned;
@@ -77,16 +77,20 @@ impl<'a> UnvalidatedTxDataChunk<'a> {
 
 impl<'a> SupportsValidation for UnvalidatedTxDataChunk<'a> {
     type Validated = ValidatedTxDataChunk<'a>;
-    type Validator = TxDataChunkValidator;
+    type Error = merkle::ProofError;
+    type Reference<'r> = TxDataValidityProof<'r>;
 
-    fn into_valid(
+    fn validate_with(
         self,
-        token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
-    ) -> Option<Self::Validated> {
-        if !token.is_valid_for(&self) {
-            return None;
+        reference: &Self::Reference<'_>,
+    ) -> Result<Self::Validated, (Self, Self::Error)> {
+        if let Err(err) = reference
+            .data_root
+            .verify_data(&mut Cursor::new(self.0.bytes()), &reference.proof)
+        {
+            return Err((self, err));
         }
-        Some(TxDataChunk(self.0))
+        Ok(TxDataChunk(self.0))
     }
 }
 
@@ -99,30 +103,6 @@ pub struct TxDataValidityProof<'a> {
 impl<'a> TxDataValidityProof<'a> {
     pub fn new(data_root: MaybeOwnedDataRoot<'a>, proof: DefaultProof<'a>) -> Self {
         Self { data_root, proof }
-    }
-}
-
-pub struct TxDataChunkValidator;
-pub struct TxDataChunkValidationToken<'a>(ValidityProof<UnvalidatedTxDataChunk<'a>>);
-impl<'a> ValidityToken<UnvalidatedTxDataChunk<'a>> for TxDataChunkValidationToken<'a> {
-    fn is_valid_for(self, value: &UnvalidatedTxDataChunk<'a>) -> bool {
-        self.0.is_valid_for(value)
-    }
-}
-
-impl<'a> Validator<UnvalidatedTxDataChunk<'a>> for TxDataChunkValidator {
-    type Error = merkle::ProofError;
-    type Reference<'r> = TxDataValidityProof<'r>;
-    type Token = TxDataChunkValidationToken<'a>;
-
-    fn validate(
-        data: &UnvalidatedTxDataChunk<'a>,
-        reference: &Self::Reference<'_>,
-    ) -> Result<Self::Token, Self::Error> {
-        reference
-            .data_root
-            .verify_data(&mut Cursor::new(data.0.bytes()), &reference.proof)?;
-        Ok(TxDataChunkValidationToken(ValidityProof::new(data)))
     }
 }
 

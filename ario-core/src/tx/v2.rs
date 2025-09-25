@@ -19,7 +19,7 @@ use crate::tx::{
 };
 use crate::tx::{RewardError, Transfer};
 use crate::typed::FromInner;
-use crate::validation::{SupportsValidation, ValidateExt, Validator, ValidityProof, ValidityToken};
+use crate::validation::{SupportsValidation, ValidateExt};
 use crate::wallet::{WalletAddress, WalletSk};
 use crate::{JsonError, JsonValue, entity};
 use anyhow::anyhow;
@@ -116,16 +116,17 @@ impl<'a> UnvalidatedV2Tx<'a> {
 
 impl<'a> SupportsValidation for UnvalidatedV2Tx<'a> {
     type Validated = ValidatedV2Tx<'a>;
-    type Validator = V2TxValidator;
+    type Error = V2TxDataError;
+    type Reference<'r> = ();
 
-    fn into_valid(
+    fn validate_with(
         self,
-        token: <<Self as SupportsValidation>::Validator as Validator<Self>>::Token,
-    ) -> Option<Self::Validated> {
-        if !token.is_valid_for(&self) {
-            return None;
+        _: &Self::Reference<'_>,
+    ) -> Result<Self::Validated, (Self, Self::Error)> {
+        if let Err(err) = self.0.signature_data.verify_sig(&(self.0.tx_hash())) {
+            return Err((self, err.into()));
         }
-        Some(V2Tx(self.0))
+        Ok(V2Tx(self.0))
     }
 }
 
@@ -433,25 +434,6 @@ pub enum V2TxDataError {
     DataRootWithoutDataSize,
     #[error("provided data root is invalid: {0}")]
     InvalidDataRoot(String),
-}
-
-pub struct V2TxValidator;
-pub struct V2TxValidationToken<'a>(ValidityProof<UnvalidatedV2Tx<'a>>);
-impl<'a> ValidityToken<UnvalidatedV2Tx<'a>> for V2TxValidationToken<'a> {
-    fn is_valid_for(self, value: &UnvalidatedV2Tx<'a>) -> bool {
-        self.0.is_valid_for(value)
-    }
-}
-
-impl<'a> Validator<UnvalidatedV2Tx<'a>> for V2TxValidator {
-    type Error = V2TxDataError;
-    type Reference<'r> = ();
-    type Token = V2TxValidationToken<'a>;
-
-    fn validate(data: &UnvalidatedV2Tx<'a>, _: &()) -> Result<Self::Token, Self::Error> {
-        data.0.signature_data.verify_sig(&(data.0.tx_hash()))?;
-        Ok(V2TxValidationToken(ValidityProof::new(data)))
-    }
 }
 
 trait TxSigner {
