@@ -125,6 +125,13 @@ impl<T: ArEntityHash, Ctx> EcdsaSignatureData<T, Secp256k1, (), Ctx> {
     pub(crate) fn signature(&self) -> super::Signature<'_, T> {
         super::Signature::Secp256k1((&self.signature).into())
     }
+
+    pub(crate) fn into_inner(self) -> (super::Signature<'static, T>, Owner<'static>) {
+        (
+            super::Signature::Secp256k1(self.signature.into()),
+            Owner::Secp256k1(self.owner.into()),
+        )
+    }
 }
 
 impl<T: ArEntityHash, Ctx> EthereumSignatureData<T, Eip191Format, Ctx> {
@@ -135,6 +142,13 @@ impl<T: ArEntityHash, Ctx> EthereumSignatureData<T, Eip191Format, Ctx> {
     pub(crate) fn signature(&self) -> super::Signature<'_, T> {
         super::Signature::Eip191((&self.signature).into())
     }
+
+    pub(crate) fn into_inner(self) -> (super::Signature<'static, T>, Owner<'static>) {
+        (
+            super::Signature::Eip191(self.signature.into()),
+            Owner::Secp256k1(self.owner.into()),
+        )
+    }
 }
 
 impl<T: ArEntityHash, Ctx> EthereumSignatureData<T, Eip712Format, Ctx> {
@@ -144,5 +158,12 @@ impl<T: ArEntityHash, Ctx> EthereumSignatureData<T, Eip712Format, Ctx> {
 
     pub(crate) fn signature(&self) -> super::Signature<'_, T> {
         super::Signature::Eip712((&self.signature).into())
+    }
+
+    pub(crate) fn into_inner(self) -> (super::Signature<'static, T>, Owner<'static>) {
+        (
+            super::Signature::Eip712(self.signature.into()),
+            Owner::Secp256k1(self.owner.into()),
+        )
     }
 }

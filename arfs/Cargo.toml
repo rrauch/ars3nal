@@ -7,9 +7,10 @@ edition = "2024"
 ario-client = { workspace = true, features = ["graphql"] }
 ario-core = { workspace = true }
 
+chrono = { workspace = true }
 derive_more = { workspace = true, features = ["full"] }
 derive-where = { workspace = true }
-chrono = { workspace = true }
+futures-lite = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde-content = { version = "0.1", features = ["default"] }
 serde_json = { workspace = true }
@@ -22,7 +23,5 @@ uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+dotenv = "0.15"
 tokio = { workspace = true, features = ["full"] }
-
-[build-dependencies]
-ario-client = { path = "../ario-client", features = ["graphql-codegen"] }

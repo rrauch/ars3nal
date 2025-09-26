@@ -10,6 +10,7 @@ use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
 use crate::jwk::{Jwk, KeyType as JwkKeyType};
 use crate::typed::Typed;
 use hybrid_array::ArraySize;
+use hybrid_array::typenum::Unsigned;
 use serde::Serialize;
 use std::fmt::{Debug, Display, Formatter};
 use thiserror::Error;
@@ -62,8 +63,15 @@ pub trait SymmetricScheme {
     type SecretKey: SymmetricKey;
 }
 
-pub trait KeySize: ArraySize + Send + Sync {}
-impl<T> KeySize for T where T: ArraySize + Send + Sync {}
+pub trait KeySize: ArraySize + Send + Sync {
+    const SIZE: usize;
+}
+impl<T> KeySize for T
+where
+    T: ArraySize + Send + Sync,
+{
+    const SIZE: usize = <T as Unsigned>::USIZE;
+}
 
 pub(crate) trait SymmetricKey {
     type Scheme: SymmetricScheme;

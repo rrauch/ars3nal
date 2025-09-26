@@ -94,6 +94,13 @@ impl<T: ArEntityHash> PssSignatureData<T, 4096> {
     pub(crate) fn signature(&self) -> Signature<'_, T> {
         Signature::Rsa4096((&self.signature).into())
     }
+
+    pub(crate) fn into_inner(self) -> (Signature<'static, T>, Owner<'static>) {
+        (
+            Signature::Rsa4096(self.signature.into()),
+            Owner::Rsa4096(self.owner.into()),
+        )
+    }
 }
 
 impl<T: ArEntityHash> PssSignatureData<T, 2048> {
@@ -103,6 +110,13 @@ impl<T: ArEntityHash> PssSignatureData<T, 2048> {
 
     pub(crate) fn signature(&self) -> Signature<'_, T> {
         Signature::Rsa2048((&self.signature).into())
+    }
+
+    pub(crate) fn into_inner(self) -> (Signature<'static, T>, Owner<'static>) {
+        (
+            Signature::Rsa2048(self.signature.into()),
+            Owner::Rsa2048(self.owner.into()),
+        )
     }
 }
 

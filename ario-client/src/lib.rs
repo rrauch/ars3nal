@@ -13,6 +13,7 @@ mod wallet;
 
 pub use crate::cache::Cache;
 pub use bytesize::ByteSize;
+pub use chrono::{DateTime, Utc};
 
 use crate::api::Api;
 use crate::routemaster::{Handle, Routemaster};

@@ -101,7 +101,7 @@ pub trait ChunkInfo:
     type Len: OutputLen;
 }
 
-impl<H: Hasher> ChunkInfo for Digest<H> {
+impl<H: Hasher> ChunkInfo for Digest<H > {
     type Len = <H::Output as Output>::Len;
 }
 

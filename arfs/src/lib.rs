@@ -578,14 +578,16 @@ mod tests {
         SnapshotHeader, SnapshotId, SnapshotKind,
     };
     use ario_client::Client;
-    use ario_client::graphql::cynic;
-    use ario_client::graphql::schema;
+    use ario_client::graphql::{TxQuery, TxQueryFilterCriteria};
     use ario_core::blob::Blob;
+    use ario_core::network::Network;
     use ario_core::tag::Tag;
     use ario_core::tx::TxId;
     use ario_core::wallet::WalletAddress;
     use ario_core::{Gateway, JsonValue};
     use chrono::DateTime;
+    use futures_lite::stream::StreamExt;
+    use std::fmt::Debug;
     use std::str::FromStr;
 
     fn init_tracing() {
@@ -994,42 +996,35 @@ mod tests {
         Ok(())
     }
 
-    #[derive(cynic::QueryVariables, Debug)]
-    pub struct TxByIdQueryVariables<'a> {
-        pub tx_id: &'a cynic::Id,
-    }
-
-    #[derive(cynic::QueryFragment, Debug)]
-    #[cynic(graphql_type = "Query", variables = "TxByIdQueryVariables")]
-    pub struct TxByIdQuery {
-        #[arguments(id: $tx_id)]
-        pub transaction: Option<Transaction>,
-    }
-
-    #[derive(cynic::QueryFragment, Debug)]
-    pub struct Transaction {
-        pub id: cynic::Id,
-    }
-
     #[ignore]
     #[tokio::test]
     async fn foo() -> anyhow::Result<()> {
+        dotenv::dotenv().ok();
         init_tracing();
 
+        let arlocal = std::env::var("ARLOCAL_URL").unwrap();
+        let network_id = std::env::var("ARLOCAL_ID").unwrap_or("arlocal".to_string());
+        let wallet_jwk = std::env::var("ARLOCAL_WALLET_JWK").unwrap();
+
         let client = Client::builder()
-            .gateways([Gateway::default()])
+            .network(Network::Local(network_id.try_into()?))
+            .gateways([Gateway::from_str(arlocal.as_str())?])
             .enable_netwatch(false)
             .build()
             .await?;
 
-        let resp: Option<TxByIdQuery> = client
-            .graphql_query(TxByIdQueryVariables {
-                tx_id: (&"G-1t0Lqysin897HC3IV8xu_Mr884B-Mo5YEnlhUH54k".to_string()).into(),
-            })
-            .await?;
+        let filter_criteria = TxQueryFilterCriteria::builder()
+            .ids([TxId::from_str(
+                "pN4sJr5CEuJzt2qPT9_hVlagEcHAStaTWo5HWcH1YWg",
+            )?])
+            .build();
 
-        let x = resp.unwrap().transaction.unwrap().id;
-        println!("");
+        let tx_query = TxQuery::builder().filter_criteria(filter_criteria).build();
+
+        let mut stream = client.query_transactions(tx_query);
+        while let Some(tx) = stream.try_next().await? {
+            println!("tx: {:?}", tx);
+        }
         Ok(())
     }
 }

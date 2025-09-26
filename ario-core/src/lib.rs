@@ -2,7 +2,7 @@ extern crate core;
 
 use crate::crypto::hash::Sha256;
 use crate::crypto::hash::TypedDigest;
-use crate::typed::{Typed, WithDisplay, WithSerde};
+use crate::typed::{Typed, WithDisplay, WithFromStr, WithSerde};
 pub use rsa::BoxedUint as BigUint;
 pub use rsa::Error as RsaError;
 pub use serde_json::Error as JsonError;
@@ -39,6 +39,11 @@ pub struct BlockKind;
 pub type BlockNumber = Typed<BlockKind, u64>;
 impl WithSerde for BlockNumber {}
 impl WithDisplay for BlockNumber {}
+
+pub type BlockId = TypedDigest<BlockKind, Sha256>;
+
+impl WithDisplay for BlockId {}
+impl WithFromStr for BlockId {}
 
 pub struct GatewayKind;
 pub type Gateway = Typed<GatewayKind, Url>;

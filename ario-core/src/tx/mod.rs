@@ -27,10 +27,11 @@ use crate::tx::v2::{TxDraft, UnauthenticatedV2Tx, V2Tx, V2TxBuilder, V2TxDataErr
 use crate::typed::{FromInner, Typed, WithSerde};
 use crate::validation::ValidateExt;
 use crate::wallet::{WalletAddress, WalletPk};
-use crate::{JsonError, JsonValue, blob};
+use crate::{JsonError, JsonValue, blob, entity};
 use bigdecimal::BigDecimal;
 use hybrid_array::Array;
 use hybrid_array::sizes::U48;
+use itertools::Either;
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -147,7 +148,7 @@ impl<'a, const AUTHENTICATED: bool> TryFrom<Tx<'a, AUTHENTICATED>> for V2Tx<'a, 
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Owner<'a> {
     Rsa2048(MaybeOwned<'a, WalletPk<RsaPublicKey<2048>>>),
     Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
@@ -197,11 +198,68 @@ impl AsBlob for Owner<'_> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Signature<'a> {
     Rsa2048(MaybeOwned<'a, ArEntitySignature<TxHash, RsaPss<2048>>>),
     Rsa4096(MaybeOwned<'a, ArEntitySignature<TxHash, RsaPss<4096>>>),
     Secp256k1(MaybeOwned<'a, ArEntitySignature<TxHash, Ecdsa<Secp256k1>>>),
+}
+
+#[derive(Error, Debug)]
+pub enum SignatureOwnerError {
+    #[error("signature or owner error: {0}")]
+    Other(String),
+    #[error("unknown or unsupported")]
+    Unknown,
+}
+
+impl<'a> Signature<'a> {
+    pub fn from_raw_autodetect(
+        raw_owner: Blob<'a>,
+        raw_signature: Blob<'a>,
+    ) -> Result<(Signature<'a>, Owner<'a>), SignatureOwnerError> {
+        match (raw_owner.len(), raw_signature.len()) {
+            (512, 512) | (256, 256) => {
+                match entity::pss::from_raw_autodetect(raw_owner, raw_signature)
+                    .map(|r| match r {
+                        Either::Left(l) => Either::Left(l.into_inner()),
+                        Either::Right(r) => Either::Right(r.into_inner()),
+                    })
+                    .map_err(|e| SignatureOwnerError::Other(e.to_string()))?
+                {
+                    Either::Left((sig, owner)) => Ok((
+                        Signature::try_from(sig).map_err(|_| {
+                            SignatureOwnerError::Other("conversion failed".to_string())
+                        })?,
+                        Owner::try_from(owner).map_err(|_| {
+                            SignatureOwnerError::Other("conversion failed".to_string())
+                        })?,
+                    )),
+                    Either::Right((sig, owner)) => Ok((
+                        Signature::try_from(sig).map_err(|_| {
+                            SignatureOwnerError::Other("conversion failed".to_string())
+                        })?,
+                        Owner::try_from(owner).map_err(|_| {
+                            SignatureOwnerError::Other("conversion failed".to_string())
+                        })?,
+                    )),
+                }
+            }
+            (32, 64) | (33, 64) | (65, 64) => {
+                let (sig, owner) =
+                    entity::ecdsa::Secp256k1SignatureData::from_raw(raw_signature, raw_owner)
+                        .map(|v| v.into_inner())
+                        .map_err(|e| SignatureOwnerError::Other(e.to_string()))?;
+                Ok((
+                    Signature::try_from(sig)
+                        .map_err(|_| SignatureOwnerError::Other("conversion failed".to_string()))?,
+                    Owner::try_from(owner)
+                        .map_err(|_| SignatureOwnerError::Other("conversion failed".to_string()))?,
+                ))
+            }
+            _ => Err(SignatureOwnerError::Unknown),
+        }
+    }
 }
 
 impl<'a> From<Signature<'a>> for EntitySignature<'a, TxHash> {
@@ -853,6 +911,14 @@ pub struct TxRewardKind;
 pub type Reward = TypedMoney<TxRewardKind, Winston>;
 
 impl WithSerde for Reward {}
+
+impl FromStr for Reward {
+    type Err = RewardError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Reward::try_from(s)
+    }
+}
 
 impl Reward {
     pub(crate) fn try_from<I, E>(money: I) -> Result<Self, RewardError>

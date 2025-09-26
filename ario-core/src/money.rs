@@ -2,7 +2,7 @@ use crate::crypto::hash::deep_hash::DeepHashable;
 use crate::crypto::hash::{Digest, Hashable, Hasher};
 use crate::money::MoneyError::{ParseError, PrecisionError, RepresentationError};
 use crate::typed::{FromInner, Typed};
-use bigdecimal::{BigDecimal, One, ParseBigDecimalError, RoundingMode};
+use bigdecimal::{BigDecimal, One, ParseBigDecimalError, RoundingMode, Zero};
 use derive_where::derive_where;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -130,6 +130,10 @@ impl<C: Currency> Money<C> {
             value.normalized().with_scale(C::DECIMAL_POINTS as i64),
             PhantomData,
         )
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.0.is_zero()
     }
 
     pub fn zero() -> Self {
