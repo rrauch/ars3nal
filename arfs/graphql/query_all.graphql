@@ -33,7 +33,7 @@ query {
                     height
                     previous
                 }
-                parent {
+                bundledIn {
                     id
                 }
             }
