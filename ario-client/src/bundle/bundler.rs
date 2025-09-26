@@ -2,12 +2,14 @@ use crate::tx::{Prepared, Status, Submitted as TxSubmitted, TxSubmission, Upload
 use crate::{Client, tx};
 use ario_core::BlockNumber;
 use ario_core::blob::OwnedBlob;
-use ario_core::bundle::{BundleItemId, BundleItemVerifier, BundleType, ValidatedBundleItem};
+use ario_core::bundle::{
+    AuthenticatedBundleItem, BundleItemAuthenticator, BundleItemId, BundleType,
+};
 use ario_core::chunking::DefaultChunker;
-use ario_core::data::{DataItem, ExternalDataItemVerifier};
+use ario_core::data::{DataItem, ExternalDataItemAuthenticator};
 use ario_core::tag::Tag;
 use ario_core::tx::v2::TxDraft;
-use ario_core::tx::{Reward, TxBuilder, TxId, ValidatedTx};
+use ario_core::tx::{AuthenticatedTx, Reward, TxBuilder, TxId};
 use async_stream::try_stream;
 use bytes::{BufMut, BytesMut};
 use futures_lite::io::Cursor;
@@ -164,8 +166,8 @@ pub enum ItemStatus {
 }
 
 struct Item<State> {
-    item: ValidatedBundleItem<'static>,
-    verifier: BundleItemVerifier<'static>,
+    item: AuthenticatedBundleItem<'static>,
+    authenticator: BundleItemAuthenticator<'static>,
     data_source: Box<dyn AsyncDataSource + 'static>,
     status_tx: watch::Sender<Result<ItemStatus, Arc<Error>>>,
     state: State,
@@ -175,7 +177,7 @@ impl<State> Item<State> {
     fn _state<Next>(self, next: Next) -> Item<Next> {
         Item {
             item: self.item,
-            verifier: self.verifier,
+            authenticator: self.authenticator,
             data_source: self.data_source,
             status_tx: self.status_tx,
             state: next,
@@ -191,14 +193,14 @@ type UnprocessedItem = Item<()>;
 
 impl UnprocessedItem {
     fn new(
-        item: ValidatedBundleItem<'static>,
-        verifier: BundleItemVerifier<'static>,
+        item: AuthenticatedBundleItem<'static>,
+        authenticator: BundleItemAuthenticator<'static>,
         data_source: Box<dyn AsyncDataSource + 'static>,
         status_tx: watch::Sender<Result<ItemStatus, Arc<Error>>>,
     ) -> Self {
         Self {
             item,
-            verifier,
+            authenticator,
             data_source,
             status_tx,
             state: (),
@@ -253,7 +255,7 @@ pub struct AcceptingItems {
             (
                 Vec<ProcessedItem>,
                 OwnedBlob,
-                ExternalDataItemVerifier<'static>,
+                ExternalDataItemAuthenticator<'static>,
             ),
             Arc<Error>,
         >,
@@ -280,7 +282,7 @@ pub struct Submitted {
 pub struct TxSigning {
     header: OwnedBlob,
     items: Vec<ProcessedItem>,
-    data_verifier: ExternalDataItemVerifier<'static>,
+    data_authenticator: ExternalDataItemAuthenticator<'static>,
     tx_draft: TxDraft<'static>,
     tx_submission: TxSubmission<Prepared>,
 }
@@ -320,15 +322,15 @@ impl AsyncBundler<AcceptingItems> {
 
     pub async fn submit<D: AsyncDataSource + 'static>(
         &mut self,
-        item: ValidatedBundleItem<'static>,
-        verifier: BundleItemVerifier<'static>,
+        item: AuthenticatedBundleItem<'static>,
+        authenticator: BundleItemAuthenticator<'static>,
         data_source: D,
     ) -> Result<Receipt, Error> {
         if item.bundle_type() != BundleType::V2 {
             return Err(Error::UnsupportedVersion);
         }
 
-        if verifier.bundle_type() != BundleType::V2 {
+        if authenticator.bundle_type() != BundleType::V2 {
             return Err(Error::UnsupportedVersion);
         }
 
@@ -348,7 +350,7 @@ impl AsyncBundler<AcceptingItems> {
         self.state.estimated_data_size += item.data_size() + item.data_offset();
 
         let (tx, rx) = watch::channel(Ok(ItemStatus::Queued));
-        let item = UnprocessedItem::new(item, verifier, Box::new(data_source), tx);
+        let item = UnprocessedItem::new(item, authenticator, Box::new(data_source), tx);
         if let Err(_) = self.state.item_tx.send(item).await {
             // processor is dead
             self.ct.cancel();
@@ -376,7 +378,7 @@ impl AsyncBundler<AcceptingItems> {
     ) -> Result<AsyncBundler<TxSigning>, Arc<Error>> {
         let processor_handle = self.state.processor_handle;
         drop(self.state.item_tx);
-        let (items, header, data_verifier) = processor_handle
+        let (items, header, data_authenticator) = processor_handle
             .await
             .map_err(|_| Arc::new(Error::Dead))??;
 
@@ -411,13 +413,13 @@ impl AsyncBundler<AcceptingItems> {
             .reward(0)
             .map_err(|e| Arc::new(Error::Other(e.to_string())))?
             .tx_anchor(tx_submission.tx_anchor().clone())
-            .data_upload(data_verifier.data_item().clone().into())
+            .data_upload(data_authenticator.data_item().clone().into())
             .draft();
 
         let state = TxSigning {
             header,
             items,
-            data_verifier,
+            data_authenticator,
             tx_draft,
             tx_submission,
         };
@@ -438,7 +440,7 @@ impl AsyncBundler<TxSigning> {
     }
 
     pub fn data_size(&self) -> u64 {
-        self.state.data_verifier.data_item().data_size()
+        self.state.data_authenticator.data_item().data_size()
     }
 
     pub fn tx_draft(&self) -> TxDraft<'static> {
@@ -447,20 +449,20 @@ impl AsyncBundler<TxSigning> {
 
     pub async fn transition(
         self,
-        signed_tx: ValidatedTx<'_>,
+        signed_tx: AuthenticatedTx<'_>,
     ) -> Result<AsyncBundler<Uploading>, Error> {
         let data_item = match signed_tx.data_item() {
             Some(DataItem::External(di)) => di,
             _ => return Err(Error::TxMismatch),
         };
-        let data_verifier = self.state.data_verifier;
-        if data_item.data_size() != data_verifier.data_item().data_size()
-            || data_item.data_root() != data_verifier.data_item().data_root()
+        let data_authenticator = self.state.data_authenticator;
+        if data_item.data_size() != data_authenticator.data_item().data_size()
+            || data_item.data_root() != data_authenticator.data_item().data_root()
         {
             return Err(Error::TxMismatch);
         }
 
-        let data_size = data_verifier.data_item().data_size();
+        let data_size = data_authenticator.data_item().data_size();
         let item_count = self.state.items.len();
         let reward_paid = signed_tx.reward().clone();
 
@@ -474,7 +476,7 @@ impl AsyncBundler<TxSigning> {
         let mut uploader = Uploader::new(
             self.id,
             tx_sub
-                .data(data_verifier.into())
+                .data(data_authenticator.into())
                 .map_err(|(_, e)| Error::from(e))?,
             self.state.header,
             self.state.items,
@@ -632,7 +634,7 @@ impl Processor {
         (
             Vec<ProcessedItem>,
             OwnedBlob,
-            ExternalDataItemVerifier<'static>,
+            ExternalDataItemAuthenticator<'static>,
         ),
         Arc<Error>,
     > {
@@ -680,11 +682,11 @@ impl Processor {
             }
             res = Self::process_all(processed_items.iter_mut()) => {
                 match res {
-                    Ok((header, verifier)) => {
+                    Ok((header, authenticator)) => {
                         // completed cleanly
                         // disarm drop_guard
                         self._drop_guard.take().unwrap().disarm();
-                        Ok((processed_items, header, verifier))
+                        Ok((processed_items, header, authenticator))
                     }
                     Err(err) => {
                         Err(Arc::new(err))
@@ -696,7 +698,7 @@ impl Processor {
 
     async fn process_item(item: &mut UnprocessedItem) -> Result<OwnedBlob, Error> {
         let header = match &item.item {
-            ValidatedBundleItem::V2(v2) => v2
+            AuthenticatedBundleItem::V2(v2) => v2
                 .try_as_blob()
                 .map_err(|e| Error::ItemError(e.to_string()))?,
         };
@@ -712,7 +714,7 @@ impl Processor {
 
     async fn process_all(
         items: impl Iterator<Item = &mut ProcessedItem>,
-    ) -> Result<(OwnedBlob, ExternalDataItemVerifier<'static>), Error> {
+    ) -> Result<(OwnedBlob, ExternalDataItemAuthenticator<'static>), Error> {
         let items = items.collect_vec();
         let mut header = BytesMut::with_capacity(32 + (64 * items.len()));
         header.put_u16_le(items.len() as u16);
@@ -727,10 +729,12 @@ impl Processor {
         let header = OwnedBlob::from(header.freeze());
 
         let mut combinator = BundleItemCombinator::new(header.bytes(), items.into_iter());
-        let verifier =
-            ExternalDataItemVerifier::try_from_async_reader(&mut combinator, DefaultChunker::new())
-                .await?;
-        Ok((header, verifier))
+        let authenticator = ExternalDataItemAuthenticator::try_from_async_reader(
+            &mut combinator,
+            DefaultChunker::new(),
+        )
+        .await?;
+        Ok((header, authenticator))
     }
 }
 
@@ -1002,7 +1006,7 @@ mod tests {
 
         let mut file = tokio::fs::File::open(FILE_1_PATH).await?.compat();
         let data = V2BundleItemDataProcessor::try_from_async_reader(&mut file).await?;
-        let verifier = data.verifier();
+        let authenticator = data.authenticator();
 
         let bundle_item_draft = BundleItemBuilder::v2()
             .tags(vec![("name1", "value1").into()])
@@ -1012,14 +1016,14 @@ mod tests {
         let _receipt1 = bundler_accepting
             .submit(
                 wallet.sign_bundle_item_draft::<ArweaveScheme>(bundle_item_draft)?,
-                verifier,
+                authenticator,
                 file,
             )
             .await?;
 
         let mut file = tokio::fs::File::open(FILE_2_PATH).await?.compat();
         let data = V2BundleItemDataProcessor::try_from_async_reader(&mut file).await?;
-        let verifier = data.verifier();
+        let authenticator = data.authenticator();
 
         let bundle_item_draft = BundleItemBuilder::v2()
             .tags(vec![("name2", "value2").into()])
@@ -1029,7 +1033,7 @@ mod tests {
         let _receipt2 = bundler_accepting
             .submit(
                 wallet.sign_bundle_item_draft::<ArweaveScheme>(bundle_item_draft)?,
-                verifier,
+                authenticator,
                 file,
             )
             .await?;

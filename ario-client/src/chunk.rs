@@ -9,8 +9,8 @@ use ario_core::base64::OptionalBase64As;
 use ario_core::blob::{AsBlob, Blob};
 use ario_core::crypto::merkle::{DefaultProof, ProofError};
 use ario_core::data::{
-    DataRoot, ExternalDataItemVerifier, TxDataChunk, TxDataValidityProof, ValidatedTxDataChunk,
-    Verifier,
+    AuthenticatedTxDataChunk, Authenticator, DataRoot, ExternalDataItemAuthenticator,
+    TxDataAuthenticityProof, TxDataChunk,
 };
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
@@ -76,18 +76,19 @@ impl Api {
 impl Client {
     pub async fn upload_chunk(
         &self,
-        verifier: &ExternalDataItemVerifier<'_>,
+        authenticator: &ExternalDataItemAuthenticator<'_>,
         offset: &Range<u64>,
         data: Blob<'_>,
     ) -> Result<(), super::Error> {
         let gw = self.0.routemaster.gateway().await?;
-        self.upload_chunk_with_gw(&gw, verifier, offset, data).await
+        self.upload_chunk_with_gw(&gw, authenticator, offset, data)
+            .await
     }
 
     pub(crate) async fn upload_chunk_with_gw(
         &self,
         gw_handle: &Handle<Gateway>,
-        verifier: &ExternalDataItemVerifier<'_>,
+        authenticator: &ExternalDataItemAuthenticator<'_>,
         offset: &Range<u64>,
         data: Blob<'_>,
     ) -> Result<(), super::Error> {
@@ -103,21 +104,21 @@ impl Client {
             .into());
         }
 
-        let proof = verifier
+        let proof = authenticator
             .proof(offset)
             .ok_or(UploadError::ProofNotFound(offset.start))?;
 
-        // verify data against merkle tree
-        verifier
+        // authenticate data using merkle tree
+        authenticator
             .data_item()
             .data_root()
-            .verify_data(&mut Cursor::new(&data), &proof)
+            .authenticate_data(&mut Cursor::new(&data), &proof)
             .map_err(|e| UploadError::ProofError(e.into()))?;
 
         // looking good, create upload json
         let upload_chunk = UploadChunk {
-            data_root: verifier.data_item().data_root().as_blob(),
-            data_size: verifier.data_item().data_size(),
+            data_root: authenticator.data_item().data_root().as_blob(),
+            data_size: authenticator.data_item().data_size(),
             data_path: proof.as_blob(),
             offset: offset.start,
             chunk: data,
@@ -135,7 +136,7 @@ impl Client {
         offset: u128,
         relative_offset: u64,
         data_root: &DataRoot,
-    ) -> Result<Option<ValidatedTxDataChunk<'static>>, super::Error> {
+    ) -> Result<Option<AuthenticatedTxDataChunk<'static>>, super::Error> {
         self.0
             .cache
             .get_chunk(offset, data_root, relative_offset, async |offset| {
@@ -209,7 +210,7 @@ impl<'a> UnvalidatedTxDownloadChunk<'a> {
         data_root: &DataRoot,
         relative_offset: u64,
     ) -> Result<ValidatedTxDownloadChunk<'a>, ProofError> {
-        let proof = TxDataValidityProof::new(
+        let proof = TxDataAuthenticityProof::new(
             data_root.into(),
             DefaultProof::new(
                 relative_offset..(relative_offset + self.chunk.len() as u64),
@@ -217,7 +218,7 @@ impl<'a> UnvalidatedTxDownloadChunk<'a> {
             ),
         );
 
-        let validated = self.chunk.validate(&proof).map_err(|(_, e)| e)?;
+        let validated = self.chunk.authenticate(&proof).map_err(|(_, e)| e)?;
 
         Ok(TxDownloadChunk {
             chunk: validated,

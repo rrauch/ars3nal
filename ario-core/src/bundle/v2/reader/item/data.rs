@@ -83,7 +83,7 @@ impl Data {
             signature_type: self.signature_type,
             data_size: self.len,
             data_deep_hash: dr.data_deep_hash,
-            data_verifier: dr.data_verifier,
+            data_verifier: dr.data_authenticator,
             data_offset: self.data_offset,
         })
     }

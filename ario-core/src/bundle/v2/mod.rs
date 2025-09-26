@@ -19,7 +19,7 @@ use crate::crypto::hash::{Blake3, Digest, Hasher, Sha384, TypedDigest, deep_hash
 use crate::crypto::keys::SecretKey;
 use crate::crypto::merkle::{MerkleRoot, MerkleTree, Proof};
 use crate::crypto::signature::Scheme as SignatureScheme;
-use crate::data::{MerkleDataItemVerifier, MerkleVerifiableDataItem};
+use crate::data::{MerkleAuthenticatableDataItem, MerkleDataItemAuthenticator};
 use crate::entity;
 use crate::entity::ecdsa::{Eip191SignatureData, Eip712SignatureData};
 use crate::entity::ed25519::{
@@ -168,7 +168,7 @@ impl BundleItemDraft<'_> {
         signer: &WalletSk<
             <<S as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer,
         >,
-    ) -> Result<super::ValidatedBundleItem<'static>, BundleItemError>
+    ) -> Result<super::AuthenticatedBundleItem<'static>, BundleItemError>
     where
         WalletSk<<<S as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer>:
             BundleItemSigner<S>,
@@ -182,13 +182,13 @@ impl BundleItemDraft<'_> {
             tag_data: self.tags_blob.into_owned(),
             tag_count: self.tags.len(),
             target: self.target.as_ref().map(|t| t.as_blob().into_owned()),
-            data_size: self.data_upload.data_verifier.data_item().data_size(),
+            data_size: self.data_upload.data_authenticator.data_item().data_size(),
             data_offset: 0,
             owner: owner.as_blob().into_owned(),
             signature: signature.as_blob().into_owned(),
             signature_type: signature_data.signature_type(),
             data_deep_hash: self.data_upload.data_deep_hash.clone(),
-            data_verifier: self.data_upload.data_verifier.clone(),
+            data_verifier: self.data_upload.data_authenticator.clone(),
         };
 
         let serialized = raw.as_blob();
@@ -197,7 +197,7 @@ impl BundleItemDraft<'_> {
         let (unvalidated, _) = BundleItem::try_from_raw(raw, PLACEHOLDER_BUNDLE_ID.clone())?;
         let validated = unvalidated.validate().map_err(|(_, e)| e)?;
 
-        Ok(super::ValidatedBundleItem::from(validated))
+        Ok(super::AuthenticatedBundleItem::from(validated))
     }
 }
 
@@ -265,12 +265,12 @@ where
 #[derive(Debug, Clone)]
 pub struct ProcessedDataItem {
     data_deep_hash: DataDeepHash,
-    data_verifier: BundleItemDataVerifier<'static>,
+    data_authenticator: BundleItemDataAuthenticator<'static>,
 }
 
 impl ProcessedDataItem {
-    pub fn verifier(&self) -> super::BundleItemVerifier<'static> {
-        self.data_verifier.clone().into()
+    pub fn authenticator(&self) -> super::BundleItemAuthenticator<'static> {
+        self.data_authenticator.clone().into()
     }
 }
 
@@ -339,10 +339,11 @@ impl BundleItemDataProcessor {
         self.chunks.extend(self.chunker.finalize());
         let merkle_tree = BundleItemMerkleTree::from_iter(self.chunks.drain(..));
         let data_item = BundleDataItem::new(self.processed, merkle_tree.root().clone().into());
-        let data_verifier = BundleItemDataVerifier::from_inner(data_item, Arc::new(merkle_tree));
+        let data_verifier =
+            BundleItemDataAuthenticator::from_inner(data_item, Arc::new(merkle_tree));
         ProcessedDataItem {
             data_deep_hash,
-            data_verifier,
+            data_authenticator: data_verifier,
         }
     }
 
@@ -760,9 +761,10 @@ pub type DataRoot = BundleItemMerkleRoot;
 pub(super) type MaybeOwnedDataRoot<'a> = MaybeOwned<'a, DataRoot>;
 pub type BundleItemProof<'a> = Proof<'a, Blake3, BundleItemChunker, 32>;
 
-pub type BundleItemDataVerifier<'a> = MerkleDataItemVerifier<'a, Blake3, BundleItemChunker, 32>;
+pub type BundleItemDataAuthenticator<'a> =
+    MerkleDataItemAuthenticator<'a, Blake3, BundleItemChunker, 32>;
 
-pub type BundleDataItem<'a> = MerkleVerifiableDataItem<'a, Blake3, BundleItemChunker, 32>;
+pub type BundleDataItem<'a> = MerkleAuthenticatableDataItem<'a, Blake3, BundleItemChunker, 32>;
 
 #[cfg(test)]
 mod tests {
@@ -771,7 +773,7 @@ mod tests {
     use crate::bundle::v2::reader::bundle::BundleReader;
     use crate::bundle::v2::{BundleItem, BundleItemDataProcessor};
     use crate::bundle::{BundleId, BundleItemBuilder, Ed25519Scheme};
-    use crate::data::Verifier;
+    use crate::data::Authenticator;
     use crate::jwk::Jwk;
     use crate::validation::ValidateExt;
     use crate::wallet::Wallet;
@@ -845,8 +847,10 @@ mod tests {
                     input = reader.into_inner();
 
                     let proof = data_verifier.proof(chunk).unwrap();
-                    data_root
-                        .verify_data(&mut std::io::Cursor::new(buf.make_contiguous()), &proof)?;
+                    data_root.authenticate_data(
+                        &mut std::io::Cursor::new(buf.make_contiguous()),
+                        &proof,
+                    )?;
                 }
             }
         }
@@ -888,8 +892,8 @@ mod tests {
         let item = unvalidated.validate().map_err(|(_, e)| e)?;
         assert_eq!(item.id(), v2_item.id());
 
-        let data_verifier = &data.data_verifier;
-        let data_root = data.data_verifier.data_item().data_root();
+        let data_verifier = &data.data_authenticator;
+        let data_root = data.data_authenticator.data_item().data_root();
         let mut input = &mut futures_lite::io::Cursor::new(&bytes);
         let mut buf = HeapCircularBuffer::new(data_verifier.max_chunk_size());
         // verify content
@@ -903,7 +907,8 @@ mod tests {
             input = reader.into_inner();
 
             let proof = data_verifier.proof(chunk).unwrap();
-            data_root.verify_data(&mut std::io::Cursor::new(buf.make_contiguous()), &proof)?;
+            data_root
+                .authenticate_data(&mut std::io::Cursor::new(buf.make_contiguous()), &proof)?;
         }
 
         Ok(())

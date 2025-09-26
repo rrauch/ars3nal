@@ -33,7 +33,7 @@ impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleRoot<H, C, NOTE_SIZE> 
     const LEAF_PROOF_LEN: usize = { Self::HASH_SIZE + NOTE_SIZE };
     const BRANCH_PROOF_LEN: usize = { Self::HASH_SIZE * 2 + NOTE_SIZE };
 
-    pub fn verify_data(
+    pub fn authenticate_data(
         &self,
         data: &mut impl Buf,
         proof: &Proof<H, C, NOTE_SIZE>,
@@ -46,10 +46,10 @@ impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleRoot<H, C, NOTE_SIZE> 
             });
         }
         let chunk = C::single_chunk(data, proof.offset.start);
-        self.verify_chunk(&chunk, proof)
+        self.authenticate_chunk(&chunk, proof)
     }
 
-    fn verify_chunk(
+    fn authenticate_chunk(
         &self,
         chunk: &Chunk<C>,
         proof: &Proof<H, C, NOTE_SIZE>,
@@ -81,7 +81,7 @@ impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleRoot<H, C, NOTE_SIZE> 
             let id = hasher.finalize();
 
             if id.as_slice() != expected_id {
-                return Err(ProofError::VerificationFailed);
+                return Err(ProofError::AuthenticationFailed);
             }
 
             expected_id = if proof.offset() >= chunk.offset().end {
@@ -101,15 +101,15 @@ impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> MerkleRoot<H, C, NOTE_SIZE> 
         let id = hasher.finalize();
 
         if id.as_slice() != expected_id {
-            return Err(ProofError::VerificationFailed);
+            return Err(ProofError::AuthenticationFailed);
         }
 
         if chunk.output().as_blob().bytes() != proof.chunk_output {
-            return Err(ProofError::VerificationFailed);
+            return Err(ProofError::AuthenticationFailed);
         }
 
         if note.as_slice() != proof.note {
-            return Err(ProofError::VerificationFailed);
+            return Err(ProofError::AuthenticationFailed);
         }
 
         Ok(())
@@ -180,8 +180,8 @@ pub enum ProofError {
         expected: Range<u64>,
         actual: Range<u64>,
     },
-    #[error("verification failed")]
-    VerificationFailed,
+    #[error("authentication failed")]
+    AuthenticationFailed,
 }
 
 #[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -602,7 +602,7 @@ mod tests {
 
         for chunk in &chunks {
             let proof = tree.proof(chunk.offset().start).unwrap();
-            root.verify_chunk(chunk, proof)?;
+            root.authenticate_chunk(chunk, proof)?;
         }
 
         Ok(())

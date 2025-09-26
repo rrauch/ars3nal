@@ -1,7 +1,7 @@
 use crate::base64::{TryFromBase64, TryFromBase64Error};
 use crate::blob::Blob;
 use crate::bundle::{
-    BundleItemDraft, BundleItemError, BundleItemSignatureScheme, ValidatedBundleItem,
+    AuthenticatedBundleItem, BundleItemDraft, BundleItemError, BundleItemSignatureScheme,
 };
 use crate::confidential::{Confidential, NewSecretExt, OptionRevealExt, RevealExt};
 use crate::crypto::ec::EcSecretKey;
@@ -21,7 +21,7 @@ use crate::crypto::signature::VerifySigExt;
 use crate::entity::{ArEntityHash, ArEntitySignature, MessageFor};
 use crate::jwk::Jwk;
 use crate::tx::v2::TxDraft;
-use crate::tx::{TxError, ValidatedTx};
+use crate::tx::{AuthenticatedTx, TxError};
 use crate::typed::{FromInner, WithDisplay, WithSerde};
 use crate::{Address, blob};
 use bip39::Mnemonic;
@@ -103,7 +103,7 @@ impl Wallet {
         }
     }
 
-    pub fn sign_tx_draft<'a>(&self, tx_draft: TxDraft<'a>) -> Result<ValidatedTx<'a>, TxError> {
+    pub fn sign_tx_draft<'a>(&self, tx_draft: TxDraft<'a>) -> Result<AuthenticatedTx<'a>, TxError> {
         // v2 only for now
         Ok(match &self.0.deref() {
             WalletInner::Rsa4096(rsa) => tx_draft.sign(rsa)?.into(),
@@ -123,7 +123,7 @@ impl Wallet {
     pub fn sign_bundle_item_draft<'a, S: BundleItemSignatureScheme>(
         &self,
         draft: BundleItemDraft<'a>,
-    ) -> Result<ValidatedBundleItem<'a>, BundleItemError>
+    ) -> Result<AuthenticatedBundleItem<'a>, BundleItemError>
     where
         <<S as BundleItemSignatureScheme>::SignatureScheme as SignatureScheme>::Signer:
             SecretKey + 'static,

@@ -23,27 +23,27 @@ pub struct ExternalDataKind;
 pub type ChunkedData<C: Chunker> = TypedChunk<ExternalDataKind, C>;
 pub type DefaultChunkedData = ChunkedData<DefaultChunker>;
 pub type MaybeOwnedDefaultChunkedData<'a> = MaybeOwned<'a, DefaultChunkedData>;
-pub type ExternalDataItem<'a> = MerkleVerifiableDataItem<'a, Sha256, DefaultChunker, 32>;
+pub type ExternalDataItem<'a> = MerkleAuthenticatableDataItem<'a, Sha256, DefaultChunker, 32>;
 pub type MaybeOwnedExternalDataItem<'a> = MaybeOwned<'a, ExternalDataItem<'a>>;
 
 #[derive(Clone, PartialEq, Hash, Debug)]
-pub struct TxDataChunk<'a, const VALIDATED: bool = false>(Blob<'a>);
-pub type ValidatedTxDataChunk<'a> = TxDataChunk<'a, true>;
+pub struct TxDataChunk<'a, const AUTHENTICATED: bool = false>(Blob<'a>);
+pub type AuthenticatedTxDataChunk<'a> = TxDataChunk<'a, true>;
 
-impl<'a> AsBlob for ValidatedTxDataChunk<'a> {
+impl<'a> AsBlob for AuthenticatedTxDataChunk<'a> {
     fn as_blob(&self) -> Blob<'_> {
         self.0.as_blob()
     }
 }
 
-impl AsRef<[u8]> for ValidatedTxDataChunk<'_> {
+impl AsRef<[u8]> for AuthenticatedTxDataChunk<'_> {
     fn as_ref(&self) -> &[u8] {
         self.0.bytes()
     }
 }
 
-impl<'a> ValidatedTxDataChunk<'a> {
-    pub fn invalidate(self) -> UnvalidatedTxDataChunk<'a> {
+impl<'a> AuthenticatedTxDataChunk<'a> {
+    pub fn invalidate(self) -> UnauthenticatedTxDataChunk<'a> {
         TxDataChunk(self.0)
     }
 
@@ -52,33 +52,33 @@ impl<'a> ValidatedTxDataChunk<'a> {
     }
 }
 
-pub type UnvalidatedTxDataChunk<'a> = TxDataChunk<'a, false>;
+pub type UnauthenticatedTxDataChunk<'a> = TxDataChunk<'a, false>;
 
-impl<'a, const VALIDATED: bool> TxDataChunk<'a, VALIDATED> {
+impl<'a, const AUTHENTICATED: bool> TxDataChunk<'a, AUTHENTICATED> {
     pub fn len(&self) -> usize {
         self.0.len()
     }
 }
 
-impl<'a> UnvalidatedTxDataChunk<'a> {
+impl<'a> UnauthenticatedTxDataChunk<'a> {
     #[inline]
     pub fn from_blob(data: Blob<'a>) -> Self {
         Self(data)
     }
 
     #[inline]
-    pub fn validate(
+    pub fn authenticate(
         self,
-        proof: &TxDataValidityProof<'_>,
-    ) -> Result<ValidatedTxDataChunk<'a>, (Self, merkle::ProofError)> {
+        proof: &TxDataAuthenticityProof<'_>,
+    ) -> Result<AuthenticatedTxDataChunk<'a>, (Self, merkle::ProofError)> {
         self.validate_with(proof)
     }
 }
 
-impl<'a> SupportsValidation for UnvalidatedTxDataChunk<'a> {
-    type Validated = ValidatedTxDataChunk<'a>;
+impl<'a> SupportsValidation for UnauthenticatedTxDataChunk<'a> {
+    type Validated = AuthenticatedTxDataChunk<'a>;
     type Error = merkle::ProofError;
-    type Reference<'r> = TxDataValidityProof<'r>;
+    type Reference<'r> = TxDataAuthenticityProof<'r>;
 
     fn validate_with(
         self,
@@ -86,7 +86,7 @@ impl<'a> SupportsValidation for UnvalidatedTxDataChunk<'a> {
     ) -> Result<Self::Validated, (Self, Self::Error)> {
         if let Err(err) = reference
             .data_root
-            .verify_data(&mut Cursor::new(self.0.bytes()), &reference.proof)
+            .authenticate_data(&mut Cursor::new(self.0.bytes()), &reference.proof)
         {
             return Err((self, err));
         }
@@ -95,18 +95,18 @@ impl<'a> SupportsValidation for UnvalidatedTxDataChunk<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct TxDataValidityProof<'a> {
+pub struct TxDataAuthenticityProof<'a> {
     data_root: MaybeOwnedDataRoot<'a>,
     proof: DefaultProof<'a>,
 }
 
-impl<'a> TxDataValidityProof<'a> {
+impl<'a> TxDataAuthenticityProof<'a> {
     pub fn new(data_root: MaybeOwnedDataRoot<'a>, proof: DefaultProof<'a>) -> Self {
         Self { data_root, proof }
     }
 }
 
-pub trait Verifier<DataItem>: Sized {
+pub trait Authenticator<DataItem>: Sized {
     type Proof<'a>
     where
         Self: 'a;
@@ -115,18 +115,19 @@ pub trait Verifier<DataItem>: Sized {
     fn proof(&self, range: &Range<u64>) -> Option<MaybeOwned<'_, Self::Proof<'_>>>;
 }
 
-pub type ExternalDataItemVerifier<'a> = MerkleDataItemVerifier<'a, Sha256, DefaultChunker, 32>;
+pub type ExternalDataItemAuthenticator<'a> =
+    MerkleDataItemAuthenticator<'a, Sha256, DefaultChunker, 32>;
 
 #[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MerkleDataItemVerifier<'a, H: Hasher + 'a, C: Chunker, const NOTE_SIZE: usize> {
-    data_item: MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE>,
+pub struct MerkleDataItemAuthenticator<'a, H: Hasher + 'a, C: Chunker, const NOTE_SIZE: usize> {
+    data_item: MerkleAuthenticatableDataItem<'a, H, C, NOTE_SIZE>,
     merkle_tree: Arc<MerkleTree<'a, H, C, NOTE_SIZE>>,
 }
 
 impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize>
-    MerkleDataItemVerifier<'a, H, C, NOTE_SIZE>
+    MerkleDataItemAuthenticator<'a, H, C, NOTE_SIZE>
 {
-    pub fn data_item(&self) -> &MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE> {
+    pub fn data_item(&self) -> &MerkleAuthenticatableDataItem<'a, H, C, NOTE_SIZE> {
         &self.data_item
     }
 
@@ -135,7 +136,7 @@ impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize>
     }
 
     pub(crate) fn from_inner(
-        data_item: MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE>,
+        data_item: MerkleAuthenticatableDataItem<'a, H, C, NOTE_SIZE>,
         merkle_tree: Arc<MerkleTree<'a, H, C, NOTE_SIZE>>,
     ) -> Self {
         Self {
@@ -168,8 +169,8 @@ impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize>
 }
 
 impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize>
-    Verifier<MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE>>
-    for MerkleDataItemVerifier<'a, H, C, NOTE_SIZE>
+    Authenticator<MerkleAuthenticatableDataItem<'a, H, C, NOTE_SIZE>>
+    for MerkleDataItemAuthenticator<'a, H, C, NOTE_SIZE>
 {
     type Proof<'p>
         = Proof<'p, H, C, NOTE_SIZE>
@@ -196,7 +197,7 @@ impl<
     H: Hasher + 'a,
     C: Chunker,
     const NOTE_SIZE: usize,
-> FromIterator<I> for MerkleDataItemVerifier<'a, H, C, NOTE_SIZE>
+> FromIterator<I> for MerkleDataItemAuthenticator<'a, H, C, NOTE_SIZE>
 {
     fn from_iter<T: IntoIterator<Item = I>>(iter: T) -> Self {
         let mut len = 0;
@@ -211,7 +212,7 @@ impl<
         }));
 
         Self {
-            data_item: MerkleVerifiableDataItem::new(
+            data_item: MerkleAuthenticatableDataItem::new(
                 len,
                 MaybeOwned::Owned(merkle_tree.root().clone()),
             ),
@@ -221,13 +222,13 @@ impl<
 }
 
 #[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MerkleVerifiableDataItem<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
+pub struct MerkleAuthenticatableDataItem<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> {
     data_size: u64,
     data_root: MaybeOwned<'a, MerkleRoot<H, C, NOTE_SIZE>>,
 }
 
 impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize>
-    MerkleVerifiableDataItem<'a, H, C, NOTE_SIZE>
+    MerkleAuthenticatableDataItem<'a, H, C, NOTE_SIZE>
 {
     pub(crate) fn new(
         data_size: u64,

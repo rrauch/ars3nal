@@ -3,9 +3,10 @@ use crate::cache::Error::L2Error;
 use crate::cache::{Context, Error, HasWeight, InnerCache, L2MetadataCache};
 use crate::tx::Offset as TxOffset;
 use ario_core::bundle::{
-    Bundle, BundleId, BundleItemId, BundleItemVerifier, UnvalidatedBundleItem, ValidatedBundleItem,
+    AuthenticatedBundleItem, Bundle, BundleId, BundleItemAuthenticator, BundleItemId,
+    UnauthenticatedBundleItem,
 };
-use ario_core::tx::{TxId, UnvalidatedTx, ValidatedTx};
+use ario_core::tx::{AuthenticatedTx, TxId, UnauthenticatedTx};
 use maybe_owned::MaybeOwned;
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
@@ -47,11 +48,11 @@ pub trait L2Cache: Send + Sync {
     fn get_tx(
         &self,
         id: &TxId,
-    ) -> impl Future<Output = Result<Option<UnvalidatedTx<'static>>, std::io::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<UnauthenticatedTx<'static>>, std::io::Error>> + Send;
 
     fn insert_tx(
         &self,
-        tx: UnvalidatedTx<'static>,
+        tx: UnauthenticatedTx<'static>,
     ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
 
     fn invalidate_tx(&self, id: &TxId) -> impl Future<Output = Result<(), std::io::Error>> + Send;
@@ -93,15 +94,18 @@ pub trait L2Cache: Send + Sync {
         bundle_id: &BundleId,
     ) -> impl Future<
         Output = Result<
-            Option<(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>)>,
+            Option<(
+                UnauthenticatedBundleItem<'static>,
+                BundleItemAuthenticator<'static>,
+            )>,
             std::io::Error,
         >,
     > + Send;
 
     fn insert_bundle_item(
         &self,
-        bundle_item: UnvalidatedBundleItem<'static>,
-        verifier: BundleItemVerifier<'static>,
+        bundle_item: UnauthenticatedBundleItem<'static>,
+        verifier: BundleItemAuthenticator<'static>,
     ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
 
     fn invalidate_bundle_item(
@@ -115,8 +119,8 @@ impl Cache {
     pub(crate) async fn get_tx(
         &self,
         tx_id: &TxId,
-        f: impl AsyncFnOnce(&TxId) -> Result<Option<ValidatedTx<'static>>, crate::Error>,
-    ) -> Result<Option<ValidatedTx<'static>>, crate::Error> {
+        f: impl AsyncFnOnce(&TxId) -> Result<Option<AuthenticatedTx<'static>>, crate::Error>,
+    ) -> Result<Option<AuthenticatedTx<'static>>, crate::Error> {
         let key = TxByIdKey::from(tx_id);
         Ok(self
             .metadata_cache
@@ -125,7 +129,12 @@ impl Cache {
                 async |key| f(key.deref()).await,
                 async |key, l2| {
                     Ok(
-                        match l2.get_tx(key).await?.map(|tx| tx.validate()).transpose() {
+                        match l2
+                            .get_tx(key)
+                            .await?
+                            .map(|tx| tx.authenticate())
+                            .transpose()
+                        {
                             Ok(r) => r,
                             Err(_) => {
                                 // corrupted cache entry
@@ -186,11 +195,19 @@ impl Cache {
             &BundleItemId,
             &BundleId,
         ) -> Result<
-            Option<(ValidatedBundleItem<'static>, BundleItemVerifier<'static>)>,
+            Option<(
+                AuthenticatedBundleItem<'static>,
+                BundleItemAuthenticator<'static>,
+            )>,
             crate::Error,
         >,
-    ) -> Result<Option<(ValidatedBundleItem<'static>, BundleItemVerifier<'static>)>, crate::Error>
-    {
+    ) -> Result<
+        Option<(
+            AuthenticatedBundleItem<'static>,
+            BundleItemAuthenticator<'static>,
+        )>,
+        crate::Error,
+    > {
         let key = BundleItemByIdKey(
             MaybeOwned::Borrowed(item_id),
             MaybeOwned::Borrowed(bundle_id),
@@ -211,7 +228,9 @@ impl Cache {
                         match l2
                             .get_bundle_item(item_id, bundle_id)
                             .await?
-                            .map(|(item, verifier)| item.validate().map(|item| (item, verifier)))
+                            .map(|(item, authenticator)| {
+                                item.authenticate().map(|item| (item, authenticator))
+                            })
                             .transpose()
                         {
                             Ok(r) => r,
@@ -225,8 +244,9 @@ impl Cache {
                 },
                 async |key, value, l2| {
                     let item = value.0;
-                    let verifier = value.1;
-                    l2.insert_bundle_item(item.invalidate(), verifier).await
+                    let authenticator = value.1;
+                    l2.insert_bundle_item(item.invalidate(), authenticator)
+                        .await
                 },
             )
             .await?)
@@ -264,10 +284,15 @@ impl<'a> Borrow<MaybeOwnedMetaKey<'a>> for MetaKey {
 
 #[derive(Debug, Clone)]
 pub(super) enum MetaValue {
-    Tx(ValidatedTx<'static>),
+    Tx(AuthenticatedTx<'static>),
     TxOffset(Offset),
     Bundle(Bundle),
-    BundleItem((ValidatedBundleItem<'static>, BundleItemVerifier<'static>)),
+    BundleItem(
+        (
+            AuthenticatedBundleItem<'static>,
+            BundleItemAuthenticator<'static>,
+        ),
+    ),
 }
 
 impl HasWeight for MetaValue {
@@ -317,7 +342,7 @@ impl<'a, T: Clone, Variant> KeyWrapper<'a, T, Variant> {
 
 type TxByIdKey<'a> = KeyWrapper<'a, TxId>;
 impl Key for TxByIdKey<'_> {
-    type Value = ValidatedTx<'static>;
+    type Value = AuthenticatedTx<'static>;
 }
 
 impl<'a> From<TxByIdKey<'a>> for MaybeOwnedMetaKey<'a> {
@@ -335,7 +360,7 @@ impl<'a> MaybeAsRef<TxByIdKey<'a>> for MaybeOwnedMetaKey<'a> {
     }
 }
 
-impl Value for ValidatedTx<'static> {
+impl Value for AuthenticatedTx<'static> {
     fn into_meta_value(self) -> MetaValue {
         MetaValue::Tx(self)
     }
@@ -433,7 +458,10 @@ impl<'a> BundleItemByIdKey<'a> {
 }
 
 impl Key for BundleItemByIdKey<'_> {
-    type Value = (ValidatedBundleItem<'static>, BundleItemVerifier<'static>);
+    type Value = (
+        AuthenticatedBundleItem<'static>,
+        BundleItemAuthenticator<'static>,
+    );
 }
 
 impl<'a> From<BundleItemByIdKey<'a>> for MaybeOwnedMetaKey<'a> {
@@ -451,7 +479,12 @@ impl<'a> MaybeAsRef<BundleItemByIdKey<'a>> for MaybeOwnedMetaKey<'a> {
     }
 }
 
-impl Value for (ValidatedBundleItem<'static>, BundleItemVerifier<'static>) {
+impl Value
+    for (
+        AuthenticatedBundleItem<'static>,
+        BundleItemAuthenticator<'static>,
+    )
+{
     fn into_meta_value(self) -> MetaValue {
         MetaValue::BundleItem(self)
     }

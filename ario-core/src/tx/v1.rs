@@ -21,11 +21,11 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Hash, Serialize)]
 #[repr(transparent)]
-pub(super) struct V1Tx<'a, const VALIDATED: bool = false>(V1TxData<'a>);
+pub(super) struct V1Tx<'a, const AUTHENTICATED: bool = false>(V1TxData<'a>);
 
-pub(super) type UnvalidatedV1Tx<'a> = V1Tx<'a, false>;
+pub(super) type UnauthenticatedV1Tx<'a> = V1Tx<'a, false>;
 
-impl<'de, 'a> Deserialize<'de> for UnvalidatedV1Tx<'a> {
+impl<'de, 'a> Deserialize<'de> for UnauthenticatedV1Tx<'a> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -34,14 +34,14 @@ impl<'de, 'a> Deserialize<'de> for UnvalidatedV1Tx<'a> {
     }
 }
 
-pub(super) type ValidatedV1Tx<'a> = V1Tx<'a, true>;
+pub(super) type AuthenticatedV1Tx<'a> = V1Tx<'a, true>;
 
-impl<'a, const VALIDATED: bool> V1Tx<'a, VALIDATED> {
+impl<'a, const AUTHENTICATED: bool> V1Tx<'a, AUTHENTICATED> {
     pub(super) fn as_inner(&self) -> &V1TxData<'a> {
         &self.0
     }
 
-    pub(super) fn into_owned(self) -> V1Tx<'static, VALIDATED> {
+    pub(super) fn into_owned(self) -> V1Tx<'static, AUTHENTICATED> {
         V1Tx(self.0.into_owned())
     }
 
@@ -54,8 +54,8 @@ impl<'a, const VALIDATED: bool> V1Tx<'a, VALIDATED> {
     }
 }
 
-impl<'a, const VALIDATED: bool> From<V1Tx<'a, VALIDATED>> for RawTx<'a, VALIDATED> {
-    fn from(value: V1Tx<'a, VALIDATED>) -> Self {
+impl<'a, const AUTHENTICATED: bool> From<V1Tx<'a, AUTHENTICATED>> for RawTx<'a, AUTHENTICATED> {
+    fn from(value: V1Tx<'a, AUTHENTICATED>) -> Self {
         let v1 = value.0;
         Self::danger_from_raw_tx_data(RawTxData {
             format: Format::V1,
@@ -77,13 +77,13 @@ impl<'a, const VALIDATED: bool> From<V1Tx<'a, VALIDATED>> for RawTx<'a, VALIDATE
     }
 }
 
-impl<'a> ValidatedV1Tx<'a> {
-    pub fn invalidate(self) -> UnvalidatedV1Tx<'a> {
+impl<'a> AuthenticatedV1Tx<'a> {
+    pub fn invalidate(self) -> UnauthenticatedV1Tx<'a> {
         V1Tx(self.0)
     }
 }
 
-impl UnvalidatedV1Tx<'static> {
+impl UnauthenticatedV1Tx<'static> {
     pub fn from_json<J: JsonSource>(json: J) -> Result<Self, TxError> {
         let tx_data = UnvalidatedRawTx::from_json(json)?
             .validate()
@@ -94,14 +94,14 @@ impl UnvalidatedV1Tx<'static> {
     }
 }
 
-impl<'a> UnvalidatedV1Tx<'a> {
+impl<'a> UnauthenticatedV1Tx<'a> {
     pub(crate) fn try_from_raw(raw: ValidatedRawTx<'a>) -> Result<Self, TxError> {
         Ok(Self(V1TxData::try_from(raw)?))
     }
 }
 
-impl<'a> SupportsValidation for UnvalidatedV1Tx<'a> {
-    type Validated = ValidatedV1Tx<'a>;
+impl<'a> SupportsValidation for UnauthenticatedV1Tx<'a> {
+    type Validated = AuthenticatedV1Tx<'a>;
     type Error = V1TxDataError;
     type Reference<'r> = ();
 
@@ -323,7 +323,7 @@ mod tests {
     use crate::base64::ToBase64;
     use crate::entity;
     use crate::tx::raw::ValidatedRawTx;
-    use crate::tx::v1::{TxError, UnvalidatedV1Tx, V1SignatureData, V1TxDataError};
+    use crate::tx::v1::{TxError, UnauthenticatedV1Tx, V1SignatureData, V1TxDataError};
     use crate::tx::{Format, Quantity, Reward};
     use crate::validation::ValidateExt;
     use std::ops::Deref;
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn v1_hash() -> anyhow::Result<()> {
-        let tx_data = UnvalidatedV1Tx::from_json(TX_V1)?.0;
+        let tx_data = UnauthenticatedV1Tx::from_json(TX_V1)?.0;
         assert_eq!(
             tx_data.id.to_base64(),
             "BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ"
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn v1_hash_2() -> anyhow::Result<()> {
-        let tx_data = UnvalidatedV1Tx::from_json(TX_V1_2)?.0;
+        let tx_data = UnauthenticatedV1Tx::from_json(TX_V1_2)?.0;
         assert_eq!(
             tx_data.id.to_base64(),
             "XnLdl7XiYIZoQ0pM6GcQeLLgYGsGwN9vM4E-kXa_rzY"
@@ -382,32 +382,32 @@ mod tests {
 
     #[test]
     fn v1_verify_ok() -> anyhow::Result<()> {
-        let unvalidated = UnvalidatedV1Tx::from_json(TX_V1)?;
+        let unvalidated = UnauthenticatedV1Tx::from_json(TX_V1)?;
         let _validated = unvalidated.validate().map_err(|(_, e)| e)?;
         Ok(())
     }
 
     #[test]
     fn v1_verify_2_ok() -> anyhow::Result<()> {
-        let unvalidated = UnvalidatedV1Tx::from_json(TX_V1_2)?;
+        let unvalidated = UnauthenticatedV1Tx::from_json(TX_V1_2)?;
         let _validated = unvalidated.validate().map_err(|(_, e)| e)?;
         Ok(())
     }
 
     #[test]
     fn v1_raw_rountrip() -> anyhow::Result<()> {
-        let unvalidated = UnvalidatedV1Tx::from_json(TX_V1_2)?;
+        let unvalidated = UnauthenticatedV1Tx::from_json(TX_V1_2)?;
         let validated = unvalidated.validate().map_err(|(_, e)| e)?;
         let raw = ValidatedRawTx::from(validated);
         let json_string = raw.to_json_string()?;
-        let unvalidated = UnvalidatedV1Tx::from_json(&json_string)?;
+        let unvalidated = UnauthenticatedV1Tx::from_json(&json_string)?;
         let _validated = unvalidated.validate().map_err(|(_, e)| e)?;
         Ok(())
     }
 
     #[test]
     fn v1_verify_invalid() -> anyhow::Result<()> {
-        let tx = UnvalidatedV1Tx::from_json(TX_V1_INVALID_SIG)?;
+        let tx = UnauthenticatedV1Tx::from_json(TX_V1_INVALID_SIG)?;
         match tx.validate() {
             Err((_, V1TxDataError::Entity(entity::Error::InvalidSignature(_)))) => {
                 // ok
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn tx_data_ok_v1() -> anyhow::Result<()> {
-        let tx_data = UnvalidatedV1Tx::from_json(TX_V1)?.0;
+        let tx_data = UnauthenticatedV1Tx::from_json(TX_V1)?.0;
         assert_eq!(
             tx_data.id.to_base64(),
             "BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ"
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn v2_err() -> anyhow::Result<()> {
-        match UnvalidatedV1Tx::from_json(TX_V2) {
+        match UnauthenticatedV1Tx::from_json(TX_V2) {
             Err(TxError::V1DataError(V1TxDataError::IncorrectFormat(f))) => {
                 assert_eq!(f, Format::V2);
             }

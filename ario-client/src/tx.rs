@@ -6,9 +6,9 @@ use crate::api::{
 use crate::routemaster::Handle;
 use crate::{Client, api};
 use ario_core::blob::Blob;
-use ario_core::data::Verifier;
-use ario_core::data::{DataItem, ExternalDataItemVerifier, MaybeOwnedExternalDataItem};
-use ario_core::tx::{LastTx, Tx, TxAnchor, TxId, UnvalidatedTx, ValidatedTx};
+use ario_core::data::Authenticator;
+use ario_core::data::{DataItem, ExternalDataItemAuthenticator, MaybeOwnedExternalDataItem};
+use ario_core::tx::{AuthenticatedTx, LastTx, Tx, TxAnchor, TxId, UnauthenticatedTx};
 use ario_core::{BlockNumber, Gateway, JsonValue};
 use async_stream::try_stream;
 use bytesize::ByteSize;
@@ -34,7 +34,7 @@ impl Api {
         &self,
         gateway: &Gateway,
         tx_id: &TxId,
-    ) -> Result<Option<UnvalidatedTx<'static>>, api::Error> {
+    ) -> Result<Option<UnauthenticatedTx<'static>>, api::Error> {
         let req = ApiRequest::builder()
             .endpoint(
                 gateway
@@ -137,7 +137,11 @@ impl Api {
         )
     }
 
-    async fn tx_submit(&self, gateway: &Gateway, tx: &ValidatedTx<'_>) -> Result<(), api::Error> {
+    async fn tx_submit(
+        &self,
+        gateway: &Gateway,
+        tx: &AuthenticatedTx<'_>,
+    ) -> Result<(), api::Error> {
         let tx_json = tx.to_json()?;
 
         let req = ApiRequest::builder()
@@ -160,7 +164,7 @@ impl Client {
     pub async fn tx_by_id(
         &self,
         tx_id: &TxId,
-    ) -> Result<Option<ValidatedTx<'static>>, super::Error> {
+    ) -> Result<Option<AuthenticatedTx<'static>>, super::Error> {
         self.0
             .cache
             .get_tx(tx_id, async |tx_id| self._tx_by_id_live(tx_id).await)
@@ -170,12 +174,12 @@ impl Client {
     async fn _tx_by_id_live(
         &self,
         tx_id: &TxId,
-    ) -> Result<Option<ValidatedTx<'static>>, super::Error> {
+    ) -> Result<Option<AuthenticatedTx<'static>>, super::Error> {
         let tx = match self
             .with_gw(async |gw| self.0.api.tx_by_id(gw, tx_id).await)
             .await?
         {
-            Some(tx) => tx.validate(),
+            Some(tx) => tx.authenticate(),
             None => return Ok(None),
         }
         .map_err(|(_, e)| api::Error::TxError(e.into()))?;
@@ -262,7 +266,10 @@ impl TxSubmission<Prepared> {
         self.0.created
     }
 
-    pub async fn submit<'a>(self, tx: &'a ValidatedTx<'a>) -> Result<Submission<'a>, super::Error> {
+    pub async fn submit<'a>(
+        self,
+        tx: &'a AuthenticatedTx<'a>,
+    ) -> Result<Submission<'a>, super::Error> {
         match tx.last_tx() {
             LastTx::TxAnchor(tx_anchor) => {
                 if tx_anchor.as_ref() != self.tx_anchor() {
@@ -324,21 +331,21 @@ impl<'a> TxSubmission<AwaitingData<'a>> {
 
     pub fn data<'b>(
         self,
-        verifier: MaybeOwned<'b, ExternalDataItemVerifier<'b>>,
+        authenticator: MaybeOwned<'b, ExternalDataItemAuthenticator<'b>>,
     ) -> Result<TxSubmission<UploadChunks<'b>>, (Self, super::Error)> {
         // make sure the external data matches the tx data
-        if self.0.data.as_ref() != verifier.data_item() {
+        if self.0.data.as_ref() != authenticator.data_item() {
             return Err((self, TxSubmissionError::IncorrectExternalData.into()));
         }
 
-        let chunks = verifier.chunks().map(|c| c.clone()).collect_vec();
+        let chunks = authenticator.chunks().map(|c| c.clone()).collect_vec();
 
         Ok(TxSubmission(UploadChunks {
             gw_handle: self.0.gw_handle,
             tx_id: self.0.tx_id,
             client: self.0.client,
             created: self.0.created,
-            data: verifier,
+            data: authenticator,
             chunks,
         }))
     }
@@ -350,7 +357,7 @@ pub struct UploadChunks<'a> {
     tx_id: TxId,
     client: Client,
     created: SystemTime,
-    data: MaybeOwned<'a, ExternalDataItemVerifier<'a>>,
+    data: MaybeOwned<'a, ExternalDataItemAuthenticator<'a>>,
     chunks: Vec<Range<u64>>,
 }
 
@@ -565,7 +572,7 @@ mod tests {
     use ario_core::Gateway;
     use ario_core::chunking::DefaultChunker;
     use ario_core::crypto::hash::{Hasher, HasherExt, Sha256};
-    use ario_core::data::ExternalDataItemVerifier;
+    use ario_core::data::ExternalDataItemAuthenticator;
     use ario_core::jwk::Jwk;
     use ario_core::network::Network;
     use ario_core::tx::{Transfer, TxBuilder, TxId};
@@ -593,7 +600,7 @@ mod tests {
 
         let tx_id = TxId::from_str("Y0wJvUkHFhcJZAduC8wfaiaDMHkrCoqHMSkenHD75VU")?;
         let tx = api.tx_by_id(&gw, &tx_id).await?.unwrap();
-        let tx = tx.validate().map_err(|(_, e)| e)?;
+        let tx = tx.authenticate().map_err(|(_, e)| e)?;
         assert_eq!(tx.id(), &tx_id);
 
         let tx_id = TxId::from_str("Y0wIvUkHFhcJZAduC8wfaiaDMHkrEoqHMSkenHD75VU")?;
@@ -732,7 +739,7 @@ mod tests {
         let wallet = Wallet::from_jwk(&jwk)?;
 
         let file = tokio::fs::File::open(ONE_MB_PATH).await?;
-        let verifier = ExternalDataItemVerifier::try_from_async_reader(
+        let authenticator = ExternalDataItemAuthenticator::try_from_async_reader(
             &mut file.compat(),
             DefaultChunker::new(),
         )
@@ -743,7 +750,7 @@ mod tests {
         let tx_draft = TxBuilder::v2()
             .reward("12")?
             .tx_anchor(tx_sub.tx_anchor().clone())
-            .data_upload(verifier.data_item().into())
+            .data_upload(authenticator.data_item().into())
             .draft();
 
         let tx = wallet.sign_tx_draft(tx_draft)?;
@@ -753,7 +760,9 @@ mod tests {
             _ => unreachable!(),
         };
 
-        let tx_sub = tx_sub.data((&verifier).into()).map_err(|(_, err)| err)?;
+        let tx_sub = tx_sub
+            .data((&authenticator).into())
+            .map_err(|(_, err)| err)?;
 
         let file = tokio::fs::File::open(ONE_MB_PATH).await?;
         let file_len = file.metadata().await?.len();
@@ -779,7 +788,7 @@ mod tests {
         }
         let mut hasher = Sha256::new();
         let tx_offset = client.tx_offset(tx_sub.tx_id()).await?;
-        let data_root = verifier.data_item().data_root();
+        let data_root = authenticator.data_item().data_root();
         let mut total = 0;
         while let Some(chunk) = client
             .retrieve_chunk(tx_offset.absolute(total), total, data_root)

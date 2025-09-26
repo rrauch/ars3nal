@@ -4,7 +4,7 @@ use crate::bundle::v2::reader::FlowExt;
 use crate::bundle::v2::reader::item::ItemReader;
 use crate::bundle::v2::tag::{from_avro, to_avro};
 use crate::bundle::v2::{
-    BundleItemChunker, BundleItemDataVerifier, BundleItemHashBuilder, ContainerLocation,
+    BundleItemChunker, BundleItemDataAuthenticator, BundleItemHashBuilder, ContainerLocation,
     DataDeepHash, SignatureData, SignatureType, V2BundleItemHash,
 };
 use crate::bundle::{
@@ -24,7 +24,7 @@ use std::io::Read;
 
 #[derive(Clone, Debug, PartialEq, Hash)]
 #[repr(transparent)]
-pub struct BundleItem<'a, const VALIDATED: bool = false>(BundleItemInner<'a>);
+pub struct BundleItem<'a, const AUTHENTICATED: bool = false>(BundleItemInner<'a>);
 
 #[derive(Clone, Debug, PartialEq, Hash, Serialize, Deserialize)]
 struct BundleItemInner<'a> {
@@ -39,7 +39,7 @@ struct BundleItemInner<'a> {
     hash: BundleItemHash,
 }
 
-impl<'a, const VALIDATED: bool> BundleItem<'a, VALIDATED> {
+impl<'a, const AUTHENTICATED: bool> BundleItem<'a, AUTHENTICATED> {
     #[inline]
     pub fn id(&self) -> &BundleItemId {
         &self.0.id
@@ -76,9 +76,9 @@ impl<'a, const VALIDATED: bool> BundleItem<'a, VALIDATED> {
     }
 }
 
-pub type ValidatedItem<'a> = BundleItem<'a, true>;
+pub type AuthenticatedItem<'a> = BundleItem<'a, true>;
 
-impl ValidatedItem<'_> {
+impl AuthenticatedItem<'_> {
     pub fn try_as_blob(&self) -> Result<OwnedBlob, TagError> {
         let tag_data = to_avro(self.0.tags.iter())?;
         let owner = self.0.signature_data.owner();
@@ -95,7 +95,7 @@ impl ValidatedItem<'_> {
             signature: signature.as_blob(),
             signature_type: self.0.signature_data.signature_type(),
             data_deep_hash: DataDeepHash::new_from_inner(b"".digest()), // dummy value
-            data_verifier: BundleItemDataVerifier::from_single_value(
+            data_verifier: BundleItemDataAuthenticator::from_single_value(
                 Blob::Slice(b"".as_slice()),
                 BundleItemChunker::new(0, DefaultChunker::chunk_map(self.0.data_size)),
             ), // dummy value
@@ -105,15 +105,15 @@ impl ValidatedItem<'_> {
     }
 }
 
-impl<'a> ValidatedItem<'a> {
-    pub fn invalidate(self) -> UnvalidatedItem<'a> {
+impl<'a> AuthenticatedItem<'a> {
+    pub fn invalidate(self) -> UnauthenticatedItem<'a> {
         BundleItem(self.0)
     }
 }
 
-pub type UnvalidatedItem<'a> = BundleItem<'a, false>;
+pub type UnauthenticatedItem<'a> = BundleItem<'a, false>;
 
-impl<'a, const VALIDATED: bool> Serialize for BundleItem<'a, VALIDATED> {
+impl<'a, const AUTHENTICATED: bool> Serialize for BundleItem<'a, AUTHENTICATED> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -122,7 +122,7 @@ impl<'a, const VALIDATED: bool> Serialize for BundleItem<'a, VALIDATED> {
     }
 }
 
-impl<'de, 'a> Deserialize<'de> for UnvalidatedItem<'a> {
+impl<'de, 'a> Deserialize<'de> for UnauthenticatedItem<'a> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -131,12 +131,12 @@ impl<'de, 'a> Deserialize<'de> for UnvalidatedItem<'a> {
     }
 }
 
-impl UnvalidatedItem<'static> {
+impl UnauthenticatedItem<'static> {
     #[inline]
     pub(super) fn try_from_raw(
         raw: RawBundleItem<'static>,
         bundle_id: BundleId,
-    ) -> Result<(Self, BundleItemDataVerifier<'static>), BundleItemError> {
+    ) -> Result<(Self, BundleItemDataAuthenticator<'static>), BundleItemError> {
         let hash = BundleItemHash::from(raw.hash());
         let signature_data =
             SignatureData::from_raw(raw.signature, raw.owner, &hash, raw.signature_type)?;
@@ -177,7 +177,7 @@ impl UnvalidatedItem<'static> {
         len: u64,
         container_location: Option<ContainerLocation>,
         bundle_id: BundleId,
-    ) -> Result<(Self, BundleItemDataVerifier<'static>), Error> {
+    ) -> Result<(Self, BundleItemDataAuthenticator<'static>), Error> {
         Ok(Self::try_from_raw(
             ItemReader::builder()
                 .len(len)
@@ -193,7 +193,7 @@ impl UnvalidatedItem<'static> {
         len: u64,
         container_location: Option<ContainerLocation>,
         bundle_id: BundleId,
-    ) -> Result<(Self, BundleItemDataVerifier<'static>), Error> {
+    ) -> Result<(Self, BundleItemDataAuthenticator<'static>), Error> {
         Ok(Self::try_from_raw(
             ItemReader::builder()
                 .len(len)
@@ -206,8 +206,8 @@ impl UnvalidatedItem<'static> {
     }
 }
 
-impl<'a> SupportsValidation for UnvalidatedItem<'a> {
-    type Validated = ValidatedItem<'a>;
+impl<'a> SupportsValidation for UnauthenticatedItem<'a> {
+    type Validated = AuthenticatedItem<'a>;
     type Error = BundleItemError;
     type Reference<'r> = ();
 
@@ -245,7 +245,7 @@ pub(crate) struct RawBundleItem<'a> {
     pub signature: Blob<'a>,
     pub signature_type: SignatureType,
     pub data_deep_hash: DataDeepHash,
-    pub data_verifier: BundleItemDataVerifier<'a>,
+    pub data_verifier: BundleItemDataAuthenticator<'a>,
 }
 
 impl<'a> RawBundleItem<'a> {

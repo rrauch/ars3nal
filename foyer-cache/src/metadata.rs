@@ -2,9 +2,9 @@ use crate::disk_cache::DiskCache;
 use crate::{DEFAULT_MEM_BUF_SIZE, Error};
 use ario_client::cache::{Context, L2MetadataCache, Offset};
 use ario_core::bundle::{
-    Bundle, BundleId, BundleItemId, BundleItemVerifier, UnvalidatedBundleItem,
+    Bundle, BundleId, BundleItemAuthenticator, BundleItemId, UnauthenticatedBundleItem,
 };
-use ario_core::tx::{TxId, UnvalidatedTx};
+use ario_core::tx::{TxId, UnauthenticatedTx};
 use bon::bon;
 use equivalent::Equivalent;
 use serde::{Deserialize, Serialize};
@@ -76,13 +76,16 @@ impl From<(BundleItemId, BundleId)> for CacheKey {
 
 #[derive(Clone, Serialize, Deserialize)]
 enum CacheValue {
-    Tx(UnvalidatedTx<'static>),
+    Tx(UnauthenticatedTx<'static>),
     TxOffset(Offset),
     Bundle(Bundle),
-    BundleItem(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>),
+    BundleItem(
+        UnauthenticatedBundleItem<'static>,
+        BundleItemAuthenticator<'static>,
+    ),
 }
 
-impl TryFrom<CacheValue> for UnvalidatedTx<'static> {
+impl TryFrom<CacheValue> for UnauthenticatedTx<'static> {
     type Error = ();
 
     fn try_from(value: CacheValue) -> Result<Self, Self::Error> {
@@ -93,8 +96,8 @@ impl TryFrom<CacheValue> for UnvalidatedTx<'static> {
     }
 }
 
-impl From<UnvalidatedTx<'static>> for CacheValue {
-    fn from(value: UnvalidatedTx<'static>) -> Self {
+impl From<UnauthenticatedTx<'static>> for CacheValue {
+    fn from(value: UnauthenticatedTx<'static>) -> Self {
         Self::Tx(value)
     }
 }
@@ -133,7 +136,12 @@ impl From<Bundle> for CacheValue {
     }
 }
 
-impl TryFrom<CacheValue> for (UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>) {
+impl TryFrom<CacheValue>
+    for (
+        UnauthenticatedBundleItem<'static>,
+        BundleItemAuthenticator<'static>,
+    )
+{
     type Error = ();
 
     fn try_from(value: CacheValue) -> Result<Self, Self::Error> {
@@ -144,8 +152,18 @@ impl TryFrom<CacheValue> for (UnvalidatedBundleItem<'static>, BundleItemVerifier
     }
 }
 
-impl From<(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>)> for CacheValue {
-    fn from(value: (UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>)) -> Self {
+impl
+    From<(
+        UnauthenticatedBundleItem<'static>,
+        BundleItemAuthenticator<'static>,
+    )> for CacheValue
+{
+    fn from(
+        value: (
+            UnauthenticatedBundleItem<'static>,
+            BundleItemAuthenticator<'static>,
+        ),
+    ) -> Self {
         Self::BundleItem(value.0, value.1)
     }
 }
@@ -191,11 +209,14 @@ impl L2MetadataCache for FoyerMetadataCache {
         self.0.init(ctx).await.map_err(|e| IoError::other(e))
     }
 
-    async fn get_tx(&self, id: &TxId) -> Result<Option<UnvalidatedTx<'static>>, std::io::Error> {
+    async fn get_tx(
+        &self,
+        id: &TxId,
+    ) -> Result<Option<UnauthenticatedTx<'static>>, std::io::Error> {
         self.get(BorrowedCacheKey::TxId(id)).await
     }
 
-    async fn insert_tx(&self, tx: UnvalidatedTx<'static>) -> Result<(), std::io::Error> {
+    async fn insert_tx(&self, tx: UnauthenticatedTx<'static>) -> Result<(), std::io::Error> {
         self.0.insert(CacheKey::TxId(tx.id().clone()), tx).await
     }
 
@@ -233,16 +254,21 @@ impl L2MetadataCache for FoyerMetadataCache {
         &self,
         item_id: &BundleItemId,
         bundle_id: &BundleId,
-    ) -> Result<Option<(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>)>, std::io::Error>
-    {
+    ) -> Result<
+        Option<(
+            UnauthenticatedBundleItem<'static>,
+            BundleItemAuthenticator<'static>,
+        )>,
+        std::io::Error,
+    > {
         self.get(BorrowedCacheKey::BundleItem(item_id, bundle_id))
             .await
     }
 
     async fn insert_bundle_item(
         &self,
-        bundle_item: UnvalidatedBundleItem<'static>,
-        verifier: BundleItemVerifier<'static>,
+        bundle_item: UnauthenticatedBundleItem<'static>,
+        verifier: BundleItemAuthenticator<'static>,
     ) -> Result<(), std::io::Error> {
         self.0
             .insert(

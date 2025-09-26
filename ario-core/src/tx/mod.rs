@@ -22,8 +22,8 @@ use crate::json::JsonSource;
 use crate::money::{CurrencyExt, Money, MoneyError, TypedMoney, Winston};
 use crate::tag::Tag;
 use crate::tx::raw::{RawTag, RawTx, RawTxDataError, UnvalidatedRawTx, ValidatedRawTx};
-use crate::tx::v1::{UnvalidatedV1Tx, V1Tx, V1TxDataError};
-use crate::tx::v2::{TxDraft, UnvalidatedV2Tx, V2Tx, V2TxBuilder, V2TxDataError};
+use crate::tx::v1::{UnauthenticatedV1Tx, V1Tx, V1TxDataError};
+use crate::tx::v2::{TxDraft, UnauthenticatedV2Tx, V2Tx, V2TxBuilder, V2TxDataError};
 use crate::typed::{FromInner, Typed, WithSerde};
 use crate::validation::ValidateExt;
 use crate::wallet::{WalletAddress, WalletPk};
@@ -47,9 +47,9 @@ static ZERO_WINSTON: LazyLock<Money<Winston>> = LazyLock::new(|| Winston::zero()
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[repr(transparent)]
-pub struct Tx<'a, const VALIDATED: bool>(TxInner<'a, VALIDATED>);
+pub struct Tx<'a, const AUTHENTICATED: bool>(TxInner<'a, AUTHENTICATED>);
 
-impl<'a, const VALIDATED: bool> ArEntity for Tx<'a, VALIDATED> {
+impl<'a, const AUTHENTICATED: bool> ArEntity for Tx<'a, AUTHENTICATED> {
     type Id = TxId;
     type Hash = TxHash;
 
@@ -59,9 +59,9 @@ impl<'a, const VALIDATED: bool> ArEntity for Tx<'a, VALIDATED> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-enum TxInner<'a, const VALIDATED: bool> {
-    V1(V1Tx<'a, VALIDATED>),
-    V2(V2Tx<'a, VALIDATED>),
+enum TxInner<'a, const AUTHENTICATED: bool> {
+    V1(V1Tx<'a, AUTHENTICATED>),
+    V2(V2Tx<'a, AUTHENTICATED>),
 }
 
 impl<'de, 'a> Deserialize<'de> for TxInner<'a, false> {
@@ -83,8 +83,8 @@ impl<'de, 'a> Deserialize<'de> for TxInner<'a, false> {
     }
 }
 
-impl<'a, const VALIDATED: bool> TxInner<'a, VALIDATED> {
-    fn into_owned(self) -> TxInner<'static, VALIDATED> {
+impl<'a, const AUTHENTICATED: bool> TxInner<'a, AUTHENTICATED> {
+    fn into_owned(self) -> TxInner<'static, AUTHENTICATED> {
         match self {
             Self::V1(v1) => TxInner::V1(v1.into_owned()),
             Self::V2(v2) => TxInner::V2(v2.into_owned()),
@@ -100,9 +100,9 @@ impl TxBuilder {
     }
 }
 
-pub type UnvalidatedTx<'a> = Tx<'a, false>;
+pub type UnauthenticatedTx<'a> = Tx<'a, false>;
 
-impl<'de, 'a> Deserialize<'de> for UnvalidatedTx<'a> {
+impl<'de, 'a> Deserialize<'de> for UnauthenticatedTx<'a> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -111,24 +111,24 @@ impl<'de, 'a> Deserialize<'de> for UnvalidatedTx<'a> {
     }
 }
 
-pub type ValidatedTx<'a> = Tx<'a, true>;
+pub type AuthenticatedTx<'a> = Tx<'a, true>;
 
-impl<'a, const VALIDATED: bool> From<V1Tx<'a, VALIDATED>> for Tx<'a, VALIDATED> {
-    fn from(value: V1Tx<'a, VALIDATED>) -> Self {
+impl<'a, const AUTHENTICATED: bool> From<V1Tx<'a, AUTHENTICATED>> for Tx<'a, AUTHENTICATED> {
+    fn from(value: V1Tx<'a, AUTHENTICATED>) -> Self {
         Self(TxInner::V1(value))
     }
 }
 
-impl<'a, const VALIDATED: bool> From<V2Tx<'a, VALIDATED>> for Tx<'a, VALIDATED> {
-    fn from(value: V2Tx<'a, VALIDATED>) -> Self {
+impl<'a, const AUTHENTICATED: bool> From<V2Tx<'a, AUTHENTICATED>> for Tx<'a, AUTHENTICATED> {
+    fn from(value: V2Tx<'a, AUTHENTICATED>) -> Self {
         Self(TxInner::V2(value))
     }
 }
 
-impl<'a, const VALIDATED: bool> TryFrom<Tx<'a, VALIDATED>> for V1Tx<'a, VALIDATED> {
-    type Error = Tx<'a, VALIDATED>;
+impl<'a, const AUTHENTICATED: bool> TryFrom<Tx<'a, AUTHENTICATED>> for V1Tx<'a, AUTHENTICATED> {
+    type Error = Tx<'a, AUTHENTICATED>;
 
-    fn try_from(value: Tx<'a, VALIDATED>) -> Result<Self, Self::Error> {
+    fn try_from(value: Tx<'a, AUTHENTICATED>) -> Result<Self, Self::Error> {
         match value.0 {
             TxInner::V1(v1) => Ok(v1),
             incorrect => Err(Tx(incorrect)),
@@ -136,10 +136,10 @@ impl<'a, const VALIDATED: bool> TryFrom<Tx<'a, VALIDATED>> for V1Tx<'a, VALIDATE
     }
 }
 
-impl<'a, const VALIDATED: bool> TryFrom<Tx<'a, VALIDATED>> for V2Tx<'a, VALIDATED> {
-    type Error = Tx<'a, VALIDATED>;
+impl<'a, const AUTHENTICATED: bool> TryFrom<Tx<'a, AUTHENTICATED>> for V2Tx<'a, AUTHENTICATED> {
+    type Error = Tx<'a, AUTHENTICATED>;
 
-    fn try_from(value: Tx<'a, VALIDATED>) -> Result<Self, Self::Error> {
+    fn try_from(value: Tx<'a, AUTHENTICATED>) -> Result<Self, Self::Error> {
         match value.0 {
             TxInner::V2(v2) => Ok(v2),
             incorrect => Err(Tx(incorrect)),
@@ -237,7 +237,7 @@ impl AsBlob for Signature<'_> {
     }
 }
 
-impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
+impl<'a, const AUTHENTICATED: bool> Tx<'a, AUTHENTICATED> {
     pub fn format(&self) -> Format {
         match &self.0 {
             TxInner::V1(_) => Format::V1,
@@ -337,11 +337,11 @@ impl<'a, const VALIDATED: bool> Tx<'a, VALIDATED> {
         }
     }
 
-    pub fn is_validated(&self) -> bool {
-        VALIDATED
+    pub fn is_authenticated(&self) -> bool {
+        AUTHENTICATED
     }
 
-    pub fn into_owned(self) -> Tx<'static, VALIDATED> {
+    pub fn into_owned(self) -> Tx<'static, AUTHENTICATED> {
         Tx(self.0.into_owned())
     }
 
@@ -368,8 +368,8 @@ pub enum ValidationError {
     V2TxValidationError(#[from] V2TxDataError),
 }
 
-impl<'a> UnvalidatedTx<'a> {
-    pub fn validate(self) -> Result<ValidatedTx<'a>, (Self, ValidationError)> {
+impl<'a> UnauthenticatedTx<'a> {
+    pub fn authenticate(self) -> Result<AuthenticatedTx<'a>, (Self, ValidationError)> {
         match self.0 {
             TxInner::V1(v1) => {
                 Ok(Tx(TxInner::V1(v1.validate().map_err(|(v1, err)| {
@@ -385,14 +385,14 @@ impl<'a> UnvalidatedTx<'a> {
     }
 }
 
-impl UnvalidatedTx<'static> {
+impl UnauthenticatedTx<'static> {
     pub fn from_json<J: JsonSource>(json: J) -> Result<Self, TxError> {
         RawTx::from_json(json)?.try_into()
     }
 }
 
-impl<'a> ValidatedTx<'a> {
-    pub fn invalidate(self) -> UnvalidatedTx<'a> {
+impl<'a> AuthenticatedTx<'a> {
+    pub fn invalidate(self) -> UnauthenticatedTx<'a> {
         match self.0 {
             TxInner::V1(v1) => v1.invalidate().into(),
             TxInner::V2(v2) => v2.invalidate().into(),
@@ -400,21 +400,21 @@ impl<'a> ValidatedTx<'a> {
     }
 }
 
-impl<'a> TryFrom<UnvalidatedRawTx<'a>> for UnvalidatedTx<'a> {
+impl<'a> TryFrom<UnvalidatedRawTx<'a>> for UnauthenticatedTx<'a> {
     type Error = TxError;
 
     fn try_from(value: UnvalidatedRawTx<'a>) -> Result<Self, Self::Error> {
-        UnvalidatedTx::try_from(value.validate().map_err(|(_, err)| TxError::from(err))?)
+        UnauthenticatedTx::try_from(value.validate().map_err(|(_, err)| TxError::from(err))?)
     }
 }
 
-impl<'a> TryFrom<ValidatedRawTx<'a>> for UnvalidatedTx<'a> {
+impl<'a> TryFrom<ValidatedRawTx<'a>> for UnauthenticatedTx<'a> {
     type Error = TxError;
 
     fn try_from(value: ValidatedRawTx<'a>) -> Result<Self, Self::Error> {
         match value.as_inner().format {
-            Format::V1 => Ok(Self(TxInner::V1(UnvalidatedV1Tx::try_from_raw(value)?))),
-            Format::V2 => Ok(Self(TxInner::V2(UnvalidatedV2Tx::try_from_raw(value)?))),
+            Format::V1 => Ok(Self(TxInner::V1(UnauthenticatedV1Tx::try_from_raw(value)?))),
+            Format::V2 => Ok(Self(TxInner::V2(UnauthenticatedV2Tx::try_from_raw(value)?))),
         }
     }
 }
@@ -902,12 +902,12 @@ mod tests {
     use crate::crypto::ec::SupportedSecretKey as SupportedEcSecretKey;
     use crate::crypto::keys::SupportedSecretKey;
     use crate::crypto::rsa::SupportedPrivateKey as SupportedRsaPrivateKey;
-    use crate::data::{DataRoot, ExternalDataItemVerifier};
+    use crate::data::{DataRoot, ExternalDataItemAuthenticator};
     use crate::jwk::Jwk;
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::{
         DataItem, ExternalDataItem, Format, Quantity, Reward, SignatureType, Transfer, Tx,
-        TxAnchor, TxBuilder, UnvalidatedTx,
+        TxAnchor, TxBuilder, UnauthenticatedTx,
     };
     use crate::typed::FromInner;
     use crate::wallet::{Wallet, WalletAddress, WalletSk};
@@ -926,76 +926,76 @@ mod tests {
 
     #[test]
     fn v1() -> anyhow::Result<()> {
-        let unvalidated = UnvalidatedTx::from_json(TX_V1)?;
-        assert!(!unvalidated.is_validated());
-        let validated = unvalidated.validate().map_err(|(_, e)| e)?;
-        assert!(validated.is_validated());
+        let unauthenticated = UnauthenticatedTx::from_json(TX_V1)?;
+        assert!(!unauthenticated.is_authenticated());
+        let authenticated = unauthenticated.authenticate().map_err(|(_, e)| e)?;
+        assert!(authenticated.is_authenticated());
 
-        assert_eq!(validated.format(), Format::V1);
+        assert_eq!(authenticated.format(), Format::V1);
 
         assert_eq!(
-            validated.id().to_base64(),
+            authenticated.id().to_base64(),
             "BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ"
         );
 
         assert_eq!(
-            validated.signature().signature_type(),
+            authenticated.signature().signature_type(),
             SignatureType::RsaPss
         );
 
         assert_eq!(
-            validated.owner().address().to_base64(),
+            authenticated.owner().address().to_base64(),
             "_qa4arkdjK2X9SjechexnWzTtbOKcPkBPhrDDej6lI8"
         );
 
-        match validated.data_item() {
+        match authenticated.data_item() {
             Some(DataItem::Embedded(data)) => {
                 assert_eq!(data.len(), 1033478);
             }
             _ => panic!("invalid data"),
         }
 
-        assert_eq!(validated.data_item().unwrap().size(), 1033478);
+        assert_eq!(authenticated.data_item().unwrap().size(), 1033478);
 
         Ok(())
     }
 
     #[test]
     fn v1_rountrip() -> anyhow::Result<()> {
-        let unvalidated = UnvalidatedTx::from_json(TX_V1_2)?;
-        let validated = unvalidated.validate().map_err(|(_, e)| e)?;
-        let json = validated.to_json_string()?;
-        let unvalidated = UnvalidatedTx::from_json(&json)?;
-        let validated_2 = unvalidated.validate().map_err(|(_, e)| e)?;
-        assert_eq!(validated, validated_2);
+        let unauthenticated = UnauthenticatedTx::from_json(TX_V1_2)?;
+        let authenticated = unauthenticated.authenticate().map_err(|(_, e)| e)?;
+        let json = authenticated.to_json_string()?;
+        let unauthenticated = UnauthenticatedTx::from_json(&json)?;
+        let authenticated_2 = unauthenticated.authenticate().map_err(|(_, e)| e)?;
+        assert_eq!(authenticated, authenticated_2);
         Ok(())
     }
 
     #[test]
     fn v2() -> anyhow::Result<()> {
-        let unvalidated = UnvalidatedTx::from_json(TX_V2)?;
-        assert!(!unvalidated.is_validated());
-        let validated = unvalidated.validate().map_err(|(_, e)| e)?;
-        assert!(validated.is_validated());
+        let unauthenticated = UnauthenticatedTx::from_json(TX_V2)?;
+        assert!(!unauthenticated.is_authenticated());
+        let authenticated = unauthenticated.authenticate().map_err(|(_, e)| e)?;
+        assert!(authenticated.is_authenticated());
 
-        assert_eq!(validated.format(), Format::V2);
+        assert_eq!(authenticated.format(), Format::V2);
 
         assert_eq!(
-            validated.id().to_base64(),
+            authenticated.id().to_base64(),
             "bXGqzNQNmHTeL54cUQ6wPo-MO0thLP44FeAoM93kEwk"
         );
 
         assert_eq!(
-            validated.signature().signature_type(),
+            authenticated.signature().signature_type(),
             SignatureType::RsaPss
         );
 
         assert_eq!(
-            validated.owner().address().to_base64(),
+            authenticated.owner().address().to_base64(),
             "OK_m2Tk41N94KZLl5WQSx_-iNWbvcp8EMfrYsel_QeQ"
         );
 
-        match validated.data_item() {
+        match authenticated.data_item() {
             Some(DataItem::External(data)) => {
                 assert_eq!(data.data_size(), 128355);
             }
@@ -1007,12 +1007,12 @@ mod tests {
 
     #[test]
     fn v2_rountrip() -> anyhow::Result<()> {
-        let unvalidated = UnvalidatedTx::from_json(TX_V2_2)?;
-        let validated = unvalidated.validate().map_err(|(_, e)| e)?;
-        let json = validated.to_json_string()?;
-        let unvalidated = UnvalidatedTx::from_json(&json)?;
-        let validated_2 = unvalidated.validate().map_err(|(_, e)| e)?;
-        assert_eq!(validated, validated_2);
+        let unauthenticated = UnauthenticatedTx::from_json(TX_V2_2)?;
+        let authenticated = unauthenticated.authenticate().map_err(|(_, e)| e)?;
+        let json = authenticated.to_json_string()?;
+        let unauthenticated = UnauthenticatedTx::from_json(&json)?;
+        let authenticated_2 = unauthenticated.authenticate().map_err(|(_, e)| e)?;
+        assert_eq!(authenticated, authenticated_2);
         Ok(())
     }
 
@@ -1039,28 +1039,33 @@ mod tests {
             .data_upload((&data).into())
             .draft();
 
-        let valid_tx = draft.sign(&wallet)?;
-        let json = valid_tx.to_json_string()?;
-        let valid_tx = Tx::from_json(&json)?.validate().map_err(|(_, err)| err)?;
-
-        assert_eq!(valid_tx.signature().signature_type(), SignatureType::RsaPss);
+        let authentic_tx = draft.sign(&wallet)?;
+        let json = authentic_tx.to_json_string()?;
+        let authentic_tx = Tx::from_json(&json)?
+            .authenticate()
+            .map_err(|(_, err)| err)?;
 
         assert_eq!(
-            valid_tx.reward(),
+            authentic_tx.signature().signature_type(),
+            SignatureType::RsaPss
+        );
+
+        assert_eq!(
+            authentic_tx.reward(),
             &Reward::try_from(Winston::from_str("1234")?)?,
         );
 
         assert_eq!(
-            valid_tx.target(),
+            authentic_tx.target(),
             Some(WalletAddress::from_str(target_str)?).as_ref()
         );
 
         assert_eq!(
-            valid_tx.quantity(),
+            authentic_tx.quantity(),
             Some(Quantity::try_from(Winston::from_str("101")?)?).as_ref()
         );
 
-        let data = match valid_tx.data_item() {
+        let data = match authentic_tx.data_item() {
             Some(DataItem::External(data)) => data,
             _ => panic!("invalid data"),
         };
@@ -1086,34 +1091,36 @@ mod tests {
             .transfer(Transfer::new(WalletAddress::from_str(target_str)?, 2101)?)
             .draft();
 
-        let valid_tx = draft.sign(&wallet)?;
-        let json = valid_tx.to_json_string()?;
-        let valid_tx = Tx::from_json(&json)?.validate().map_err(|(_, err)| err)?;
+        let authentic_tx = draft.sign(&wallet)?;
+        let json = authentic_tx.to_json_string()?;
+        let authentic_tx = Tx::from_json(&json)?
+            .authenticate()
+            .map_err(|(_, err)| err)?;
 
-        let owner = valid_tx.owner();
+        let owner = authentic_tx.owner();
         let _owner_address = owner.address().to_base64();
 
         assert_eq!(
-            valid_tx.signature().signature_type(),
+            authentic_tx.signature().signature_type(),
             SignatureType::EcdsaSecp256k1
         );
 
         assert_eq!(
-            valid_tx.reward(),
+            authentic_tx.reward(),
             &Reward::try_from(Winston::from_str("21234")?)?,
         );
 
         assert_eq!(
-            valid_tx.target(),
+            authentic_tx.target(),
             Some(WalletAddress::from_str(target_str)?).as_ref()
         );
 
         assert_eq!(
-            valid_tx.quantity(),
+            authentic_tx.quantity(),
             Some(Quantity::try_from(Winston::from_str("2101")?)?).as_ref()
         );
 
-        assert!(valid_tx.data_item().is_none());
+        assert!(authentic_tx.data_item().is_none());
 
         Ok(())
     }
@@ -1122,7 +1129,8 @@ mod tests {
     fn upload_pss() -> anyhow::Result<()> {
         let wallet = Wallet::from_jwk(&Jwk::from_json(WALLET_RSA_JWK)?)?;
 
-        let data = ExternalDataItemVerifier::from_single_value(UPLOAD_DATA, DefaultChunker::new());
+        let data =
+            ExternalDataItemAuthenticator::from_single_value(UPLOAD_DATA, DefaultChunker::new());
 
         let draft = TxBuilder::v2()
             .reward(12345)?
@@ -1130,11 +1138,11 @@ mod tests {
             .data_upload(data.data_item().into())
             .draft();
 
-        let valid_tx = wallet.sign_tx_draft(draft)?;
+        let authentic_tx = wallet.sign_tx_draft(draft)?;
 
-        assert_eq!(valid_tx.data_item().unwrap().size(), 683821);
+        assert_eq!(authentic_tx.data_item().unwrap().size(), 683821);
         assert_eq!(
-            valid_tx
+            authentic_tx
                 .data_item()
                 .unwrap()
                 .data()
@@ -1144,12 +1152,14 @@ mod tests {
             "ikHHDmOhqnZ5qsNZ7SOoofuaG66A5yRLsTvacad2NMg"
         );
 
-        let json = valid_tx.to_json_string()?;
-        let valid_tx = Tx::from_json(&json)?.validate().map_err(|(_, err)| err)?;
+        let json = authentic_tx.to_json_string()?;
+        let authentic_tx = Tx::from_json(&json)?
+            .authenticate()
+            .map_err(|(_, err)| err)?;
 
-        assert_eq!(valid_tx.data_item().unwrap().size(), 683821);
+        assert_eq!(authentic_tx.data_item().unwrap().size(), 683821);
         assert_eq!(
-            valid_tx
+            authentic_tx
                 .data_item()
                 .unwrap()
                 .data()

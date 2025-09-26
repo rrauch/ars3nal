@@ -1,9 +1,9 @@
 use crate::Client;
 use crate::tx::Offset;
-use ario_core::bundle::{BundleEntry, BundleItemVerifier, ValidatedBundleItem};
+use ario_core::bundle::{AuthenticatedBundleItem, BundleEntry, BundleItemAuthenticator};
 use ario_core::chunking::{DefaultChunker, MostlyFixedChunkMap};
-use ario_core::data::{DataItem, DataRoot, ValidatedTxDataChunk, Verifier};
-use ario_core::tx::{TxId, ValidatedTx};
+use ario_core::data::{AuthenticatedTxDataChunk, Authenticator, DataItem, DataRoot};
+use ario_core::tx::{AuthenticatedTx, TxId};
 use bytes::Buf;
 use futures_lite::{AsyncRead, AsyncSeek};
 use futures_lite::{FutureExt, ready};
@@ -146,7 +146,7 @@ struct TxChunk(Arc<Inner>);
 
 impl TxChunk {
     fn new(
-        data: ValidatedTxDataChunk<'static>,
+        data: AuthenticatedTxDataChunk<'static>,
         chunk_offset: u64,
         data_range: Range<usize>,
     ) -> Self {
@@ -160,7 +160,7 @@ impl TxChunk {
 
 #[derive(Clone)]
 struct Inner {
-    data: ValidatedTxDataChunk<'static>,
+    data: AuthenticatedTxDataChunk<'static>,
     chunk_range: Range<u64>,
     data_range: Range<usize>,
 }
@@ -191,7 +191,7 @@ impl Chunk for TxChunk {
 }
 
 pub(crate) struct TxDataSource<'a> {
-    tx: MaybeOwned<'a, ValidatedTx<'a>>,
+    tx: MaybeOwned<'a, AuthenticatedTx<'a>>,
     tx_offset: Offset,
     data_root: Arc<DataRoot>,
     chunk_map: MostlyFixedChunkMap<{ 256 * 1024 }>,
@@ -201,7 +201,7 @@ pub(crate) struct TxDataSource<'a> {
 impl<'a> TxDataSource<'a> {
     async fn new(
         client: Client,
-        tx: impl Into<MaybeOwned<'a, ValidatedTx<'a>>>,
+        tx: impl Into<MaybeOwned<'a, AuthenticatedTx<'a>>>,
     ) -> Result<(Self, u64), super::Error> {
         let tx = tx.into();
         let (data_root, data_size) = match tx.data_item() {
@@ -231,7 +231,7 @@ pub type AsyncTxReader<'a> = AsyncDataReader<TxDataSource<'a>>;
 impl<'a> AsyncTxReader<'a> {
     pub async fn new(
         client: Client,
-        tx: impl Into<MaybeOwned<'a, ValidatedTx<'a>>>,
+        tx: impl Into<MaybeOwned<'a, AuthenticatedTx<'a>>>,
     ) -> Result<Self, super::Error> {
         let (data_source, data_size) = TxDataSource::new(client, tx).await?;
         Ok(Self {
@@ -277,8 +277,8 @@ impl DataSource for TxDataSource<'_> {
 
 pub(crate) struct BundleItemDataSource<'a> {
     entry: MaybeOwned<'a, BundleEntry<'a>>,
-    item: MaybeOwned<'a, ValidatedBundleItem<'a>>,
-    data_verifier: Arc<BundleItemVerifier<'static>>,
+    item: MaybeOwned<'a, AuthenticatedBundleItem<'a>>,
+    data_authenticator: Arc<BundleItemAuthenticator<'static>>,
     chunk_map: RangeMap<u64, usize>,
     tx_data_source: Arc<TxDataSource<'static>>,
 }
@@ -289,14 +289,14 @@ impl<'a> AsyncBundleItemReader<'a> {
     pub async fn new(
         client: Client,
         entry: impl Into<MaybeOwned<'a, BundleEntry<'a>>>,
-        item: impl Into<MaybeOwned<'a, ValidatedBundleItem<'a>>>,
-        data_verifier: impl Into<MaybeOwned<'a, BundleItemVerifier<'static>>>,
-        tx: impl Into<MaybeOwned<'a, ValidatedTx<'static>>>,
+        item: impl Into<MaybeOwned<'a, AuthenticatedBundleItem<'a>>>,
+        data_authenticator: impl Into<MaybeOwned<'a, BundleItemAuthenticator<'static>>>,
+        tx: impl Into<MaybeOwned<'a, AuthenticatedTx<'static>>>,
     ) -> Result<Self, super::Error> {
         let item = item.into();
-        let data_verifier = data_verifier.into().into_owned();
+        let data_authenticator = data_authenticator.into().into_owned();
         let mut chunk_map = RangeMap::new();
-        data_verifier
+        data_authenticator
             .chunks()
             .into_iter()
             .enumerate()
@@ -311,7 +311,7 @@ impl<'a> AsyncBundleItemReader<'a> {
             data_source: BundleItemDataSource {
                 entry: entry.into(),
                 item,
-                data_verifier: Arc::new(data_verifier),
+                data_authenticator: Arc::new(data_authenticator),
                 chunk_map,
                 tx_data_source: Arc::new(tx_data_source),
             },
@@ -341,7 +341,7 @@ impl<'a> DataSource for BundleItemDataSource<'a> {
             .collect_vec();
 
         let tx_data_source = self.tx_data_source.clone();
-        let data_verifier = self.data_verifier.clone();
+        let data_authenticator = self.data_authenticator.clone();
 
         Box::pin(async move {
             matching_chunks.sort_unstable_by(|a, b| Ord::cmp(&a.start, &b.start));
@@ -384,13 +384,13 @@ impl<'a> DataSource for BundleItemDataSource<'a> {
                 let chunk = MultiChunk::new(chunks)?;
                 // validate chunk data
                 let proof =
-                    data_verifier
+                    data_authenticator
                         .proof(chunk.range())
                         .ok_or(Error::DataValidationFailure(
                             "no proof for bundle item chunk available".to_string(),
                         ))?;
-                data_verifier
-                    .verify(chunk.reader(chunk.range().start).unwrap(), &proof)
+                data_authenticator
+                    .authenticate(chunk.reader(chunk.range().start).unwrap(), &proof)
                     .map_err(|e| Error::DataValidationFailure(e.to_string()))?;
                 Some(chunk)
             })
@@ -536,7 +536,7 @@ mod tests {
     use ario_core::Gateway;
     use ario_core::bundle::{BundleItemId, BundleItemReader, BundleReader};
     use ario_core::crypto::hash::{Hasher, Sha256};
-    use ario_core::data::Verifier;
+    use ario_core::data::Authenticator;
     use ario_core::tx::TxId;
     use futures_lite::AsyncReadExt;
     use hex_literal::hex;
@@ -612,11 +612,11 @@ mod tests {
 
         let entry = bundle.entries().find(|e| e.id() == &item_id).unwrap();
 
-        let (bundle_item, verifier) =
+        let (bundle_item, authenticator) =
             BundleItemReader::read_async(&entry, &mut file, bundle.id().clone()).await?;
-        let bundle_item = bundle_item.validate()?;
+        let bundle_item = bundle_item.authenticate()?;
 
-        let chunks = verifier.chunks().collect_vec();
+        let chunks = authenticator.chunks().collect_vec();
         assert_eq!(chunks.len(), 3);
         assert_eq!(**chunks.get(0).unwrap(), 0..204794);
         assert_eq!(**chunks.get(1).unwrap(), 204794..466938);

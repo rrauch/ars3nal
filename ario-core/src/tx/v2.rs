@@ -32,11 +32,11 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Hash, Serialize)]
 #[repr(transparent)]
-pub(crate) struct V2Tx<'a, const VALIDATED: bool = false>(V2TxData<'a>);
+pub(crate) struct V2Tx<'a, const AUTHENTICATED: bool = false>(V2TxData<'a>);
 
-pub(crate) type UnvalidatedV2Tx<'a> = V2Tx<'a, false>;
+pub(crate) type UnauthenticatedV2Tx<'a> = V2Tx<'a, false>;
 
-impl<'de, 'a> Deserialize<'de> for UnvalidatedV2Tx<'a> {
+impl<'de, 'a> Deserialize<'de> for UnauthenticatedV2Tx<'a> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -45,14 +45,14 @@ impl<'de, 'a> Deserialize<'de> for UnvalidatedV2Tx<'a> {
     }
 }
 
-pub(crate) type ValidatedV2Tx<'a> = V2Tx<'a, true>;
+pub(crate) type AuthenticatedV2Tx<'a> = V2Tx<'a, true>;
 
-impl<'a, const VALIDATED: bool> V2Tx<'a, VALIDATED> {
+impl<'a, const AUTHENTICATED: bool> V2Tx<'a, AUTHENTICATED> {
     pub(super) fn as_inner(&self) -> &V2TxData<'a> {
         &self.0
     }
 
-    pub(super) fn into_owned(self) -> V2Tx<'static, VALIDATED> {
+    pub(super) fn into_owned(self) -> V2Tx<'static, AUTHENTICATED> {
         V2Tx(self.0.into_owned())
     }
 
@@ -65,8 +65,8 @@ impl<'a, const VALIDATED: bool> V2Tx<'a, VALIDATED> {
     }
 }
 
-impl<'a, const VALIDATED: bool> From<V2Tx<'a, VALIDATED>> for RawTx<'a, VALIDATED> {
-    fn from(value: V2Tx<'a, VALIDATED>) -> Self {
+impl<'a, const AUTHENTICATED: bool> From<V2Tx<'a, AUTHENTICATED>> for RawTx<'a, AUTHENTICATED> {
+    fn from(value: V2Tx<'a, AUTHENTICATED>) -> Self {
         let v2 = value.0;
         Self::danger_from_raw_tx_data(RawTxData {
             format: V2,
@@ -91,13 +91,13 @@ impl<'a, const VALIDATED: bool> From<V2Tx<'a, VALIDATED>> for RawTx<'a, VALIDATE
     }
 }
 
-impl<'a> ValidatedV2Tx<'a> {
-    pub fn invalidate(self) -> UnvalidatedV2Tx<'a> {
+impl<'a> AuthenticatedV2Tx<'a> {
+    pub fn invalidate(self) -> UnauthenticatedV2Tx<'a> {
         V2Tx(self.0)
     }
 }
 
-impl UnvalidatedV2Tx<'static> {
+impl UnauthenticatedV2Tx<'static> {
     pub fn from_json<J: JsonSource>(json: J) -> Result<Self, TxError> {
         let tx_data = UnvalidatedRawTx::from_json(json)?
             .validate()
@@ -108,14 +108,14 @@ impl UnvalidatedV2Tx<'static> {
     }
 }
 
-impl<'a> UnvalidatedV2Tx<'a> {
+impl<'a> UnauthenticatedV2Tx<'a> {
     pub(crate) fn try_from_raw(raw: ValidatedRawTx<'a>) -> Result<Self, TxError> {
         Ok(Self(V2TxData::try_from(raw)?))
     }
 }
 
-impl<'a> SupportsValidation for UnvalidatedV2Tx<'a> {
-    type Validated = ValidatedV2Tx<'a>;
+impl<'a> SupportsValidation for UnauthenticatedV2Tx<'a> {
+    type Validated = AuthenticatedV2Tx<'a>;
     type Error = V2TxDataError;
     type Reference<'r> = ();
 
@@ -528,7 +528,7 @@ impl<'a> TxDraft<'a> {
         Ok(())
     }
 
-    pub(crate) fn sign<T: TxSigner>(self, signer: &T) -> Result<ValidatedV2Tx<'a>, TxError> {
+    pub(crate) fn sign<T: TxSigner>(self, signer: &T) -> Result<AuthenticatedV2Tx<'a>, TxError> {
         let signature_data = signer.sign(&self)?;
         let (target, quantity) = match self.transfer {
             Some(transfer) => (Some(transfer.target), Some(transfer.quantity)),
@@ -565,7 +565,7 @@ mod tests {
     use crate::entity;
     use crate::money::{CurrencyExt, Winston};
     use crate::tx::raw::ValidatedRawTx;
-    use crate::tx::v2::{UnvalidatedV2Tx, V2TxDataError};
+    use crate::tx::v2::{UnauthenticatedV2Tx, V2TxDataError};
     use crate::tx::{Quantity, Reward};
     use crate::validation::ValidateExt;
     use std::ops::Deref;
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn tx_hash_ok() -> anyhow::Result<()> {
-        let tx_data = UnvalidatedV2Tx::from_json(TX_V2_3)?.0;
+        let tx_data = UnauthenticatedV2Tx::from_json(TX_V2_3)?.0;
         let tx_hash = tx_data.tx_hash();
         let deep_digest = tx_hash.as_slice();
 
@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn tx_data_ok_v2() -> anyhow::Result<()> {
-        let tx_data = UnvalidatedV2Tx::from_json(TX_V2)?.0;
+        let tx_data = UnauthenticatedV2Tx::from_json(TX_V2)?.0;
         assert_eq!(
             tx_data.id.to_base64(),
             "bXGqzNQNmHTeL54cUQ6wPo-MO0thLP44FeAoM93kEwk"
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn tx_data_ok_transfer() -> anyhow::Result<()> {
-        let tx_data = UnvalidatedV2Tx::from_json(TX_V2_2)?.0;
+        let tx_data = UnauthenticatedV2Tx::from_json(TX_V2_2)?.0;
         assert_eq!(
             tx_data.id.to_base64(),
             "oo6wzsvLtpGmOInBvyJ3ORjbhVelFEZKTOAy6wtjZtQ"
@@ -688,14 +688,14 @@ mod tests {
 
     #[test]
     fn tx_valid_sig() -> anyhow::Result<()> {
-        let tx = UnvalidatedV2Tx::from_json(TX_V2_2)?;
+        let tx = UnauthenticatedV2Tx::from_json(TX_V2_2)?;
         let _valid = tx.validate().expect("sig to be valid");
         Ok(())
     }
 
     #[test]
     fn tx_invalid_sig() -> anyhow::Result<()> {
-        let tx = UnvalidatedV2Tx::from_json(TX_V2_INVALID)?;
+        let tx = UnauthenticatedV2Tx::from_json(TX_V2_INVALID)?;
         match tx.validate() {
             Err((_, V2TxDataError::Entity(entity::Error::InvalidSignature(_)))) => {
                 // ok
@@ -707,11 +707,11 @@ mod tests {
 
     #[test]
     fn tx_raw_rountrip() -> anyhow::Result<()> {
-        let unvalidated = UnvalidatedV2Tx::from_json(TX_V2)?;
+        let unvalidated = UnauthenticatedV2Tx::from_json(TX_V2)?;
         let validated = unvalidated.validate().map_err(|(_, e)| e)?;
         let raw = ValidatedRawTx::from(validated);
         let json_string = raw.to_json_string()?;
-        let unvalidated = UnvalidatedV2Tx::from_json(&json_string)?;
+        let unvalidated = UnauthenticatedV2Tx::from_json(&json_string)?;
         let _validated = unvalidated.validate().map_err(|(_, e)| e)?;
         Ok(())
     }

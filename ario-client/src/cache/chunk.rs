@@ -1,11 +1,11 @@
 use crate::Cache;
 use crate::cache::{Context, Error, HasWeight, InnerCache};
 use crate::chunk::{RawTxDownloadChunk, UnvalidatedTxDownloadChunk, ValidatedTxDownloadChunk};
-use ario_core::data::{DataRoot, TxDataChunk, ValidatedTxDataChunk};
+use ario_core::data::{DataRoot, TxDataChunk, AuthenticatedTxDataChunk};
 use std::iter;
 
 pub(super) type ChunkCache =
-    InnerCache<u128, ValidatedTxDataChunk<'static>, Box<DynL2ChunkCache<'static>>>;
+    InnerCache<u128, AuthenticatedTxDataChunk<'static>, Box<DynL2ChunkCache<'static>>>;
 
 #[dynosaur::dynosaur(pub(super) DynL2ChunkCache = dyn(box) L2Cache)]
 pub trait L2Cache: Send + Sync {
@@ -36,7 +36,7 @@ impl Cache {
         data_root: &DataRoot,
         relative_offset: u64,
         f: impl AsyncFnOnce(u128) -> Result<Option<ValidatedTxDownloadChunk<'static>>, crate::Error>,
-    ) -> Result<Option<ValidatedTxDataChunk<'static>>, crate::Error> {
+    ) -> Result<Option<AuthenticatedTxDataChunk<'static>>, crate::Error> {
         let chunk_cache = &self.chunk_cache;
         Ok(chunk_cache
             .l1

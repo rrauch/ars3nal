@@ -3,10 +3,10 @@ mod bundler;
 use crate::data_reader::{AsyncBundleItemReader, AsyncTxReader};
 use crate::{Client, api};
 use ario_core::bundle::{
-    Bundle, BundleEntry, BundleId, BundleItemId, BundleItemReader, BundleItemVerifier,
-    BundleReader, ValidatedBundleItem,
+    AuthenticatedBundleItem, Bundle, BundleEntry, BundleId, BundleItemAuthenticator, BundleItemId,
+    BundleItemReader, BundleReader,
 };
-use ario_core::tx::{TxId, ValidatedTx};
+use ario_core::tx::{AuthenticatedTx, TxId};
 use futures_lite::{AsyncRead, AsyncSeek};
 
 impl Client {
@@ -35,7 +35,7 @@ impl Client {
         &self,
         item_id: &BundleItemId,
         tx_id: &TxId,
-    ) -> Result<Option<ValidatedBundleItem<'static>>, super::Error> {
+    ) -> Result<Option<AuthenticatedBundleItem<'static>>, super::Error> {
         match self._bundle_item(item_id, tx_id).await? {
             Some((_, item, ..)) => Ok(Some(item)),
             None => Ok(None),
@@ -46,20 +46,26 @@ impl Client {
         &self,
         bundle_id: &BundleId,
         entry: &BundleEntry<'_>,
-        tx: &ValidatedTx<'_>,
-    ) -> Result<(ValidatedBundleItem<'static>, BundleItemVerifier<'static>), super::Error> {
+        tx: &AuthenticatedTx<'_>,
+    ) -> Result<
+        (
+            AuthenticatedBundleItem<'static>,
+            BundleItemAuthenticator<'static>,
+        ),
+        super::Error,
+    > {
         let mut tx_reader = AsyncTxReader::new(self.clone(), tx).await?;
 
-        let (item, verifier) =
+        let (item, authenticator) =
             BundleItemReader::read_async(&entry, &mut tx_reader, bundle_id.clone())
                 .await
                 .map_err(api::Error::BundleError)?;
 
         let item = item
-            .validate()
+            .authenticate()
             .map_err(|e| api::Error::BundleError(e.into()))?;
 
-        Ok((item, verifier))
+        Ok((item, authenticator))
     }
 
     async fn _bundle_item(
@@ -69,9 +75,9 @@ impl Client {
     ) -> Result<
         Option<(
             BundleEntry<'static>,
-            ValidatedBundleItem<'static>,
-            BundleItemVerifier<'static>,
-            ValidatedTx<'static>,
+            AuthenticatedBundleItem<'static>,
+            BundleItemAuthenticator<'static>,
+            AuthenticatedTx<'static>,
         )>,
         super::Error,
     > {
@@ -99,21 +105,21 @@ impl Client {
                 ))
             })
             .await?
-            .map(|(item, verifier)| (entry.into_owned(), item, verifier, tx)))
+            .map(|(item, authenticator)| (entry.into_owned(), item, authenticator, tx)))
     }
 
     pub async fn read_bundle_item(
         &self,
-        item: &ValidatedBundleItem<'_>,
+        item: &AuthenticatedBundleItem<'_>,
     ) -> Result<Option<impl AsyncRead + AsyncSeek + Send + Unpin + 'static>, super::Error> {
-        let (entry, item, verifier, tx) =
+        let (entry, item, authenticator, tx) =
             match self._bundle_item(item.id(), item.bundle_id()).await? {
-                Some((entry, item, verifier, tx, ..)) => (entry, item, verifier, tx),
+                Some((entry, item, authenticator, tx, ..)) => (entry, item, authenticator, tx),
                 None => return Ok(None),
             };
 
         Ok(Some(
-            AsyncBundleItemReader::new(self.clone(), entry, item, verifier, tx).await?,
+            AsyncBundleItemReader::new(self.clone(), entry, item, authenticator, tx).await?,
         ))
     }
 }

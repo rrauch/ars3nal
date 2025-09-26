@@ -2,18 +2,18 @@ mod v2;
 
 pub use v2::{
     Bundle as V2Bundle, BundleDataItem as V2BundleDataItem, BundleEntry as V2BundleEntry,
-    BundleItem as V2BundleItem, BundleItemDataProcessor as V2BundleItemDataProcessor,
-    BundleItemDataVerifier as V2BundleItemDataVerifier, BundleItemDraft,
+    BundleItem as V2BundleItem, BundleItemDataAuthenticator as V2BundleItemDataAuthenticator,
+    BundleItemDataProcessor as V2BundleItemDataProcessor, BundleItemDraft,
     BundleItemProof as V2BundleItemProof, DataRoot as V2DataRoot,
 };
 
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
-use crate::bundle::v2::{
-    BundleItemDataVerifier as V2BundleItemVerifier, MaybeOwnedDataRoot as V2MaybeOwnedDataRoot,
-    SignatureType, V2BundleItemBuilder, V2BundleItemHash,
-};
 use crate::bundle::v2::{ContainerLocation, FlowExt};
+use crate::bundle::v2::{
+    MaybeOwnedDataRoot as V2MaybeOwnedDataRoot, SignatureType, V2BundleItemBuilder,
+    V2BundleItemHash,
+};
 use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ethereum::{Eip191, Eip712};
 use crate::crypto::edwards::multi_aptos::{MultiAptosEd25519, MultiAptosVerifyingKey};
@@ -36,7 +36,7 @@ use crate::entity::{
     Signature as EntitySignature,
 };
 use crate::tag::Tag;
-use crate::tx::{TxId, ValidatedTx};
+use crate::tx::{AuthenticatedTx, TxId};
 use crate::typed::{FromInner, Typed, WithSerde};
 use crate::validation::{SupportsValidation, ValidateExt};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk, WalletSk};
@@ -273,7 +273,7 @@ pub struct BundleReader;
 
 impl BundleReader {
     pub async fn new<R: AsyncRead + AsyncSeek + Send + Unpin>(
-        tx: &ValidatedTx<'_>,
+        tx: &AuthenticatedTx<'_>,
         reader: R,
     ) -> Result<Bundle, Error> {
         let bundle_type = BundleType::from_tags(tx.tags()).ok_or(Error::UnsupportedFormat)?;
@@ -296,7 +296,13 @@ impl BundleItemReader {
         entry: &BundleEntry<'_>,
         mut reader: R,
         bundle_id: BundleId,
-    ) -> Result<(UnvalidatedBundleItem<'static>, BundleItemVerifier<'static>), Error> {
+    ) -> Result<
+        (
+            UnauthenticatedBundleItem<'static>,
+            BundleItemAuthenticator<'static>,
+        ),
+        Error,
+    > {
         match entry {
             BundleEntry::V2(entry) => {
                 reader
@@ -310,7 +316,7 @@ impl BundleItemReader {
                 )
                 .await?;
                 Ok((
-                    UnvalidatedBundleItem::from_v2(item, entry.id())?,
+                    UnauthenticatedBundleItem::from_v2(item, entry.id())?,
                     data_verifier.into(),
                 ))
             }
@@ -327,27 +333,29 @@ impl BundleItemBuilder {
 }
 
 #[derive(Debug, Clone, PartialEq, Hash, Serialize)]
-pub enum BundleItem<'a, const VALIDATED: bool = false> {
-    V2(Arc<V2BundleItem<'a, VALIDATED>>),
+pub enum BundleItem<'a, const AUTHENTICATED: bool = false> {
+    V2(Arc<V2BundleItem<'a, AUTHENTICATED>>),
 }
 
-impl<'a, const VALIDATED: bool> From<V2BundleItem<'a, VALIDATED>> for BundleItem<'a, VALIDATED> {
-    fn from(value: V2BundleItem<'a, VALIDATED>) -> Self {
+impl<'a, const AUTHENTICATED: bool> From<V2BundleItem<'a, AUTHENTICATED>>
+    for BundleItem<'a, AUTHENTICATED>
+{
+    fn from(value: V2BundleItem<'a, AUTHENTICATED>) -> Self {
         Self::V2(Arc::new(value))
     }
 }
 
-impl<'a, const VALIDATED: bool> From<Arc<V2BundleItem<'a, VALIDATED>>>
-    for BundleItem<'a, VALIDATED>
+impl<'a, const AUTHENTICATED: bool> From<Arc<V2BundleItem<'a, AUTHENTICATED>>>
+    for BundleItem<'a, AUTHENTICATED>
 {
-    fn from(value: Arc<V2BundleItem<'a, VALIDATED>>) -> Self {
+    fn from(value: Arc<V2BundleItem<'a, AUTHENTICATED>>) -> Self {
         Self::V2(value)
     }
 }
 
-pub type UnvalidatedBundleItem<'a> = BundleItem<'a, false>;
+pub type UnauthenticatedBundleItem<'a> = BundleItem<'a, false>;
 
-impl<'de, 'a> Deserialize<'de> for UnvalidatedBundleItem<'a> {
+impl<'de, 'a> Deserialize<'de> for UnauthenticatedBundleItem<'a> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -364,18 +372,18 @@ impl<'de, 'a> Deserialize<'de> for UnvalidatedBundleItem<'a> {
     }
 }
 
-pub type ValidatedBundleItem<'a> = BundleItem<'a, true>;
+pub type AuthenticatedBundleItem<'a> = BundleItem<'a, true>;
 
-impl<'a> ValidatedBundleItem<'a> {
-    pub fn invalidate(self) -> UnvalidatedBundleItem<'a> {
+impl<'a> AuthenticatedBundleItem<'a> {
+    pub fn invalidate(self) -> UnauthenticatedBundleItem<'a> {
         match self {
             Self::V2(v2) => BundleItem::V2(Arc::new(Arc::unwrap_or_clone(v2).invalidate())),
         }
     }
 }
 
-impl<'a> SupportsValidation for UnvalidatedBundleItem<'a> {
-    type Validated = ValidatedBundleItem<'a>;
+impl<'a> SupportsValidation for UnauthenticatedBundleItem<'a> {
+    type Validated = AuthenticatedBundleItem<'a>;
     type Error = BundleItemError;
     type Reference<'r> = ();
 
@@ -384,7 +392,7 @@ impl<'a> SupportsValidation for UnvalidatedBundleItem<'a> {
         reference: &Self::Reference<'_>,
     ) -> Result<Self::Validated, (Self, Self::Error)> {
         match self {
-            UnvalidatedBundleItem::V2(v2) => {
+            UnauthenticatedBundleItem::V2(v2) => {
                 let v2 = Arc::unwrap_or_clone(v2);
                 match v2.validate_with(reference) {
                     Ok(valid) => Ok(Self::Validated::V2(Arc::new(valid))),
@@ -395,13 +403,13 @@ impl<'a> SupportsValidation for UnvalidatedBundleItem<'a> {
     }
 }
 
-impl<'a> UnvalidatedBundleItem<'a> {
-    pub fn validate(self) -> Result<ValidatedBundleItem<'a>, BundleItemError> {
+impl<'a> UnauthenticatedBundleItem<'a> {
+    pub fn authenticate(self) -> Result<AuthenticatedBundleItem<'a>, BundleItemError> {
         ValidateExt::validate(self).map_err(|(_, e)| e)
     }
 }
 
-impl UnvalidatedBundleItem<'static> {
+impl UnauthenticatedBundleItem<'static> {
     fn from_v2(
         v2: V2BundleItem<'static, false>,
         expected_id: &BundleItemId,
@@ -419,7 +427,7 @@ impl UnvalidatedBundleItem<'static> {
         reader: R,
         entry: &BundleEntry<'_>,
         bundle_id: BundleId,
-    ) -> Result<(Self, BundleItemVerifier<'static>), Error> {
+    ) -> Result<(Self, BundleItemAuthenticator<'static>), Error> {
         match entry {
             BundleEntry::V2(e) => {
                 let (item, data_verifier) = V2BundleItem::read(
@@ -431,7 +439,7 @@ impl UnvalidatedBundleItem<'static> {
                 let this = Self::from_v2(item, entry.id())?;
                 Ok((
                     this,
-                    BundleItemVerifier::V2(MaybeOwned::Owned(data_verifier)),
+                    BundleItemAuthenticator::V2(MaybeOwned::Owned(data_verifier)),
                 ))
             }
         }
@@ -441,7 +449,7 @@ impl UnvalidatedBundleItem<'static> {
         reader: R,
         entry: &BundleEntry<'_>,
         bundle_id: BundleId,
-    ) -> Result<(Self, BundleItemVerifier<'static>), Error> {
+    ) -> Result<(Self, BundleItemAuthenticator<'static>), Error> {
         match entry {
             BundleEntry::V2(e) => {
                 let (item, data_verifier) = V2BundleItem::read_async(
@@ -454,14 +462,14 @@ impl UnvalidatedBundleItem<'static> {
                 let this = Self::from_v2(item, entry.id())?;
                 Ok((
                     this,
-                    BundleItemVerifier::V2(MaybeOwned::Owned(data_verifier)),
+                    BundleItemAuthenticator::V2(MaybeOwned::Owned(data_verifier)),
                 ))
             }
         }
     }
 }
 
-impl<'a, const VALIDATED: bool> ArEntity for BundleItem<'a, VALIDATED> {
+impl<'a, const AUTHENTICATED: bool> ArEntity for BundleItem<'a, AUTHENTICATED> {
     type Id = BundleItemId;
     type Hash = BundleItemHash;
 
@@ -470,7 +478,7 @@ impl<'a, const VALIDATED: bool> ArEntity for BundleItem<'a, VALIDATED> {
     }
 }
 
-impl<'a, const VALIDATED: bool> BundleItem<'a, VALIDATED> {
+impl<'a, const AUTHENTICATED: bool> BundleItem<'a, AUTHENTICATED> {
     #[inline]
     pub fn id(&self) -> &BundleItemId {
         match self {
@@ -962,11 +970,11 @@ pub enum DataRoot<'a> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum BundleItemVerifier<'a> {
-    V2(MaybeOwned<'a, V2BundleItemVerifier<'a>>),
+pub enum BundleItemAuthenticator<'a> {
+    V2(MaybeOwned<'a, V2BundleItemDataAuthenticator<'a>>),
 }
 
-impl BundleItemVerifier<'_> {
+impl BundleItemAuthenticator<'_> {
     #[inline]
     pub fn bundle_type(&self) -> BundleType {
         match self {
@@ -975,14 +983,18 @@ impl BundleItemVerifier<'_> {
     }
 
     #[inline]
-    pub fn verify(&self, mut data: impl Buf, proof: &BundleItemDataProof<'_>) -> Result<(), Error> {
+    pub fn authenticate(
+        &self,
+        mut data: impl Buf,
+        proof: &BundleItemDataProof<'_>,
+    ) -> Result<(), Error> {
         match self {
             Self::V2(v2) => match proof {
                 BundleItemDataProof::V2(proof) => Ok(v2
                     .as_ref()
                     .data_item()
                     .data_root()
-                    .verify_data(&mut data, proof)
+                    .authenticate_data(&mut data, proof)
                     .map_err(|e| Error::BundleItemError(e.into()))?),
                 /*_ => Err(BundleItemError::Other(
                     "incorrect proof type supplied".to_string(),
@@ -992,13 +1004,13 @@ impl BundleItemVerifier<'_> {
     }
 }
 
-impl<'a> From<V2BundleItemVerifier<'a>> for BundleItemVerifier<'a> {
-    fn from(value: V2BundleItemVerifier<'a>) -> Self {
+impl<'a> From<V2BundleItemDataAuthenticator<'a>> for BundleItemAuthenticator<'a> {
+    fn from(value: V2BundleItemDataAuthenticator<'a>) -> Self {
         Self::V2(value.into())
     }
 }
 
-impl<'a> data::Verifier<BundledDataItem<'a>> for BundleItemVerifier<'a> {
+impl<'a> data::Authenticator<BundledDataItem<'a>> for BundleItemAuthenticator<'a> {
     type Proof<'p>
         = BundleItemDataProof<'p>
     where
