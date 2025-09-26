@@ -6,7 +6,7 @@ use crate::api::{
 use crate::routemaster::Handle;
 use crate::{Client, api};
 use ario_core::blob::Blob;
-use ario_core::data::Authenticator;
+use ario_core::data::{Authenticator, UnauthenticatedTxDataChunk};
 use ario_core::data::{DataItem, ExternalDataItemAuthenticator, MaybeOwnedExternalDataItem};
 use ario_core::tx::{AuthenticatedTx, LastTx, Tx, TxAnchor, TxId, UnauthenticatedTx};
 use ario_core::{BlockNumber, Gateway, JsonValue};
@@ -427,7 +427,12 @@ impl<'a> TxSubmission<UploadChunks<'a>> {
 
         self.0
             .client
-            .upload_chunk_with_gw(&self.0.gw_handle, &self.0.data, chunk, Blob::Slice(data))
+            .upload_chunk_with_gw(
+                &self.0.gw_handle,
+                &self.0.data,
+                chunk,
+                UnauthenticatedTxDataChunk::from_blob(Blob::Slice(data)),
+            )
             .await?;
 
         Ok(())

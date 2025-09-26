@@ -110,12 +110,18 @@ impl<'a> SupportsValidation for UnauthenticatedTxDataChunk<'a> {
 #[derive(Clone, Debug)]
 pub struct TxDataAuthenticityProof<'a> {
     data_root: MaybeOwnedDataRoot<'a>,
-    proof: DefaultProof<'a>,
+    proof: MaybeOwned<'a, DefaultProof<'a>>,
 }
 
 impl<'a> TxDataAuthenticityProof<'a> {
-    pub fn new(data_root: MaybeOwnedDataRoot<'a>, proof: DefaultProof<'a>) -> Self {
-        Self { data_root, proof }
+    pub fn new(
+        data_root: impl Into<MaybeOwnedDataRoot<'a>>,
+        proof: impl Into<MaybeOwned<'a, DefaultProof<'a>>>,
+    ) -> Self {
+        Self {
+            data_root: data_root.into(),
+            proof: proof.into(),
+        }
     }
 }
 

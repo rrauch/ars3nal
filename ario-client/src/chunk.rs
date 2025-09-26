@@ -10,7 +10,7 @@ use ario_core::blob::{AsBlob, Blob};
 use ario_core::crypto::merkle::{DefaultProof, ProofError};
 use ario_core::data::{
     AuthenticatedTxDataChunk, Authenticator, DataRoot, ExternalDataItemAuthenticator,
-    TxDataAuthenticityProof, TxDataChunk,
+    TxDataAuthenticityProof, TxDataChunk, UnauthenticatedTxDataChunk,
 };
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,6 @@ use serde_with::base64::Base64;
 use serde_with::base64::UrlSafe;
 use serde_with::formats::Unpadded;
 use serde_with::serde_as;
-use std::io::Cursor;
 use std::ops::Range;
 use thiserror::Error;
 
@@ -81,8 +80,13 @@ impl Client {
         data: Blob<'_>,
     ) -> Result<(), super::Error> {
         let gw = self.0.routemaster.gateway().await?;
-        self.upload_chunk_with_gw(&gw, authenticator, offset, data)
-            .await
+        self.upload_chunk_with_gw(
+            &gw,
+            authenticator,
+            offset,
+            UnauthenticatedTxDataChunk::from_blob(data),
+        )
+        .await
     }
 
     pub(crate) async fn upload_chunk_with_gw(
@@ -90,16 +94,16 @@ impl Client {
         gw_handle: &Handle<Gateway>,
         authenticator: &ExternalDataItemAuthenticator<'_>,
         offset: &Range<u64>,
-        data: Blob<'_>,
+        unauthenticated_data: UnauthenticatedTxDataChunk<'_>,
     ) -> Result<(), super::Error> {
         let len = offset.end - offset.start;
         if len == 0 {
             return Err(UploadError::EmptyChunk.into());
         }
-        if data.len() != len as usize {
+        if unauthenticated_data.len() != len as usize {
             return Err(UploadError::IncorrectChunkLen {
                 expected: len as usize,
-                actual: data.len(),
+                actual: unauthenticated_data.len(),
             }
             .into());
         }
@@ -108,12 +112,12 @@ impl Client {
             .proof(offset)
             .ok_or(UploadError::ProofNotFound(offset.start))?;
 
-        // authenticate data using merkle tree
-        authenticator
-            .data_item()
-            .data_root()
-            .authenticate_data(&mut Cursor::new(&data), &proof)
-            .map_err(|e| UploadError::ProofError(e.into()))?;
+        let tx_data_proof =
+            TxDataAuthenticityProof::new(authenticator.data_item().data_root(), proof.clone());
+
+        let authenticated_data = unauthenticated_data
+            .authenticate(&tx_data_proof)
+            .map_err(|(_, e)| UploadError::ProofError(e.into()))?;
 
         // looking good, create upload json
         let upload_chunk = UploadChunk {
@@ -121,7 +125,7 @@ impl Client {
             data_size: authenticator.data_item().data_size(),
             data_path: proof.as_blob(),
             offset: offset.start,
-            chunk: data,
+            chunk: authenticated_data,
         };
 
         let api = &self.0.api;
@@ -200,7 +204,7 @@ struct UploadChunk<'a> {
     #[serde_as(as = "DisplayFromStr")]
     offset: u64,
     #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
-    chunk: Blob<'a>,
+    chunk: AuthenticatedTxDataChunk<'a>,
 }
 
 pub(crate) type UnauthenticatedTxDownloadChunk<'a> = TxDownloadChunk<'a, false>;
@@ -211,7 +215,7 @@ impl<'a> UnauthenticatedTxDownloadChunk<'a> {
         relative_offset: u64,
     ) -> Result<AuthenticatedTxDownloadChunk<'a>, ProofError> {
         let proof = TxDataAuthenticityProof::new(
-            data_root.into(),
+            data_root,
             DefaultProof::new(
                 relative_offset..(relative_offset + self.chunk.len() as u64),
                 Blob::Slice(self.data_path.bytes()),
@@ -229,16 +233,6 @@ impl<'a> UnauthenticatedTxDownloadChunk<'a> {
 }
 
 pub(crate) type AuthenticatedTxDownloadChunk<'a> = TxDownloadChunk<'a, true>;
-
-impl<'a> AuthenticatedTxDownloadChunk<'a> {
-    pub(crate) fn invalidate(self) -> UnauthenticatedTxDownloadChunk<'a> {
-        TxDownloadChunk {
-            chunk: self.chunk.invalidate(),
-            data_path: self.data_path,
-            tx_path: self.tx_path,
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TxDownloadChunk<'a, const AUTHENTICATED: bool> {
