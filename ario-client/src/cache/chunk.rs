@@ -1,6 +1,6 @@
 use crate::Cache;
 use crate::cache::{Context, Error, HasWeight, InnerCache};
-use crate::chunk::{RawTxDownloadChunk, UnvalidatedTxDownloadChunk, ValidatedTxDownloadChunk};
+use crate::chunk::{RawTxDownloadChunk, UnauthenticatedTxDownloadChunk, AuthenticatedTxDownloadChunk};
 use ario_core::data::{DataRoot, TxDataChunk, AuthenticatedTxDataChunk};
 use std::iter;
 
@@ -35,7 +35,7 @@ impl Cache {
         offset: u128,
         data_root: &DataRoot,
         relative_offset: u64,
-        f: impl AsyncFnOnce(u128) -> Result<Option<ValidatedTxDownloadChunk<'static>>, crate::Error>,
+        f: impl AsyncFnOnce(u128) -> Result<Option<AuthenticatedTxDownloadChunk<'static>>, crate::Error>,
     ) -> Result<Option<AuthenticatedTxDataChunk<'static>>, crate::Error> {
         let chunk_cache = &self.chunk_cache;
         Ok(chunk_cache
@@ -43,8 +43,8 @@ impl Cache {
             .try_get_with_by_ref(&offset, async {
                 if let Some(l2) = self.chunk_cache.l2.as_ref() {
                     if let Some(raw) = l2.get_chunk(&offset).await.map_err(Error::L2Error)? {
-                        if let Ok(validated) = UnvalidatedTxDownloadChunk::from(raw)
-                            .validate(data_root, relative_offset)
+                        if let Ok(validated) = UnauthenticatedTxDownloadChunk::from(raw)
+                            .authenticate(data_root, relative_offset)
                         {
                             return Ok(Some(validated.chunk));
                         }

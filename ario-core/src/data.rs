@@ -26,44 +26,57 @@ pub type MaybeOwnedDefaultChunkedData<'a> = MaybeOwned<'a, DefaultChunkedData>;
 pub type ExternalDataItem<'a> = MerkleAuthenticatableDataItem<'a, Sha256, DefaultChunker, 32>;
 pub type MaybeOwnedExternalDataItem<'a> = MaybeOwned<'a, ExternalDataItem<'a>>;
 
-#[derive(Clone, PartialEq, Hash, Debug)]
-pub struct TxDataChunk<'a, const AUTHENTICATED: bool = false>(Blob<'a>);
-pub type AuthenticatedTxDataChunk<'a> = TxDataChunk<'a, true>;
+#[derive_where(Clone, PartialEq, Hash, Debug)]
+pub struct AuthenticatableBlob<'a, T, const AUTHENTICATED: bool = false>(TypedBlob<'a, T>);
+pub type AuthenticatedBlob<'a, T> = AuthenticatableBlob<'a, T, true>;
+pub type UnauthenticatedBlob<'a, T> = AuthenticatableBlob<'a, T, false>;
 
-impl<'a> AsBlob for AuthenticatedTxDataChunk<'a> {
+impl<'a, T, const AUTHENTICATED: bool> AuthenticatableBlob<'a, T, AUTHENTICATED> {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl<'a, T> AsBlob for AuthenticatedBlob<'a, T> {
     fn as_blob(&self) -> Blob<'_> {
         self.0.as_blob()
     }
 }
 
-impl AsRef<[u8]> for AuthenticatedTxDataChunk<'_> {
+impl<T> AsRef<[u8]> for AuthenticatedBlob<'_, T> {
     fn as_ref(&self) -> &[u8] {
         self.0.bytes()
     }
 }
 
+impl<'a, T> UnauthenticatedBlob<'a, T> {
+    pub(crate) fn from_inner(inner: TypedBlob<'a, T>) -> Self {
+        Self(inner)
+    }
+}
+
+pub struct TxDataKind;
+
+pub type TxDataChunk<'a, const AUTHENTICATED: bool> =
+    AuthenticatableBlob<'a, TxDataKind, AUTHENTICATED>;
+pub type AuthenticatedTxDataChunk<'a> = TxDataChunk<'a, true>;
+
 impl<'a> AuthenticatedTxDataChunk<'a> {
     pub fn invalidate(self) -> UnauthenticatedTxDataChunk<'a> {
-        TxDataChunk(self.0)
+        TxDataChunk::from_inner(self.0)
     }
 
-    pub fn into_inner(self) -> Blob<'a> {
+    pub fn into_inner(self) -> TypedBlob<'a, TxDataKind> {
         self.0
     }
 }
 
 pub type UnauthenticatedTxDataChunk<'a> = TxDataChunk<'a, false>;
 
-impl<'a, const AUTHENTICATED: bool> TxDataChunk<'a, AUTHENTICATED> {
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-}
-
 impl<'a> UnauthenticatedTxDataChunk<'a> {
     #[inline]
     pub fn from_blob(data: Blob<'a>) -> Self {
-        Self(data)
+        Self(TypedBlob::from_inner(data))
     }
 
     #[inline]
@@ -90,7 +103,7 @@ impl<'a> SupportsValidation for UnauthenticatedTxDataChunk<'a> {
         {
             return Err((self, err));
         }
-        Ok(TxDataChunk(self.0))
+        Ok(AuthenticatableBlob(self.0))
     }
 }
 

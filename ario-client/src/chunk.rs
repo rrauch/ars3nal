@@ -151,8 +151,8 @@ impl Client {
         offset: u128,
         relative_offset: u64,
         data_root: &DataRoot,
-    ) -> Result<Option<ValidatedTxDownloadChunk<'static>>, super::Error> {
-        let chunk: UnvalidatedTxDownloadChunk<'static> = match self
+    ) -> Result<Option<AuthenticatedTxDownloadChunk<'static>>, super::Error> {
+        let chunk: UnauthenticatedTxDownloadChunk<'static> = match self
             .with_gw(async |gw| self.0.api.download_chunk(gw, offset).await)
             .await?
         {
@@ -164,7 +164,7 @@ impl Client {
 
         Ok(Some(
             chunk
-                .validate(data_root, relative_offset)
+                .authenticate(data_root, relative_offset)
                 .map_err(DownloadError::ProofError)?,
         ))
     }
@@ -203,13 +203,13 @@ struct UploadChunk<'a> {
     chunk: Blob<'a>,
 }
 
-pub(crate) type UnvalidatedTxDownloadChunk<'a> = TxDownloadChunk<'a, false>;
-impl<'a> UnvalidatedTxDownloadChunk<'a> {
-    pub(crate) fn validate(
+pub(crate) type UnauthenticatedTxDownloadChunk<'a> = TxDownloadChunk<'a, false>;
+impl<'a> UnauthenticatedTxDownloadChunk<'a> {
+    pub(crate) fn authenticate(
         self,
         data_root: &DataRoot,
         relative_offset: u64,
-    ) -> Result<ValidatedTxDownloadChunk<'a>, ProofError> {
+    ) -> Result<AuthenticatedTxDownloadChunk<'a>, ProofError> {
         let proof = TxDataAuthenticityProof::new(
             data_root.into(),
             DefaultProof::new(
@@ -228,10 +228,10 @@ impl<'a> UnvalidatedTxDownloadChunk<'a> {
     }
 }
 
-pub(crate) type ValidatedTxDownloadChunk<'a> = TxDownloadChunk<'a, true>;
+pub(crate) type AuthenticatedTxDownloadChunk<'a> = TxDownloadChunk<'a, true>;
 
-impl<'a> ValidatedTxDownloadChunk<'a> {
-    pub(crate) fn invalidate(self) -> UnvalidatedTxDownloadChunk<'a> {
+impl<'a> AuthenticatedTxDownloadChunk<'a> {
+    pub(crate) fn invalidate(self) -> UnauthenticatedTxDownloadChunk<'a> {
         TxDownloadChunk {
             chunk: self.chunk.invalidate(),
             data_path: self.data_path,
@@ -241,13 +241,13 @@ impl<'a> ValidatedTxDownloadChunk<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TxDownloadChunk<'a, const VALIDATED: bool> {
-    pub(crate) chunk: TxDataChunk<'a, VALIDATED>,
+pub(crate) struct TxDownloadChunk<'a, const AUTHENTICATED: bool> {
+    pub(crate) chunk: TxDataChunk<'a, AUTHENTICATED>,
     data_path: Blob<'a>,
     tx_path: Option<Blob<'a>>,
 }
 
-impl<'a> From<RawTxDownloadChunk<'a>> for UnvalidatedTxDownloadChunk<'a> {
+impl<'a> From<RawTxDownloadChunk<'a>> for UnauthenticatedTxDownloadChunk<'a> {
     fn from(raw: RawTxDownloadChunk<'a>) -> Self {
         Self {
             chunk: TxDataChunk::from_blob(raw.chunk),
@@ -257,10 +257,10 @@ impl<'a> From<RawTxDownloadChunk<'a>> for UnvalidatedTxDownloadChunk<'a> {
     }
 }
 
-impl<'a> From<ValidatedTxDownloadChunk<'a>> for RawTxDownloadChunk<'a> {
-    fn from(value: ValidatedTxDownloadChunk<'a>) -> Self {
+impl<'a> From<AuthenticatedTxDownloadChunk<'a>> for RawTxDownloadChunk<'a> {
+    fn from(value: AuthenticatedTxDownloadChunk<'a>) -> Self {
         Self {
-            chunk: value.chunk.into_inner(),
+            chunk: value.chunk.into_inner().as_blob().into_owned(),
             data_path: value.data_path,
             tx_path: value.tx_path,
         }
