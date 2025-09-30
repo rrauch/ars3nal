@@ -1,6 +1,6 @@
 extern crate core;
 
-use crate::base64::{TryFromBase64, TryFromBase64Error};
+use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::Blob;
 use crate::crypto::hash::TypedDigest;
 use crate::crypto::hash::{Sha256, Sha384};
@@ -10,6 +10,7 @@ pub use rsa::Error as RsaError;
 pub use serde_json::Error as JsonError;
 pub use serde_json::Value as JsonValue;
 use std::convert::Infallible;
+use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
 use std::str::FromStr;
 use thiserror::Error;
@@ -51,7 +52,11 @@ impl BlockNumber {
 
 pub type BlockId = TypedDigest<BlockKind, Sha384>;
 
-impl WithDisplay for BlockId {}
+impl Display for BlockId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_base64().as_str())
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum BlockIdError {

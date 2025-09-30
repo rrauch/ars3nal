@@ -1,7 +1,7 @@
 use crate::api::RequestMethod::Post;
 use crate::api::{Api, ApiRequest, ApiRequestBody, ContentType, ViaJson};
 use crate::{Client, api};
-use ario_core::{BlockId, BlockIdError, BlockNumber, Gateway};
+use ario_core::{BlockId, BlockIdError, BlockNumber, Gateway, bundle, tx};
 use async_stream::try_stream;
 use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
@@ -18,12 +18,12 @@ use thiserror::Error;
 
 use crate::graphql::ConversionError::{ByteSizeError, InvalidTimestamp};
 use ario_core::base64::{Base64Error, FromBase64};
+use ario_core::bundle::{
+    BundleAnchor, BundleAnchorError, BundleId, BundleItemId, BundleItemIdError,
+};
 use ario_core::money::{AR, Money, MoneyError, Winston};
 use ario_core::tag::Tag;
-use ario_core::tx::{
-    Owner, QuantityError, Reward, RewardError, Signature, SignatureOwnerError, TxAnchor,
-    TxAnchorError, TxId, TxIdError,
-};
+use ario_core::tx::{QuantityError, Reward, RewardError, TxAnchor, TxAnchorError, TxId, TxIdError};
 use ario_core::wallet::{WalletAddress, WalletAddressError};
 use cynic::queries::{IsFieldType, SelectionBuilder};
 use cynic::schema::HasField;
@@ -65,7 +65,11 @@ pub enum ConversionError {
     #[error(transparent)]
     BlockIdError(#[from] BlockIdError),
     #[error(transparent)]
+    BundleItemIdError(#[from] BundleItemIdError),
+    #[error(transparent)]
     TxAnchorError(#[from] TxAnchorError),
+    #[error(transparent)]
+    BundleAnchorError(#[from] BundleAnchorError),
     #[error(transparent)]
     WalletAddressError(#[from] WalletAddressError),
     #[error(transparent)]
@@ -75,7 +79,7 @@ pub enum ConversionError {
     #[error("invalid byte size: {0}")]
     ByteSizeError(String),
     #[error(transparent)]
-    SignatureOwnerError(#[from] SignatureOwnerError),
+    TxSignatureOwnerError(#[from] tx::SignatureOwnerError),
     #[error(transparent)]
     Base64Error(#[from] Base64Error),
     #[error("invalid timestamp: {0}")]
@@ -122,13 +126,13 @@ impl Client {
     pub fn query_transactions<'a>(
         &'a self,
         tx_query: TxQuery<'a>,
-    ) -> impl Stream<Item = Result<Transaction, super::Error>> + Unpin {
+    ) -> impl Stream<Item = Result<TxQueryItem, super::Error>> + Unpin {
         self.query_transactions_with_fields::<MinimalTxResponse>(tx_query)
     }
     pub fn query_transactions_with_fields<'a, Fields: TxQueryFieldSelector>(
         &'a self,
         tx_query: TxQuery<'a>,
-    ) -> impl Stream<Item = Result<Transaction, super::Error>> + Unpin {
+    ) -> impl Stream<Item = Result<TxQueryItem, super::Error>> + Unpin {
         self._query_transactions::<RawTx<Fields>>(tx_query)
     }
 
@@ -137,10 +141,10 @@ impl Client {
     >(
         &self,
         tx_query: TxQuery<'_>,
-    ) -> Pin<Box<dyn Stream<Item = Result<Transaction, super::Error>> + '_>>
+    ) -> Pin<Box<dyn Stream<Item = Result<TxQueryItem, super::Error>> + '_>>
     where
         <T as QueryFragment>::SchemaType: IsFieldType<schema::Transaction>,
-        Transaction: TryFrom<T, Error: Into<GraphQlTxError>>,
+        TxQueryItem: TryFrom<T, Error: Into<GraphQlTxError>>,
     {
         let per_page = tx_query
             .results_per_page
@@ -182,8 +186,8 @@ impl Client {
                         eof = !tc.page_info.map(|p| p.has_next_page).flatten().unwrap_or(true);
                         tc.edges.into_iter().try_for_each(|e| {
                             cursor = e.cursor;
-                            let tx = Transaction::try_from(e.node).map_err(|e| api::Error::GraphQlError(GraphQlError::Tx(e.into())))?;
-                            batch_result.push_back(tx);
+                            let item = TxQueryItem::try_from(e.node).map_err(|e| api::Error::GraphQlError(GraphQlError::Tx(e.into())))?;
+                            batch_result.push_back(item);
                             Ok::<(), super::Error>(())
                         })?;
                     }
@@ -588,19 +592,35 @@ struct RawTx<S: TxQueryFieldSelector> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Transaction {
+pub struct Tx {
     pub id: TxId,
     pub anchor: Option<TxAnchor>,
-    pub signature: Option<Signature<'static>>,
+    pub signature: Option<tx::Signature<'static>>,
     pub recipient: Option<WalletAddress>,
-    pub owner: Option<Owner<'static>>,
+    pub owner: Option<tx::Owner<'static>>,
     pub fee: Option<Reward>,
     pub quantity: Option<Money<Winston>>,
     pub data_size: Option<ByteSize>,
     pub content_type: Option<String>,
     pub tags: Vec<Tag<'static>>,
     pub block: Option<Block>,
-    pub bundled_in: Option<TxId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BundleItem {
+    pub id: BundleItemId,
+    pub bundle_id: BundleId,
+    pub anchor: Option<BundleAnchor>,
+    pub data_size: Option<ByteSize>,
+    pub content_type: Option<String>,
+    pub tags: Vec<Tag<'static>>,
+    pub block: Option<Block>,
+}
+
+#[derive(Debug, Clone)]
+pub enum TxQueryItem {
+    Tx(Tx),
+    BundleItem(BundleItem),
 }
 
 #[derive(Debug, Clone)]
@@ -625,77 +645,99 @@ impl TryFrom<RawBlock> for Block {
     }
 }
 
-impl<S: TxQueryFieldSelector> TryFrom<RawTx<S>> for Transaction {
+impl<S: TxQueryFieldSelector> TryFrom<RawTx<S>> for TxQueryItem {
     type Error = ConversionError;
 
     fn try_from(value: RawTx<S>) -> Result<Self, Self::Error> {
-        let (signature, owner) = match (value.owner, value.signature) {
-            (Some(owner), Some(signature)) => {
-                let raw_owner = owner.key.try_from_base64()?;
-                let raw_signature = signature.try_from_base64()?;
-                Signature::from_raw_autodetect(raw_owner, raw_signature)
-                    .map(|(s, o)| (Some(s), Some(o)))?
-            }
-            _ => (None, None),
-        };
+        let data_size = value
+            .data
+            .as_ref()
+            .filter(|v| !v.size.is_empty())
+            .map(|v| {
+                u64::from_str(v.size.as_str())
+                    .map(|v| ByteSize::b(v))
+                    .map_err(|e| ByteSizeError(e.to_string()))
+            })
+            .transpose()?
+            .filter(|v| v.as_u64() != 0);
 
-        Ok(Self {
-            id: TxId::from_str(value.id.inner())?,
-            anchor: value
-                .anchor
-                .filter(|v| !v.is_empty())
-                .map(|v| TxAnchor::from_str(v.as_str()))
-                .transpose()?,
-            signature,
-            recipient: value
-                .recipient
-                .filter(|v| !v.is_empty())
-                .map(|v| WalletAddress::from_str(v.as_str()))
-                .transpose()?,
-            owner,
-            fee: value
-                .fee
-                .filter(|v| !v.winston.is_empty())
-                .map(|v| Reward::from_str(v.winston.as_str()))
-                .transpose()?,
-            quantity: value
-                .quantity
-                .filter(|v| !v.winston.is_empty())
-                .map(|v| Money::<Winston>::from_str(v.winston.as_str()))
-                .transpose()?
-                .filter(|v| !v.is_zero()),
-            data_size: value
-                .data
-                .as_ref()
-                .filter(|v| !v.size.is_empty())
-                .map(|v| {
-                    u64::from_str(v.size.as_str())
-                        .map(|v| ByteSize::b(v))
-                        .map_err(|e| ByteSizeError(e.to_string()))
-                })
-                .transpose()?
-                .filter(|v| v.as_u64() != 0),
-            content_type: value
-                .data
-                .filter(|v| match v.content_type.as_ref() {
-                    Some(v) => !v.is_empty(),
-                    None => false,
-                })
-                .map(|v| v.content_type)
-                .flatten(),
-            tags: value
-                .tags
-                .unwrap_or(vec![])
-                .into_iter()
-                .filter(|t| !t.name.is_empty())
-                .map(|t| Tag::from((t.name, t.value)))
-                .collect(),
-            block: value.block.map(|v| Block::try_from(v)).transpose()?,
-            bundled_in: value
-                .bundled_in
-                .filter(|v| !v.id.inner().is_empty())
-                .map(|v| TxId::from_str(v.id.inner()))
-                .transpose()?,
+        let content_type = value
+            .data
+            .filter(|v| match v.content_type.as_ref() {
+                Some(v) => !v.is_empty(),
+                None => false,
+            })
+            .map(|v| v.content_type)
+            .flatten();
+
+        let tags = value
+            .tags
+            .unwrap_or(vec![])
+            .into_iter()
+            .filter(|t| !t.name.is_empty())
+            .map(|t| Tag::from((t.name, t.value)))
+            .collect();
+
+        let block = value.block.map(|v| Block::try_from(v)).transpose()?;
+
+        Ok(if let Some(bundled_in) = &value.bundled_in {
+            // bundle item
+            // there isn't enough information available to reliably detect the signature / owner type
+            Self::BundleItem(BundleItem {
+                id: BundleItemId::from_str(value.id.inner())?,
+                bundle_id: BundleId::from_str(bundled_in.id.inner())?,
+                anchor: value
+                    .anchor
+                    .filter(|v| !v.is_empty())
+                    .map(|v| BundleAnchor::from_str(v.as_str()))
+                    .transpose()?,
+                data_size,
+                content_type,
+                tags,
+                block,
+            })
+        } else {
+            // plain tx
+            let (signature, owner) = match (&value.owner, &value.signature) {
+                (Some(owner), Some(signature)) => {
+                    let raw_owner = owner.key.try_from_base64()?;
+                    let raw_signature = signature.try_from_base64()?;
+                    tx::Signature::from_raw_autodetect(raw_owner, raw_signature)
+                        .map(|(s, o)| (Some(s), Some(o)))?
+                }
+                _ => (None, None),
+            };
+
+            Self::Tx(Tx {
+                id: TxId::from_str(value.id.inner())?,
+                anchor: value
+                    .anchor
+                    .filter(|v| !v.is_empty())
+                    .map(|v| TxAnchor::from_str(v.as_str()))
+                    .transpose()?,
+                signature,
+                recipient: value
+                    .recipient
+                    .filter(|v| !v.is_empty())
+                    .map(|v| WalletAddress::from_str(v.as_str()))
+                    .transpose()?,
+                owner,
+                fee: value
+                    .fee
+                    .filter(|v| !v.winston.is_empty())
+                    .map(|v| Reward::from_str(v.winston.as_str()))
+                    .transpose()?,
+                quantity: value
+                    .quantity
+                    .filter(|v| !v.winston.is_empty())
+                    .map(|v| Money::<Winston>::from_str(v.winston.as_str()))
+                    .transpose()?
+                    .filter(|v| !v.is_zero()),
+                data_size,
+                content_type,
+                tags,
+                block,
+            })
         })
     }
 }
@@ -712,7 +754,7 @@ impl<S: TxQueryFieldSelector> cynic::QueryFragment for RawTx<S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::graphql::{FullTxResponse, TxQuery, TxQueryFilterCriteria};
+    use crate::graphql::{FullTxResponse, TxQuery, TxQueryFilterCriteria, TxQueryItem};
     use ario_core::Gateway;
     use ario_core::network::Network;
     use futures_lite::StreamExt;
@@ -754,8 +796,15 @@ mod tests {
 
         let mut stream = client.query_transactions_with_fields::<FullTxResponse>(tx_query);
 
-        while let Some(tx) = stream.try_next().await? {
-            println!("tx: {:?}", tx);
+        while let Some(item) = stream.try_next().await? {
+            match item {
+                TxQueryItem::Tx(tx) => {
+                    println!("tx: {:?}", tx);
+                }
+                TxQueryItem::BundleItem(bundle_item) => {
+                    println!("bundle_item: {:?}", bundle_item);
+                }
+            }
         }
 
         Ok(())

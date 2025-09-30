@@ -1022,8 +1022,8 @@ mod tests {
         let tx_query = TxQuery::builder().filter_criteria(filter_criteria).build();
 
         let mut stream = client.query_transactions(tx_query);
-        while let Some(tx) = stream.try_next().await? {
-            println!("tx: {:?}", tx);
+        while let Some(item) = stream.try_next().await? {
+            println!("item: {:?}", item);
         }
         Ok(())
     }

@@ -7,7 +7,7 @@ pub use v2::{
     BundleItemProof as V2BundleItemProof, DataRoot as V2DataRoot,
 };
 
-use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
+use crate::base64::{Base64Error, FromBase64, ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::{AsBlob, Blob};
 use crate::bundle::v2::{ContainerLocation, FlowExt};
 use crate::bundle::v2::{
@@ -18,7 +18,7 @@ use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ethereum::{Eip191, Eip712};
 use crate::crypto::edwards::multi_aptos::{MultiAptosEd25519, MultiAptosVerifyingKey};
 use crate::crypto::edwards::variants::{Aptos, Ed25519HexStr};
-use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
+use crate::crypto::edwards::{ Ed25519, Ed25519VerifyingKey};
 use crate::crypto::hash::{HasherExt, Sha256, Sha384, TypedDigest};
 use crate::crypto::merkle::ProofError;
 use crate::crypto::rsa::pss::RsaPss;
@@ -803,6 +803,21 @@ impl<S: SignatureScheme> BundleItemSignature<S> {
 pub struct BundleAnchorKind;
 pub type BundleAnchor = Typed<BundleAnchorKind, Array<u8, U32>>;
 impl WithSerde for BundleAnchor {}
+
+#[derive(Error, Debug)]
+pub enum BundleAnchorError {
+    #[error(transparent)]
+    Base64Error(#[from] Base64Error),
+    #[error(transparent)]
+    BlobError(#[from] blob::Error),
+}
+impl FromStr for BundleAnchor {
+    type Err = BundleAnchorError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::try_from(s.try_from_base64()?)?)
+    }
+}
 
 impl Display for BundleAnchor {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

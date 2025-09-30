@@ -19,12 +19,10 @@ use crate::api::Api;
 use crate::routemaster::{Handle, Routemaster};
 use ario_core::Gateway;
 use ario_core::network::Network;
-use futures_concurrency::future::FutureExt;
 use reqwest::Client as ReqwestClient;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
-use tokio_util::future::FutureExt as TokioFutureExt;
 
 #[derive(Debug, Clone)]
 pub struct Client(Arc<Inner>);
