@@ -1,7 +1,7 @@
 use crate::api::RequestMethod::Post;
 use crate::api::{Api, ApiRequest, ApiRequestBody, ContentType, ViaJson};
 use crate::{Client, api};
-use ario_core::{BlockId, BlockNumber, Gateway};
+use ario_core::{BlockId, BlockIdError, BlockNumber, Gateway};
 use async_stream::try_stream;
 use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::str::FromStr;
 use thiserror::Error;
 
-use crate::graphql::ConversionError::ByteSizeError;
+use crate::graphql::ConversionError::{ByteSizeError, InvalidTimestamp};
 use ario_core::base64::{Base64Error, FromBase64};
 use ario_core::money::{AR, Money, MoneyError, Winston};
 use ario_core::tag::Tag;
@@ -63,6 +63,8 @@ pub enum ConversionError {
     #[error(transparent)]
     TxIdError(#[from] TxIdError),
     #[error(transparent)]
+    BlockIdError(#[from] BlockIdError),
+    #[error(transparent)]
     TxAnchorError(#[from] TxAnchorError),
     #[error(transparent)]
     WalletAddressError(#[from] WalletAddressError),
@@ -76,6 +78,8 @@ pub enum ConversionError {
     SignatureOwnerError(#[from] SignatureOwnerError),
     #[error(transparent)]
     Base64Error(#[from] Base64Error),
+    #[error("invalid timestamp: {0}")]
+    InvalidTimestamp(i64),
 }
 
 impl Api {
@@ -595,14 +599,30 @@ pub struct Transaction {
     pub data_size: Option<ByteSize>,
     pub content_type: Option<String>,
     pub tags: Vec<Tag<'static>>,
+    pub block: Option<Block>,
     pub bundled_in: Option<TxId>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Block {
     pub id: BlockId,
     pub timestamp: DateTime<Utc>,
     pub height: BlockNumber,
     pub previous: BlockId,
+}
+
+impl TryFrom<RawBlock> for Block {
+    type Error = ConversionError;
+
+    fn try_from(value: RawBlock) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: BlockId::from_str(value.id.inner())?,
+            timestamp: DateTime::from_timestamp(value.timestamp as i64, 0)
+                .ok_or(InvalidTimestamp(value.timestamp as i64))?,
+            height: BlockNumber::from_inner(value.height as u64),
+            previous: BlockId::from_str(value.previous.inner())?,
+        })
+    }
 }
 
 impl<S: TxQueryFieldSelector> TryFrom<RawTx<S>> for Transaction {
@@ -670,6 +690,7 @@ impl<S: TxQueryFieldSelector> TryFrom<RawTx<S>> for Transaction {
                 .filter(|t| !t.name.is_empty())
                 .map(|t| Tag::from((t.name, t.value)))
                 .collect(),
+            block: value.block.map(|v| Block::try_from(v)).transpose()?,
             bundled_in: value
                 .bundled_in
                 .filter(|v| !v.id.inner().is_empty())

@@ -1,12 +1,15 @@
 extern crate core;
 
-use crate::crypto::hash::Sha256;
+use crate::base64::{TryFromBase64, TryFromBase64Error};
+use crate::blob::Blob;
 use crate::crypto::hash::TypedDigest;
-use crate::typed::{Typed, WithDisplay, WithFromStr, WithSerde};
+use crate::crypto::hash::{Sha256, Sha384};
+use crate::typed::{Typed, WithDisplay, WithSerde};
 pub use rsa::BoxedUint as BigUint;
 pub use rsa::Error as RsaError;
 pub use serde_json::Error as JsonError;
 pub use serde_json::Value as JsonValue;
+use std::convert::Infallible;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use thiserror::Error;
@@ -40,10 +43,32 @@ pub type BlockNumber = Typed<BlockKind, u64>;
 impl WithSerde for BlockNumber {}
 impl WithDisplay for BlockNumber {}
 
-pub type BlockId = TypedDigest<BlockKind, Sha256>;
+impl BlockNumber {
+    pub fn from_inner(number: u64) -> Self {
+        Self::new_from_inner(number)
+    }
+}
+
+pub type BlockId = TypedDigest<BlockKind, Sha384>;
 
 impl WithDisplay for BlockId {}
-impl WithFromStr for BlockId {}
+
+#[derive(Error, Debug)]
+pub enum BlockIdError {
+    #[error(transparent)]
+    Base64Error(#[from] TryFromBase64Error<Infallible>),
+    #[error(transparent)]
+    BlobError(#[from] blob::Error),
+}
+
+impl FromStr for BlockId {
+    type Err = BlockIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = Blob::try_from_base64(s.as_bytes())?;
+        Ok(BlockId::try_from(bytes)?)
+    }
+}
 
 pub struct GatewayKind;
 pub type Gateway = Typed<GatewayKind, Url>;
