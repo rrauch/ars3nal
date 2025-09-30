@@ -81,13 +81,13 @@ impl<ID: Id, TAG> FromStr for TaggedId<ID, TAG> {
     }
 }
 
-struct Model<E: Entity> {
+pub(crate) struct Model<E: Entity> {
     header: Header<E::Header, E>,
     metadata: Metadata<E::Metadata, E>,
     _marker: PhantomData<E>,
 }
 
-trait Entity {
+pub(crate) trait Entity {
     const TYPE: &'static str;
 
     type Header;
@@ -118,7 +118,7 @@ trait DecryptExt<K, P, E> {
 }
 
 impl<E: Entity> Model<E> {
-    fn new(header: Header<E::Header, E>, metadata: Metadata<E::Metadata, E>) -> Self {
+    pub(crate) fn new(header: Header<E::Header, E>, metadata: Metadata<E::Metadata, E>) -> Self {
         Self {
             header,
             metadata,
@@ -138,7 +138,7 @@ impl<E: Entity> Model<E> {
 #[serde_as]
 #[derive_where(Debug, Clone, PartialEq; H)]
 #[derive(Serialize, Deserialize)]
-struct Header<H, T> {
+pub(crate) struct Header<H, T> {
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "ArFS")]
     version: ArFsVersion,
@@ -153,6 +153,9 @@ struct Header<H, T> {
 impl<H, T> Header<H, T> {
     pub fn version(&self) -> &ArFsVersion {
         &self.version
+    }
+    pub(crate) fn as_inner(&self) -> &H {
+        &self.inner
     }
 }
 
@@ -221,7 +224,7 @@ pub enum ParseError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct Metadata<M, Tag> {
+pub(crate) struct Metadata<M, Tag> {
     #[serde(flatten)]
     inner: M,
     #[serde(flatten)]
@@ -271,44 +274,44 @@ impl Entity for DriveKind {
     type Metadata = DriveMetadata;
 }
 
-type DriveEntity = Model<DriveKind>;
+pub(crate) type DriveEntity = Model<DriveKind>;
 
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct DriveHeader {
+pub(crate) struct DriveHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Cipher")]
-    cipher: Option<Cipher>,
+    pub cipher: Option<Cipher>,
     #[serde(rename = "Cipher-IV")]
-    cipher_iv: Option<OwnedBlob>,
+    pub cipher_iv: Option<OwnedBlob>,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Content-Type")]
-    content_type: ContentType,
+    pub content_type: ContentType,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Drive-Id")]
-    drive_id: DriveId,
+    pub drive_id: DriveId,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Drive-Privacy")]
-    privacy: Privacy,
+    pub privacy: Privacy,
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Drive-Auth-Mode")]
-    auth_mode: Option<AuthMode>,
+    pub auth_mode: Option<AuthMode>,
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Signature-Type")]
-    signature_type: Option<SignatureFormat>,
+    pub signature_type: Option<SignatureFormat>,
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
     #[serde(rename = "Unix-Time")]
-    time: DateTime<Utc>,
+    pub time: DateTime<Utc>,
 }
 
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct DriveMetadata {
-    name: String,
+pub(crate) struct DriveMetadata {
+    pub name: String,
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "rootFolderId")]
-    root_folder_id: FolderId,
+    pub root_folder_id: FolderId,
 }
 
 pub struct DriveSignatureKind;
@@ -324,7 +327,7 @@ type DriveSignatureEntity = Model<DriveSignatureKind>;
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct DriveSignatureHeader {
+pub(crate) struct DriveSignatureHeader {
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Signature-Format")]
     signature_format: SignatureFormat,
@@ -376,7 +379,7 @@ type FolderEntity = Model<FolderKind>;
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct FolderHeader {
+pub(crate) struct FolderHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Cipher")]
     cipher: Option<Cipher>,
@@ -401,7 +404,7 @@ struct FolderHeader {
 
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct FolderMetadata {
+pub(crate) struct FolderMetadata {
     name: String,
     #[serde(rename = "isHidden", default = "bool_false")]
     hidden: bool,
@@ -426,7 +429,7 @@ type FileEntity = Model<FileKind>;
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct FileHeader {
+pub(crate) struct FileHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Cipher")]
     cipher: Option<Cipher>,
@@ -452,7 +455,7 @@ struct FileHeader {
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct FileMetadata {
+pub(crate) struct FileMetadata {
     name: String,
     size: u64,
     #[serde_as(as = "TimestampMilliSeconds")]
@@ -484,7 +487,7 @@ type SnapshotEntity = Model<SnapshotKind>;
 
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct SnapshotHeader {
+pub(crate) struct SnapshotHeader {
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Drive-Id")]
     drive_id: DriveId,
@@ -515,13 +518,13 @@ fn unsupported_privacy_err(s: &str) -> ParseError {
     ParseError::UnsupportedPrivacy(s.to_string())
 }
 
-#[derive(Debug, Clone, PartialEq, EnumString, strum::Display)]
+#[derive(Debug, Copy, Clone, PartialEq, EnumString, strum::Display)]
 #[strum(
     parse_err_fn = unsupported_privacy_err,
     parse_err_ty = ParseError,
     serialize_all = "snake_case"
 )]
-enum Privacy {
+pub(crate) enum Privacy {
     Public,
     Private,
 }
@@ -530,13 +533,13 @@ fn unsupported_auth_mode_err(s: &str) -> ParseError {
     ParseError::UnsupportedAuthMode(s.to_string())
 }
 
-#[derive(Debug, Clone, PartialEq, EnumString, strum::Display)]
+#[derive(Debug, Copy, Clone, PartialEq, EnumString, strum::Display)]
 #[strum(
     parse_err_fn = unsupported_auth_mode_err,
     parse_err_ty = ParseError,
     serialize_all = "snake_case"
 )]
-enum AuthMode {
+pub(crate) enum AuthMode {
     Password,
 }
 

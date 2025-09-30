@@ -1,5 +1,5 @@
 query {
-    transactions(first: 100) {
+    transactions(first: 100, ids: ["2JO_Dp7sphHpDuo0ztrjEhCZ1V5N5ar7uUpF0jabg-4"]) {
         pageInfo {
             hasNextPage
         }

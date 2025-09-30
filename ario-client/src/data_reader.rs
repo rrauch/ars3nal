@@ -1,5 +1,6 @@
 use crate::Client;
 use crate::tx::Offset;
+use ario_core::MaybeOwned;
 use ario_core::bundle::{AuthenticatedBundleItem, BundleEntry, BundleItemAuthenticator};
 use ario_core::chunking::{DefaultChunker, MostlyFixedChunkMap};
 use ario_core::data::{AuthenticatedTxDataChunk, Authenticator, DataItem, DataRoot};
@@ -8,7 +9,6 @@ use bytes::Buf;
 use futures_lite::{AsyncRead, AsyncSeek};
 use futures_lite::{FutureExt, ready};
 use itertools::Itertools;
-use maybe_owned::MaybeOwned;
 use rangemap::RangeMap;
 use std::cmp::{max, min};
 use std::collections::VecDeque;
@@ -31,7 +31,7 @@ pub enum Error {
     DataValidationFailure(String),
 }
 
-pub(crate) struct AsyncDataReader<D: DataSource> {
+pub struct AsyncDataReader<D: DataSource> {
     pos: u64,
     len: u64,
     state: State<D::Chunk>,
@@ -190,7 +190,7 @@ impl Chunk for TxChunk {
     }
 }
 
-pub(crate) struct TxDataSource<'a> {
+pub struct TxDataSource<'a> {
     tx: MaybeOwned<'a, AuthenticatedTx<'a>>,
     tx_offset: Offset,
     data_root: Arc<DataRoot>,
@@ -275,7 +275,7 @@ impl DataSource for TxDataSource<'_> {
     }
 }
 
-pub(crate) struct BundleItemDataSource<'a> {
+pub struct BundleItemDataSource<'a> {
     entry: MaybeOwned<'a, BundleEntry<'a>>,
     item: MaybeOwned<'a, AuthenticatedBundleItem<'a>>,
     data_authenticator: Arc<BundleItemAuthenticator<'static>>,

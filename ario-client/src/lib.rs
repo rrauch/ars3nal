@@ -2,7 +2,7 @@ mod api;
 mod bundle;
 pub mod cache;
 pub mod chunk;
-mod data_reader;
+pub mod data_reader;
 mod gateway;
 #[cfg(feature = "graphql")]
 pub mod graphql;

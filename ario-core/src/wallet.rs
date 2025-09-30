@@ -23,7 +23,7 @@ use crate::jwk::Jwk;
 use crate::tx::v2::TxDraft;
 use crate::tx::{AuthenticatedTx, TxError};
 use crate::typed::{FromInner, WithDisplay, WithSerde};
-use crate::{Address, blob};
+use crate::{Address, blob, entity};
 use bip39::Mnemonic;
 use bytemuck::TransparentWrapper;
 use k256::Secp256k1;
@@ -138,6 +138,10 @@ impl Wallet {
         };
         Ok(draft.sign::<S>(signer)?)
     }
+
+    pub(crate) fn to_entity_owner(&self) -> entity::Owner<'_> {
+        self.0.to_entity_owner()
+    }
 }
 
 #[derive(Error, Debug)]
@@ -182,6 +186,16 @@ impl WalletInner {
         any_signer
             .downcast_ref::<S::Signer>()
             .map(|s| WalletSk::wrap_ref(s))
+    }
+
+    fn to_entity_owner(&self) -> entity::Owner<'_> {
+        match self {
+            Self::Rsa4096(sk) => sk.public_key().into(),
+            Self::Rsa2048(sk) => sk.public_key().into(),
+            Self::Secp256k1(sk) => sk.public_key().into(),
+            Self::Ed25519(sk) => sk.public_key().into(),
+            Self::MultiAptos(sk) => sk.public_key().into(),
+        }
     }
 }
 

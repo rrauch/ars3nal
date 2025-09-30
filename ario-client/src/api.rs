@@ -1,11 +1,11 @@
 use ario_core::JsonValue;
+use ario_core::MaybeOwned;
 use ario_core::network::Network;
 use bon::Builder;
 use buf_list::{BufList, Cursor};
 use bytes::{Bytes, BytesMut};
 use bytesize::ByteSize;
 use futures_lite::{Stream, StreamExt};
-use maybe_owned::MaybeOwned;
 use reqwest::Client as ReqwestClient;
 use serde::de::DeserializeOwned;
 use std::fmt::{Debug, Formatter};

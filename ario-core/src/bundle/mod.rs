@@ -18,7 +18,7 @@ use crate::crypto::ec::EcPublicKey;
 use crate::crypto::ec::ethereum::{Eip191, Eip712};
 use crate::crypto::edwards::multi_aptos::{MultiAptosEd25519, MultiAptosVerifyingKey};
 use crate::crypto::edwards::variants::{Aptos, Ed25519HexStr};
-use crate::crypto::edwards::{ Ed25519, Ed25519VerifyingKey};
+use crate::crypto::edwards::{Ed25519, Ed25519VerifyingKey};
 use crate::crypto::hash::{HasherExt, Sha256, Sha384, TypedDigest};
 use crate::crypto::merkle::ProofError;
 use crate::crypto::rsa::pss::RsaPss;
@@ -534,6 +534,13 @@ impl<'a, const AUTHENTICATED: bool> BundleItem<'a, AUTHENTICATED> {
             Self::V2(_) => BundleType::V2,
         }
     }
+
+    #[inline]
+    pub fn owner(&self) -> Owner<'_> {
+        match self {
+            Self::V2(v2) => v2.owner(),
+        }
+    }
 }
 
 pub struct BundleItemKind;
@@ -825,7 +832,7 @@ impl Display for BundleAnchor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Owner<'a> {
     Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
     Secp256k1(MaybeOwned<'a, WalletPk<EcPublicKey<Secp256k1>>>),

@@ -1,7 +1,7 @@
 mod bundler;
 
 use crate::data_reader::{AsyncBundleItemReader, AsyncTxReader};
-use crate::{Client, api};
+use crate::{Client, api, data_reader};
 use ario_core::bundle::{
     AuthenticatedBundleItem, Bundle, BundleEntry, BundleId, BundleItemAuthenticator, BundleItemId,
     BundleItemReader, BundleReader,
@@ -111,16 +111,14 @@ impl Client {
     pub async fn read_bundle_item(
         &self,
         item: &AuthenticatedBundleItem<'_>,
-    ) -> Result<Option<impl AsyncRead + AsyncSeek + Send + Unpin + 'static>, super::Error> {
+    ) -> Result<AsyncBundleItemReader, super::Error> {
         let (entry, item, authenticator, tx) =
             match self._bundle_item(item.id(), item.bundle_id()).await? {
                 Some((entry, item, authenticator, tx, ..)) => (entry, item, authenticator, tx),
-                None => return Ok(None),
+                None => return Err(data_reader::Error::UnsupportedDataItem)?,
             };
 
-        Ok(Some(
-            AsyncBundleItemReader::new(self.clone(), entry, item, authenticator, tx).await?,
-        ))
+        Ok(AsyncBundleItemReader::new(self.clone(), entry, item, authenticator, tx).await?)
     }
 }
 
@@ -161,7 +159,7 @@ mod tests {
         let len = item.data_size() as usize;
 
         let mut read = 0;
-        let mut reader = client.read_bundle_item(&item).await?.unwrap();
+        let mut reader = client.read_bundle_item(&item).await?;
 
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 64 * 1024];

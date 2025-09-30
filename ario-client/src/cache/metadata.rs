@@ -2,12 +2,12 @@ use crate::Cache;
 use crate::cache::Error::L2Error;
 use crate::cache::{Context, Error, HasWeight, InnerCache, L2MetadataCache};
 use crate::tx::Offset as TxOffset;
+use ario_core::MaybeOwned;
 use ario_core::bundle::{
     AuthenticatedBundleItem, Bundle, BundleId, BundleItemAuthenticator, BundleItemId,
     UnauthenticatedBundleItem,
 };
 use ario_core::tx::{AuthenticatedTx, TxId, UnauthenticatedTx};
-use maybe_owned::MaybeOwned;
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::fmt::Debug;

@@ -1,7 +1,7 @@
 use crate::api::RequestMethod::Post;
 use crate::api::{Api, ApiRequest, ApiRequestBody, ContentType, ViaJson};
 use crate::{Client, api};
-use ario_core::{BlockId, BlockIdError, BlockNumber, Gateway, bundle, tx};
+use ario_core::{BlockId, BlockIdError, BlockNumber, Gateway, tx};
 use async_stream::try_stream;
 use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
@@ -17,6 +17,7 @@ use std::str::FromStr;
 use thiserror::Error;
 
 use crate::graphql::ConversionError::{ByteSizeError, InvalidTimestamp};
+use ario_core::MaybeOwned;
 use ario_core::base64::{Base64Error, FromBase64};
 use ario_core::bundle::{
     BundleAnchor, BundleAnchorError, BundleId, BundleItemId, BundleItemIdError,
@@ -30,7 +31,6 @@ use cynic::schema::HasField;
 use cynic::{Operation, OperationBuilder, QueryFragment, QueryVariablesFields};
 use derive_where::derive_where;
 use futures_lite::Stream;
-use maybe_owned::MaybeOwned;
 
 #[cynic::schema("arweave")]
 mod schema {}
@@ -126,22 +126,22 @@ impl Client {
     pub fn query_transactions<'a>(
         &'a self,
         tx_query: TxQuery<'a>,
-    ) -> impl Stream<Item = Result<TxQueryItem, super::Error>> + Unpin {
+    ) -> impl Stream<Item = Result<TxQueryItem, super::Error>> + Send + Unpin {
         self.query_transactions_with_fields::<MinimalTxResponse>(tx_query)
     }
-    pub fn query_transactions_with_fields<'a, Fields: TxQueryFieldSelector>(
+    pub fn query_transactions_with_fields<'a, Fields: TxQueryFieldSelector + Send>(
         &'a self,
         tx_query: TxQuery<'a>,
-    ) -> impl Stream<Item = Result<TxQueryItem, super::Error>> + Unpin {
+    ) -> impl Stream<Item = Result<TxQueryItem, super::Error>> + Send + Unpin {
         self._query_transactions::<RawTx<Fields>>(tx_query)
     }
 
     fn _query_transactions<
-        T: QueryFragment<VariablesFields = ()> + Debug + for<'de> Deserialize<'de>,
+        T: QueryFragment<VariablesFields = ()> + Debug + for<'de> Deserialize<'de> + Send,
     >(
         &self,
         tx_query: TxQuery<'_>,
-    ) -> Pin<Box<dyn Stream<Item = Result<TxQueryItem, super::Error>> + '_>>
+    ) -> Pin<Box<dyn Stream<Item = Result<TxQueryItem, super::Error>> + Send + '_>>
     where
         <T as QueryFragment>::SchemaType: IsFieldType<schema::Transaction>,
         TxQueryItem: TryFrom<T, Error: Into<GraphQlTxError>>,
@@ -208,7 +208,8 @@ pub struct TxQuery<'a> {
     max_results: Option<NonZeroUsize>,
     #[builder(into)]
     results_per_page: Option<NonZeroUsize>,
-    sort_order: Option<SortOrder>,
+    #[builder(default)]
+    sort_order: SortOrder,
 }
 
 #[derive(Debug, Clone, bon::Builder)]
@@ -225,10 +226,10 @@ pub struct TxQueryFilterCriteria<'a> {
             iter.into_iter().map(|v| v.into()).collect()
         }, default)]
     recipients: Vec<MaybeOwned<'a, WalletAddress>>,
-    #[builder(with = |iter: impl IntoIterator<Item: Into<MaybeOwned<'a, TagFilter<'a>>>>| {
+    #[builder(with = |iter: impl IntoIterator<Item: Into<TagFilter<'a>>>| {
             iter.into_iter().map(|v| v.into()).collect()
         }, default)]
-    tags: Vec<MaybeOwned<'a, TagFilter<'a>>>,
+    tags: Vec<TagFilter<'a>>,
     #[builder(with = |iter: impl IntoIterator<Item: Into<MaybeOwned<'a, TxId>>>| {
             iter.into_iter().map(|v| v.into()).collect()
         }, default)]
@@ -236,10 +237,19 @@ pub struct TxQueryFilterCriteria<'a> {
     block_range: Option<BlockRange>,
 }
 
-#[derive(Copy, Debug, Clone)]
+#[derive(cynic::Enum, Copy, Debug, Clone)]
+#[cynic(graphql_type = "SortOrder")]
 pub enum SortOrder {
+    #[cynic(rename = "HEIGHT_ASC")]
     HeightAscending,
+    #[cynic(rename = "HEIGHT_DESC")]
     HeightDescending,
+}
+
+impl Default for SortOrder {
+    fn default() -> Self {
+        Self::HeightDescending
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -248,10 +258,49 @@ pub struct BlockRange {
     pub end: BlockNumber,
 }
 
-#[derive(Debug, Clone)]
+#[derive(cynic::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+#[cynic(graphql_type = "TagOperator")]
+pub enum TagOperator {
+    #[cynic(rename = "EQ")]
+    Equal,
+    #[cynic(rename = "NEQ")]
+    NotEqual,
+}
+
+impl Default for TagOperator {
+    fn default() -> Self {
+        Self::Equal
+    }
+}
+
+#[derive(Debug, Clone, bon::Builder)]
 pub struct TagFilter<'a> {
-    pub name: Cow<'a, str>,
-    pub values: Vec<Cow<'a, str>>,
+    #[builder(into)]
+    name: Cow<'a, str>,
+    #[builder(with = |iter: impl IntoIterator<Item: Into<Cow<'a, str>>>| {
+            iter.into_iter().map(|v| v.into()).collect()
+        }, default)]
+    values: Vec<Cow<'a, str>>,
+    #[builder(default)]
+    operator: TagOperator,
+}
+
+#[derive(cynic::InputObject, Debug, Clone)]
+#[cynic(graphql_type = "TagFilter")]
+struct RawTagFilter {
+    name: String,
+    values: Vec<String>,
+    op: TagOperator,
+}
+
+impl<'a> From<TagFilter<'a>> for RawTagFilter {
+    fn from(value: TagFilter<'a>) -> Self {
+        Self {
+            name: value.name.into_owned(),
+            values: value.values.into_iter().map(|v| v.into_owned()).collect(),
+            op: value.operator.into(),
+        }
+    }
 }
 
 #[derive(cynic::QueryVariables, cynic::QueryVariableLiterals, Debug, Clone)]
@@ -267,7 +316,12 @@ struct TxQueryVariables {
     #[cynic(skip_serializing_if = "Option::is_none")]
     block_range: Option<RawBlockFilter>,
     #[cynic(skip_serializing_if = "Option::is_none")]
+    tags: Option<Vec<RawTagFilter>>,
+    #[cynic(skip_serializing_if = "Option::is_none")]
     after: Option<String>,
+    #[cynic(skip_serializing_if = "Option::is_none")]
+    first: Option<i32>,
+    sort_order: SortOrder,
 }
 
 #[derive(cynic::InputObject, Debug, Clone)]
@@ -337,7 +391,21 @@ impl<'a> From<&'a TxQuery<'a>> for TxQueryVariables {
                         .collect(),
                 )
             },
+            tags: if value.filter_criteria.tags.is_empty() {
+                None
+            } else {
+                Some(
+                    value
+                        .filter_criteria
+                        .tags
+                        .iter()
+                        .map(|v| v.clone().into())
+                        .collect(),
+                )
+            },
             block_range: value.filter_criteria.block_range.clone().map(|v| v.into()),
+            first: value.results_per_page.map(|v| v.get() as i32),
+            sort_order: value.sort_order,
             after: None,
         }
     }
@@ -391,7 +459,7 @@ struct GraphQlTxQuery<T: QueryFragment<VariablesFields = ()> + Debug>
 where
     <T as QueryFragment>::SchemaType: IsFieldType<schema::Transaction>,
 {
-    #[arguments(ids: $ids, owners: $owners, recipients: $recipients)]
+    #[arguments(ids: $ids, owners: $owners, recipients: $recipients, tags: $tags, bundledIn: $bundled_in, block: $block_range, first: $first, sort: $sort_order)]
     transactions: Option<TransactionConnection<T>>,
 }
 
@@ -586,6 +654,7 @@ struct RawTx<S: TxQueryFieldSelector> {
     data: Option<RawMetadata>,
     tags: Option<Vec<RawTag>>,
     block: Option<RawBlock>,
+    #[serde(rename = "bundledIn")]
     bundled_in: Option<RawBundle>,
     #[serde(skip)]
     _phantom: PhantomData<S>,
@@ -618,9 +687,75 @@ pub struct BundleItem {
 }
 
 #[derive(Debug, Clone)]
+pub enum ItemId<'a> {
+    Tx(MaybeOwned<'a, TxId>),
+    BundleItem {
+        item_id: MaybeOwned<'a, BundleItemId>,
+        bundle_id: MaybeOwned<'a, BundleId>,
+    },
+}
+
+impl<'a> ItemId<'a> {
+    pub fn into_owned(self) -> ItemId<'static> {
+        match self {
+            Self::Tx(tx) => ItemId::Tx(tx.into_owned().into()),
+            Self::BundleItem { bundle_id, item_id } => ItemId::BundleItem {
+                bundle_id: bundle_id.into_owned().into(),
+                item_id: item_id.into_owned().into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum TxQueryItem {
     Tx(Tx),
     BundleItem(BundleItem),
+}
+
+impl TxQueryItem {
+    #[inline]
+    pub fn id(&self) -> ItemId<'_> {
+        match self {
+            Self::Tx(tx) => ItemId::Tx(MaybeOwned::Borrowed(&tx.id)),
+            Self::BundleItem(bundle_item) => ItemId::BundleItem {
+                item_id: MaybeOwned::Borrowed(&bundle_item.id),
+                bundle_id: MaybeOwned::Borrowed(&bundle_item.bundle_id),
+            },
+        }
+    }
+
+    #[inline]
+    pub fn data_size(&self) -> Option<ByteSize> {
+        match self {
+            Self::Tx(tx) => tx.data_size,
+            Self::BundleItem(bundle_item) => bundle_item.data_size,
+        }
+    }
+
+    #[inline]
+    pub fn content_type(&self) -> Option<&String> {
+        match self {
+            Self::Tx(tx) => tx.content_type.as_ref(),
+            Self::BundleItem(bundle_item) => bundle_item.content_type.as_ref(),
+        }
+    }
+
+    #[inline]
+    pub fn tags(&self) -> &Vec<Tag<'static>> {
+        match self {
+            Self::Tx(tx) => &tx.tags,
+            Self::BundleItem(bundle_item) => &bundle_item.tags,
+        }
+    }
+
+    #[inline]
+    pub fn block(&self) -> Option<&Block> {
+        match self {
+            Self::Tx(tx) => tx.block.as_ref(),
+            Self::BundleItem(bundle_item) => bundle_item.block.as_ref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

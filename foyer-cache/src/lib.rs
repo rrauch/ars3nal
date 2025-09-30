@@ -68,7 +68,7 @@ mod tests {
             let len = item.data_size() as usize;
 
             let mut read = 0;
-            let mut reader = client.read_bundle_item(&item).await?.unwrap();
+            let mut reader = client.read_bundle_item(&item).await?;
 
             let mut hasher = Sha256::new();
             let mut buf = vec![0u8; 64 * 1024];

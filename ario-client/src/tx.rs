@@ -5,6 +5,7 @@ use crate::api::{
 };
 use crate::routemaster::Handle;
 use crate::{Client, api};
+use ario_core::MaybeOwned;
 use ario_core::blob::Blob;
 use ario_core::data::{Authenticator, UnauthenticatedTxDataChunk};
 use ario_core::data::{DataItem, ExternalDataItemAuthenticator, MaybeOwnedExternalDataItem};
@@ -15,7 +16,6 @@ use bytesize::ByteSize;
 use derive_where::derive_where;
 use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, Stream};
 use itertools::Itertools;
-use maybe_owned::MaybeOwned;
 use serde::Deserialize;
 use serde_with::DisplayFromStr;
 use serde_with::base64::Base64;

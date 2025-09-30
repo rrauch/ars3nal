@@ -7,6 +7,7 @@ edition = "2024"
 ario-client = { workspace = true, features = ["graphql"] }
 ario-core = { workspace = true }
 
+async-stream = { workspace = true }
 chrono = { workspace = true }
 derive_more = { workspace = true, features = ["full"] }
 derive-where = { workspace = true }

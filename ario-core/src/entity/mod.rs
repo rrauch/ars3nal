@@ -15,7 +15,7 @@ use crate::crypto::rsa::pss::RsaPss;
 use crate::crypto::signature::Scheme as SignatureScheme;
 use crate::crypto::{keys, signature};
 use crate::typed::WithSerde;
-use crate::wallet::{WalletAddress, WalletKind, WalletPk};
+use crate::wallet::{Wallet, WalletAddress, WalletKind, WalletPk};
 use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use std::borrow::Cow;
@@ -75,13 +75,61 @@ impl<T: ?Sized> ToSignableMessage for T {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Owner<'a> {
     Rsa4096(MaybeOwned<'a, WalletPk<RsaPublicKey<4096>>>),
     Rsa2048(MaybeOwned<'a, WalletPk<RsaPublicKey<2048>>>),
     Secp256k1(MaybeOwned<'a, WalletPk<EcPublicKey<Secp256k1>>>),
     Ed25519(MaybeOwned<'a, WalletPk<Ed25519VerifyingKey>>),
     MultiAptos(MaybeOwned<'a, WalletPk<MultiAptosVerifyingKey>>),
+}
+
+impl<'a> Owner<'a> {
+    pub fn into_owned(self) -> Owner<'static> {
+        match self {
+            Self::Rsa4096(inner) => Owner::Rsa4096(inner.into_owned().into()),
+            Self::Rsa2048(inner) => Owner::Rsa2048(inner.into_owned().into()),
+            Self::Secp256k1(inner) => Owner::Secp256k1(inner.into_owned().into()),
+            Self::Ed25519(inner) => Owner::Ed25519(inner.into_owned().into()),
+            Self::MultiAptos(inner) => Owner::MultiAptos(inner.into_owned().into()),
+        }
+    }
+}
+
+impl<'a> From<&'a Wallet> for Owner<'a> {
+    fn from(value: &'a Wallet) -> Self {
+        value.to_entity_owner()
+    }
+}
+
+impl<'a> From<&'a WalletPk<RsaPublicKey<4096>>> for Owner<'a> {
+    fn from(value: &'a WalletPk<RsaPublicKey<4096>>) -> Self {
+        Self::Rsa4096(value.into())
+    }
+}
+
+impl<'a> From<&'a WalletPk<RsaPublicKey<2048>>> for Owner<'a> {
+    fn from(value: &'a WalletPk<RsaPublicKey<2048>>) -> Self {
+        Self::Rsa2048(value.into())
+    }
+}
+
+impl<'a> From<&'a WalletPk<EcPublicKey<Secp256k1>>> for Owner<'a> {
+    fn from(value: &'a WalletPk<EcPublicKey<Secp256k1>>) -> Self {
+        Self::Secp256k1(value.into())
+    }
+}
+
+impl<'a> From<&'a WalletPk<Ed25519VerifyingKey>> for Owner<'a> {
+    fn from(value: &'a WalletPk<Ed25519VerifyingKey>) -> Self {
+        Self::Ed25519(value.into())
+    }
+}
+
+impl<'a> From<&'a WalletPk<MultiAptosVerifyingKey>> for Owner<'a> {
+    fn from(value: &'a WalletPk<MultiAptosVerifyingKey>) -> Self {
+        Self::MultiAptos(value.into())
+    }
 }
 
 impl<'a> Owner<'a> {

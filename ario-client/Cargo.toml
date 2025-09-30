@@ -9,7 +9,7 @@ graphql = ["dep:cynic"]
 [dependencies]
 ario-core = { workspace = true }
 
-async-stream = "0.3"
+async-stream = { workspace = true }
 bon = { workspace = true }
 buf-list = "1.0"
 bytes = { workspace = true }
@@ -23,7 +23,6 @@ dynosaur = "0.3"
 futures-concurrency = "7.6"
 futures-lite = { workspace = true }
 itertools = "0.14"
-maybe-owned = { workspace = true }
 moka = { version = "0.12", features = ["future"] }
 n0-watcher = "0.3"
 netwatch = "0.8"

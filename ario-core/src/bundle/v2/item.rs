@@ -9,7 +9,7 @@ use crate::bundle::v2::{
 };
 use crate::bundle::{
     BundleAnchor, BundleId, BundleItemError, BundleItemHash, BundleItemId, BundleItemIdError,
-    Error, TagError,
+    Error, Owner, TagError,
 };
 use crate::chunking::DefaultChunker;
 use crate::crypto::hash::HashableExt;
@@ -73,6 +73,11 @@ impl<'a, const AUTHENTICATED: bool> BundleItem<'a, AUTHENTICATED> {
     #[inline]
     pub fn data_offset(&self) -> u64 {
         self.0.data_offset
+    }
+
+    #[inline]
+    pub fn owner(&self) -> Owner<'_> {
+        self.0.signature_data.owner()
     }
 }
 
