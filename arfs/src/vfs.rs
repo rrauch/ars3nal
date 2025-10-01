@@ -69,11 +69,7 @@ impl Vfs {
         todo!()
     }
 
-    pub async fn inode_by_path<P: TryInto<VfsPath, Error = VfsPathError>>(
-        &self,
-        path: P,
-    ) -> Result<Inode, Error> {
-        let path = path.try_into()?;
+    pub async fn inode_by_path(&self, path: &VfsPath) -> Result<Inode, Error> {
         todo!()
     }
 }
@@ -250,7 +246,7 @@ pub enum Inode {
 
 #[cfg(test)]
 mod tests {
-    use crate::vfs::{NameError, VfsPath, VfsPathError};
+    use crate::vfs::{InodeId, InodeIdError, NameError, VfsPath, VfsPathError};
 
     #[test]
     fn vfs_path() -> anyhow::Result<()> {
@@ -265,6 +261,12 @@ mod tests {
 
         let path = VfsPath::try_from("/foo/baz/../bar")?;
         assert_eq!(path.as_ref(), "/foo/bar");
+
+        let path = VfsPath::try_from("/")?;
+        assert_eq!(path.as_ref(), "/");
+
+        let path = VfsPath::try_from("///")?;
+        assert_eq!(path.as_ref(), "/");
 
         assert!(matches!(
             VfsPath::try_from("../foo/bar"),
@@ -284,6 +286,19 @@ mod tests {
         assert!(matches!(
             VfsPath::try_from("/|invalid|/bar"),
             Err(VfsPathError::NameError(NameError::InvalidCharacter))
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn inode_id() -> anyhow::Result<()> {
+        let id = InodeId::try_from(9999)?;
+        assert_eq!(*id, 9999);
+
+        assert!(matches!(
+            InodeId::try_from(123),
+            Err(InodeIdError::Reserved)
         ));
 
         Ok(())
