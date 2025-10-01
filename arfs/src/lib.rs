@@ -2,14 +2,17 @@ extern crate core;
 
 pub(crate) mod serde_tag;
 pub(crate) mod types;
+mod vfs;
 
 pub use ario_core::bundle::Owner as BundleOwner;
 pub use ario_core::tx::Owner as TxOwner;
-pub use types::{ArFsVersion, DriveId};
+pub use types::{ArFsVersion, ContentType, DriveId};
+pub use vfs::{Directory, File, Inode, Vfs};
 
 use crate::types::{
     AuthMode, DriveEntity, DriveHeader, DriveKind, DriveMetadata, Entity, Header, Metadata, Privacy,
 };
+use crate::vfs::Error as VfsError;
 use ario_client::Client;
 use ario_client::Error as ClientError;
 use ario_client::data_reader::{AsyncBundleItemReader, AsyncTxReader};
@@ -25,6 +28,7 @@ use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeek, Stream, StreamExt};
 use serde_json::Error as JsonError;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
+use std::sync::Arc;
 use thiserror::Error;
 use zeroize::Zeroize;
 
@@ -36,6 +40,8 @@ pub enum Error {
     ClientError(#[from] ClientError),
     #[error(transparent)]
     IoError(#[from] std::io::Error),
+    #[error(transparent)]
+    VfsError(#[from] VfsError),
 }
 
 #[derive(Error, Debug)]
@@ -119,6 +125,10 @@ impl<PRIVACY, MODE> ArFs<PRIVACY, MODE> {
 
     pub fn created_at(&self) -> &DateTime<Utc> {
         &self.drive.header().as_inner().time
+    }
+
+    pub async fn vfs(&self) -> Arc<Vfs> {
+        todo!()
     }
 
     fn display(

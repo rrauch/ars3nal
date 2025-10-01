@@ -94,29 +94,6 @@ pub(crate) trait Entity {
     type Metadata;
 }
 
-trait Encryptable {
-    type EncryptionKey;
-    type DecryptionKey;
-    type Error: Display + Send;
-
-    type Ciphertext;
-    type Plaintext;
-}
-
-trait EncryptExt<E: Encryptable> {
-    fn encrypt(&self, key: &E::EncryptionKey) -> Result<E::Ciphertext, E::Error>;
-}
-
-impl<E: Encryptable> EncryptExt<E> for E::Plaintext {
-    fn encrypt(&self, key: &E::EncryptionKey) -> Result<E::Ciphertext, E::Error> {
-        todo!()
-    }
-}
-
-trait DecryptExt<K, P, E> {
-    fn decrypt(&self, key: &K) -> Result<P, E>;
-}
-
 impl<E: Entity> Model<E> {
     pub(crate) fn new(header: Header<E::Header, E>, metadata: Metadata<E::Metadata, E>) -> Self {
         Self {
@@ -545,7 +522,7 @@ pub(crate) enum AuthMode {
 
 #[derive(Debug, Clone, PartialEq, EnumString, strum::Display)]
 #[strum(serialize_all = "lowercase", ascii_case_insensitive)]
-enum ContentType {
+pub enum ContentType {
     #[strum(serialize = "application/json")]
     Json,
     #[strum(serialize = "application/octet-stream")]

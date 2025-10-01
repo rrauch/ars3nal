@@ -686,7 +686,7 @@ pub struct BundleItem {
     pub block: Option<Block>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum ItemId<'a> {
     Tx(MaybeOwned<'a, TxId>),
     BundleItem {
