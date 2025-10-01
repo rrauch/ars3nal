@@ -1,13 +1,10 @@
 extern crate core;
 
 pub(crate) mod serde_tag;
-mod types;
+pub(crate) mod types;
 
 pub use ario_core::bundle::Owner as BundleOwner;
 pub use ario_core::tx::Owner as TxOwner;
-use chrono::{DateTime, Utc};
-use core::fmt;
-use std::fmt::{Display, Formatter};
 pub use types::{ArFsVersion, DriveId};
 
 use crate::types::{
@@ -19,11 +16,17 @@ use ario_client::data_reader::{AsyncBundleItemReader, AsyncTxReader};
 use ario_client::graphql::{
     ItemId, SortOrder, TagFilter, TxQuery, TxQueryFilterCriteria, WithTxResponseFields,
 };
+use ario_core::confidential::{Confidential, NewSecretExt};
 use ario_core::wallet::{Wallet, WalletAddress};
 use ario_core::{JsonValue, MaybeOwned};
+use chrono::{DateTime, Utc};
+use core::fmt;
 use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeek, Stream, StreamExt};
 use serde_json::Error as JsonError;
+use std::fmt::{Display, Formatter};
+use std::ops::Deref;
 use thiserror::Error;
+use zeroize::Zeroize;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -173,14 +176,61 @@ impl Display for ArFs<Public, ReadWrite> {
     }
 }
 
+#[repr(transparent)]
+struct Password(Confidential<Box<str>>);
+
+impl Deref for Password {
+    type Target = Confidential<Box<str>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<String> for Password {
+    fn from(mut value: String) -> Self {
+        // into_boxed_str() calls shrink_to_fit(), which reallocates if capacity > len.
+        // Reallocation would leave a copy of the plaintext password in the old buffer.
+        // We handle this case explicitly to zeroize the old buffer before conversion.
+        let value = if value.capacity() > value.len() {
+            let mut new_string = String::with_capacity(value.len());
+            new_string.push_str(&value);
+            value.zeroize();
+            new_string
+        } else {
+            value
+        };
+
+        Self(value.into_boxed_str().confidential())
+    }
+}
+
+enum AuthCredentials {
+    Password(Password),
+}
+
+impl From<&AuthCredentials> for AuthMode {
+    fn from(value: &AuthCredentials) -> Self {
+        match value {
+            AuthCredentials::Password(_) => AuthMode::Password,
+        }
+    }
+}
+
+impl From<Password> for AuthCredentials {
+    fn from(value: Password) -> Self {
+        AuthCredentials::Password(value)
+    }
+}
+
 pub struct Private {
     wallet: Wallet,
     wallet_address: WalletAddress,
-    auth: AuthMode,
+    auth: AuthCredentials,
 }
 
 impl Private {
-    fn new(wallet: Wallet, auth: AuthMode) -> Self {
+    fn new(wallet: Wallet, auth: AuthCredentials) -> Self {
         let wallet_address = wallet.address();
         Self {
             wallet,
@@ -197,7 +247,9 @@ impl<Mode> ArFs<Private, Mode> {
 
     fn display_private(&self, f: &mut fmt::Formatter<'_>, mode: &'static str) -> fmt::Result {
         match self.privacy.auth {
-            AuthMode::Password => self.display(f, "Private (Password)", mode, self.owner()),
+            AuthCredentials::Password(_) => {
+                self.display(f, "Private (Password)", mode, self.owner())
+            }
         }
     }
 }
@@ -361,7 +413,7 @@ async fn drive_entity(
         })?;
     }
 
-    let auth_mode = private.map(|p| p.auth);
+    let auth_mode = private.map(|p| AuthMode::from(&p.auth));
     if drive_entity.header().as_inner().auth_mode != auth_mode {
         Err(EntityError::AuthModeMismatch {
             expected: auth_mode
