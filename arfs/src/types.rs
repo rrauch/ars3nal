@@ -81,6 +81,7 @@ impl<ID: Id, TAG> FromStr for TaggedId<ID, TAG> {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct Model<E: Entity> {
     header: Header<E::Header, E>,
     metadata: Metadata<E::Metadata, E>,
@@ -242,6 +243,7 @@ where
     }
 }
 
+#[derive(Debug)]
 pub struct DriveKind;
 pub type DriveId = TaggedId<Uuid, DriveKind>;
 
@@ -501,9 +503,15 @@ fn unsupported_privacy_err(s: &str) -> ParseError {
     parse_err_ty = ParseError,
     serialize_all = "snake_case"
 )]
-pub(crate) enum Privacy {
+pub enum Privacy {
     Public,
     Private,
+}
+
+impl Default for Privacy {
+    fn default() -> Self {
+        Self::Public
+    }
 }
 
 fn unsupported_auth_mode_err(s: &str) -> ParseError {

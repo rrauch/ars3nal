@@ -29,6 +29,7 @@ use bytemuck::TransparentWrapper;
 use k256::Secp256k1;
 use std::any::Any;
 use std::convert::Infallible;
+use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -141,6 +142,22 @@ impl Wallet {
 
     pub(crate) fn to_entity_owner(&self) -> entity::Owner<'_> {
         self.0.to_entity_owner()
+    }
+}
+
+impl Debug for Wallet {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "Wallet[{}, {}]",
+            self.address(),
+            match self.0.as_ref() {
+                WalletInner::Rsa4096(_) => "RSA 4096",
+                WalletInner::Rsa2048(_) => "RSA 2048",
+                WalletInner::Secp256k1(_) => "Secp256k1",
+                WalletInner::Ed25519(_) => "Ed25519",
+                WalletInner::MultiAptos(_) => "MultiAptos",
+            }
+        ))
     }
 }
 

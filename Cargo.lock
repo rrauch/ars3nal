@@ -98,6 +98,7 @@ dependencies = [
  "ario-client",
  "ario-core",
  "async-stream",
+ "bon",
  "chrono",
  "derive-where",
  "derive_more 2.0.1",

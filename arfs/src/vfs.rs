@@ -8,11 +8,11 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
-use typed_path::{Utf8Component, Utf8UnixEncoding, Utf8UnixPath, Utf8UnixPathBuf};
+use typed_path::{Utf8UnixEncoding, Utf8UnixPath, Utf8UnixPathBuf};
 use uuid::Uuid;
 
 const ROOT_INODE_ID: InodeId = InodeId(2);
-const MIN_INODE_ID: usize = 1000;
+const MIN_INODE_ID: u64 = 1000;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -53,6 +53,8 @@ pub enum VfsPathError {
     #[error("path is not absolute")]
     NotAbsolute,
 }
+
+pub type Timestamp = DateTime<Utc>;
 
 pub struct Vfs {}
 
@@ -159,10 +161,10 @@ impl AsRef<str> for VfsPath {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Display)]
 #[repr(transparent)]
-pub struct InodeId(usize);
+pub struct InodeId(u64);
 
 impl Deref for InodeId {
-    type Target = usize;
+    type Target = u64;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -175,10 +177,10 @@ impl From<&InodeId> for InodeId {
     }
 }
 
-impl TryFrom<usize> for InodeId {
+impl TryFrom<u64> for InodeId {
     type Error = InodeIdError;
 
-    fn try_from(value: usize) -> Result<Self, Self::Error> {
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
         if value < MIN_INODE_ID {
             Err(InodeIdError::Reserved)
         } else {
@@ -191,7 +193,7 @@ pub type File = VfsNode<FileData>;
 #[derive(Debug, PartialEq, Clone)]
 struct FileData {
     size: u64,
-    last_modified: DateTime<Utc>,
+    last_modified: Timestamp,
     content_type: ContentType,
     data_item_id: ItemId<'static>,
 }
@@ -224,7 +226,7 @@ impl FromStr for Name {
 struct VfsNode<T> {
     id: Uuid,
     name: Name,
-    created_at: DateTime<Utc>,
+    created_at: Timestamp,
     hidden: bool,
     extra: HashMap<String, OwnedBlob>,
     decryption: Option<Decryption>,
