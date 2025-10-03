@@ -4,6 +4,7 @@ use serde::de::{Error as DeError, IntoDeserializer};
 use serde::ser::Error as SerError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::{DeserializeAs, SerializeAs};
+use std::borrow::Cow;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -176,8 +177,8 @@ where
     where
         D: Deserializer<'de>,
     {
-        let value = <&str>::deserialize(deserializer)?;
-        T::from_str(value).map_err(D::Error::custom)
+        let value = <Cow<'a, str>>::deserialize(deserializer)?;
+        T::from_str(value.as_ref()).map_err(D::Error::custom)
     }
 
     fn transform_into<S>(serializer: S, value: serde_content::Value<'a>) -> Result<S::Ok, S::Error>
@@ -196,14 +197,20 @@ impl<'a, 'de> Transformer<'a, 'de> for BytesToStr
 where
     'de: 'a,
 {
-    type Output = &'a str;
+    type Output = Cow<'a, str>;
 
     fn transform_from<D>(deserializer: D) -> Result<Self::Output, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let bytes: &[u8] = Deserialize::deserialize(deserializer)?;
-        std::str::from_utf8(bytes).map_err(D::Error::custom)
+        Ok(
+            match serde_bytes::deserialize::<Cow<'a, [u8]>, _>(deserializer)? {
+                Cow::Borrowed(slice) => {
+                    Cow::Borrowed(std::str::from_utf8(slice).map_err(D::Error::custom)?)
+                }
+                Cow::Owned(vec) => Cow::Owned(String::from_utf8(vec).map_err(D::Error::custom)?),
+            },
+        )
     }
 
     fn transform_into<S>(serializer: S, value: serde_content::Value<'_>) -> Result<S::Ok, S::Error>
@@ -272,13 +279,15 @@ fn try_into_tag<'a>(
     mut value: serde_content::Value<'a>,
 ) -> Result<Option<Tag<'a>>, Error> {
     let name = match name {
-        serde_content::Value::String(str) => {
-            TagName::try_from(Blob::from(str.into_owned().into_bytes())).map_err(|_| {
-                Error::SerializationError(<serde_content::Error as SerError>::custom(
-                    "expected a valid tag name",
-                ))
-            })?
-        }
+        serde_content::Value::String(str) => TagName::try_from(match str {
+            Cow::Owned(owned) => Blob::from(owned.into_bytes()),
+            Cow::Borrowed(borrowed) => Blob::from(borrowed.as_bytes()),
+        })
+        .map_err(|_| {
+            Error::SerializationError(<serde_content::Error as SerError>::custom(
+                "expected a valid tag name",
+            ))
+        })?,
         _ => {
             return Err(Error::SerializationError(
                 <serde_content::Error as SerError>::custom("expected a String"),
@@ -289,7 +298,7 @@ fn try_into_tag<'a>(
     loop {
         let value = match value {
             serde_content::Value::Bytes(bytes) => {
-                TagValue::try_from(Blob::from(bytes.into_owned())).map_err(|_| {
+                TagValue::try_from(Blob::from(bytes)).map_err(|_| {
                     Error::SerializationError(<serde_content::Error as SerError>::custom(
                         "expected a valid tag value",
                     ))

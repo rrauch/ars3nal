@@ -1,6 +1,6 @@
 use crate::api::RequestMethod::Post;
 use crate::api::{Api, ApiRequest, ApiRequestBody, ContentType, ViaJson};
-use crate::{Client, api};
+use crate::{Client, ItemArl, ItemId, api};
 use ario_core::{BlockId, BlockIdError, BlockNumber, Gateway, tx};
 use async_stream::try_stream;
 use bytesize::ByteSize;
@@ -686,27 +686,6 @@ pub struct BundleItem {
     pub block: Option<Block>,
 }
 
-#[derive(PartialEq, Debug, Clone)]
-pub enum ItemId<'a> {
-    Tx(MaybeOwned<'a, TxId>),
-    BundleItem {
-        item_id: MaybeOwned<'a, BundleItemId>,
-        bundle_id: MaybeOwned<'a, BundleId>,
-    },
-}
-
-impl<'a> ItemId<'a> {
-    pub fn into_owned(self) -> ItemId<'static> {
-        match self {
-            Self::Tx(tx) => ItemId::Tx(tx.into_owned().into()),
-            Self::BundleItem { bundle_id, item_id } => ItemId::BundleItem {
-                bundle_id: bundle_id.into_owned().into(),
-                item_id: item_id.into_owned().into(),
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum TxQueryItem {
     Tx(Tx),
@@ -718,10 +697,9 @@ impl TxQueryItem {
     pub fn id(&self) -> ItemId<'_> {
         match self {
             Self::Tx(tx) => ItemId::Tx(MaybeOwned::Borrowed(&tx.id)),
-            Self::BundleItem(bundle_item) => ItemId::BundleItem {
-                item_id: MaybeOwned::Borrowed(&bundle_item.id),
-                bundle_id: MaybeOwned::Borrowed(&bundle_item.bundle_id),
-            },
+            Self::BundleItem(bundle_item) => {
+                ItemId::BundleItem(MaybeOwned::Borrowed(&bundle_item.id))
+            }
         }
     }
 
@@ -754,6 +732,16 @@ impl TxQueryItem {
         match self {
             Self::Tx(tx) => tx.block.as_ref(),
             Self::BundleItem(bundle_item) => bundle_item.block.as_ref(),
+        }
+    }
+
+    #[inline]
+    pub fn to_arl(&self) -> ItemArl {
+        match self {
+            Self::Tx(tx) => ItemArl::from(tx.id.clone()),
+            Self::BundleItem(bundle_item) => {
+                ItemArl::from((bundle_item.bundle_id.clone(), bundle_item.id.clone()))
+            }
         }
     }
 }

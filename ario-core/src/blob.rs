@@ -4,6 +4,7 @@ use hybrid_array::{Array, ArraySize};
 use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::array::TryFromSliceError;
+use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use std::io::Cursor;
 use std::marker::PhantomData;
@@ -62,6 +63,15 @@ impl<'a> From<&'a Vec<u8>> for Blob<'a> {
     }
 }
 
+impl<'a> From<Cow<'a, [u8]>> for Blob<'a> {
+    fn from(value: Cow<'a, [u8]>) -> Self {
+        match value {
+            Cow::Borrowed(slice) => Blob::from(slice),
+            Cow::Owned(vec) => Blob::from(vec),
+        }
+    }
+}
+
 impl<'a> Blob<'a> {
     pub fn bytes(&self) -> &[u8] {
         match self {
@@ -97,6 +107,10 @@ impl<'a> Blob<'a> {
             Self::Slice(s) => Bytes::copy_from_slice(s),
         };
         Blob::from(bytes)
+    }
+
+    pub fn borrow(&'a self) -> Blob<'a> {
+        Blob::from(self.bytes())
     }
 }
 

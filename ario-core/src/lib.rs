@@ -52,6 +52,8 @@ impl BlockNumber {
     }
 }
 
+impl Copy for BlockNumber {}
+
 pub type BlockId = TypedDigest<BlockKind, Sha384>;
 
 impl Display for BlockId {

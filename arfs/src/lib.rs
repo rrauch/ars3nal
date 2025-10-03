@@ -1,34 +1,41 @@
 extern crate core;
 
+mod db;
 pub(crate) mod serde_tag;
 pub(crate) mod types;
 mod vfs;
 
 pub use ario_core::bundle::Owner as BundleOwner;
 pub use ario_core::tx::Owner as TxOwner;
-pub use types::{ArFsVersion, ContentType, DriveId, Privacy};
+pub use types::{ArFsVersion, ContentType, Privacy};
 pub use vfs::{Directory, File, Inode, Timestamp, Vfs};
 
-use crate::types::{
-    AuthMode, DriveEntity, DriveHeader, DriveKind, DriveMetadata, Entity, Header, Metadata,
-};
+use crate::db::Db;
+use crate::db::Error as DbError;
+use crate::types::drive::{DriveEntity, DriveHeader, DriveId, DriveKind};
+use crate::types::folder::{FolderEntity, FolderId, FolderKind};
+use crate::types::{AuthMode, Entity, Header, Metadata, Model, ParseError, HasId};
 use crate::vfs::Error as VfsError;
 use ario_client::Client;
-use ario_client::Error as ClientError;
 use ario_client::data_reader::{AsyncBundleItemReader, AsyncTxReader};
 use ario_client::graphql::{
-    ItemId, SortOrder, TagFilter, TxQuery, TxQueryFilterCriteria, TxQueryItem, WithTxResponseFields,
+    SortOrder, TagFilter, TxQuery, TxQueryFilterCriteria, TxQueryItem, WithTxResponseFields,
 };
+use ario_client::tx::Status as TxStatus;
+use ario_client::{Error as ClientError, ItemArl};
 use ario_core::confidential::{Confidential, NewSecretExt};
+use ario_core::tag::Tag;
+use ario_core::tx::TxId;
 use ario_core::wallet::{Wallet, WalletAddress};
 use ario_core::{JsonValue, MaybeOwned};
 use core::fmt;
 use derive_more::Display;
 use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeek, Stream, StreamExt};
 use serde_json::Error as JsonError;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::num::NonZeroUsize;
 use std::ops::Deref;
+use std::path::Path;
 use std::sync::Arc;
 use strum::EnumString;
 use thiserror::Error;
@@ -41,9 +48,13 @@ pub enum Error {
     #[error(transparent)]
     ClientError(#[from] ClientError),
     #[error(transparent)]
+    DbError(#[from] DbError),
+    #[error(transparent)]
     IoError(#[from] std::io::Error),
     #[error(transparent)]
     VfsError(#[from] VfsError),
+    #[error("nested bundle items are not supported yet")]
+    NestingNotSupported,
 }
 
 #[derive(Error, Debug)]
@@ -52,6 +63,8 @@ pub enum EntityError {
     ParseError(#[from] types::ParseError),
     #[error(transparent)]
     MetadataError(#[from] MetadataError),
+    #[error("status for tx with id '{0}' invalid")]
+    InvalidTxStatus(TxId),
     #[error("entity of type '{entity_type}' with details '{details}' not found")]
     NotFound {
         entity_type: &'static str,
@@ -66,6 +79,13 @@ pub enum EntityError {
     PrivacyMismatch { expected: Privacy, actual: Privacy },
     #[error("auth mode mismatch, expected '{expected}' but found '{actual}'")]
     AuthModeMismatch { expected: String, actual: String },
+    #[error("folder mismatch, expected '{expected}' but found '{actual}'")]
+    FolderMismatch {
+        expected: FolderId,
+        actual: FolderId,
+    },
+    #[error("drive mismatch, expected '{expected}' but found '{actual}'")]
+    DriveMismatch { expected: DriveId, actual: DriveId },
 }
 
 #[derive(Error, Debug)]
@@ -83,12 +103,35 @@ pub struct ArFs(Arc<ErasedArFs>);
 #[bon::bon]
 impl ArFs {
     #[builder(derive(Debug))]
-    pub async fn new(client: Client, drive_id: DriveId, scope: Scope) -> Result<Self, Error> {
-        let drive_ref = find_drive_by_id_owner(&client, &drive_id, scope.owner().as_ref())
-            .await?
-            .into_owned();
-        let drive = drive_entity(&client, &drive_ref, scope.as_private()).await?;
-        Ok(Self(Arc::new(ErasedArFs::new(client, drive, scope))))
+    pub async fn new<'a>(
+        client: Client,
+        #[builder(with = |db_dir:  &'a (impl AsRef<Path> + ?Sized)| db_dir.as_ref())]
+        db_dir: &'a Path,
+        #[builder(default = 25)] max_db_connections: u8,
+        drive_id: DriveId,
+        scope: Scope,
+    ) -> Result<Self, Error> {
+        tokio::fs::create_dir_all(db_dir).await?;
+        let db = Db::new(
+            db_dir.join(format!("arfs-{}.sqlite", drive_id)),
+            max_db_connections,
+            client.clone(),
+            &drive_id,
+            &scope,
+        )
+        .await?;
+
+        let (drive_id, location) =
+            find_drive_by_id_owner(&client, &drive_id, scope.owner().as_ref()).await?;
+        let drive = drive_entity(
+            &client,
+            &drive_id,
+            &location,
+            scope.owner().as_ref(),
+            scope.as_private(),
+        )
+        .await?;
+        Ok(Self(Arc::new(ErasedArFs::new(client, db, drive, scope))))
     }
 
     #[inline]
@@ -118,6 +161,16 @@ impl ArFs {
             ErasedArFs::PublicRW(inner) => inner.created_at(),
             ErasedArFs::PrivateRO(inner) => inner.created_at(),
             ErasedArFs::PrivateRW(inner) => inner.created_at(),
+        }
+    }
+
+    #[inline]
+    pub fn owner(&self) -> &WalletAddress {
+        match self.0.as_ref() {
+            ErasedArFs::PublicRO(inner) => inner.owner(),
+            ErasedArFs::PublicRW(inner) => inner.owner(),
+            ErasedArFs::PrivateRO(inner) => inner.owner(),
+            ErasedArFs::PrivateRW(inner) => inner.owner(),
         }
     }
 
@@ -181,6 +234,13 @@ impl Scope {
         }
     }
 
+    fn privacy(&self) -> Privacy {
+        match self {
+            Self::Public(_) => Privacy::Public,
+            Self::Private(_) => Privacy::Private,
+        }
+    }
+
     fn as_private(&self) -> Option<&Private> {
         match self {
             Self::Public(_) => None,
@@ -220,22 +280,22 @@ enum ErasedArFs {
 }
 
 impl ErasedArFs {
-    fn new(client: Client, drive: DriveEntity, scope: Scope) -> Self {
+    fn new(client: Client, db: Db, drive: DriveEntity, scope: Scope) -> Self {
         match scope {
             Scope::Public(public) => match public {
                 Access::ReadOnly(owner) => {
-                    Self::PublicRO(ArFsInner::new_public_ro(client, drive, owner))
+                    Self::PublicRO(ArFsInner::new_public_ro(client, db, drive, owner))
                 }
                 Access::ReadWrite(wallet) => {
-                    Self::PublicRW(ArFsInner::new_public_rw(client, drive, wallet))
+                    Self::PublicRW(ArFsInner::new_public_rw(client, db, drive, wallet))
                 }
             },
             Scope::Private(private) => match private {
                 Access::ReadOnly(creds) => {
-                    Self::PrivateRO(ArFsInner::new_private_ro(client, drive, creds))
+                    Self::PrivateRO(ArFsInner::new_private_ro(client, db, drive, creds))
                 }
                 Access::ReadWrite(creds) => {
-                    Self::PrivateRW(ArFsInner::new_private_rw(client, drive, creds))
+                    Self::PrivateRW(ArFsInner::new_private_rw(client, db, drive, creds))
                 }
             },
         }
@@ -243,9 +303,10 @@ impl ErasedArFs {
 }
 
 impl ArFsInner<Public, ReadOnly> {
-    fn new_public_ro(client: Client, drive: DriveEntity, owner: WalletAddress) -> Self {
+    fn new_public_ro(client: Client, db: Db, drive: DriveEntity, owner: WalletAddress) -> Self {
         ArFsInner {
             client,
+            db,
             drive,
             privacy: Public { owner },
             mode: ReadOnly,
@@ -254,9 +315,10 @@ impl ArFsInner<Public, ReadOnly> {
 }
 
 impl ArFsInner<Public, ReadWrite<Wallet>> {
-    fn new_public_rw(client: Client, drive: DriveEntity, wallet: Wallet) -> Self {
+    fn new_public_rw(client: Client, db: Db, drive: DriveEntity, wallet: Wallet) -> Self {
         ArFsInner {
             client,
+            db,
             drive,
             privacy: Public {
                 owner: wallet.address(),
@@ -267,9 +329,15 @@ impl ArFsInner<Public, ReadWrite<Wallet>> {
 }
 
 impl ArFsInner<Private, ReadOnly> {
-    fn new_private_ro(client: Client, drive: DriveEntity, credentials: Credentials) -> Self {
+    fn new_private_ro(
+        client: Client,
+        db: Db,
+        drive: DriveEntity,
+        credentials: Credentials,
+    ) -> Self {
         ArFsInner {
             client,
+            db,
             drive,
             privacy: credentials.0,
             mode: ReadOnly,
@@ -278,9 +346,15 @@ impl ArFsInner<Private, ReadOnly> {
 }
 
 impl ArFsInner<Private, ReadWrite> {
-    fn new_private_rw(client: Client, drive: DriveEntity, credentials: Credentials) -> Self {
+    fn new_private_rw(
+        client: Client,
+        db: Db,
+        drive: DriveEntity,
+        credentials: Credentials,
+    ) -> Self {
         ArFsInner {
             client,
+            db,
             drive,
             privacy: credentials.0,
             mode: ReadWrite::default(),
@@ -336,6 +410,7 @@ struct ReadOnly;
 #[derive(Debug)]
 struct ArFsInner<PRIVACY, MODE> {
     client: Client,
+    db: Db,
     drive: DriveEntity,
     privacy: PRIVACY,
     mode: MODE,
@@ -461,29 +536,12 @@ impl Display for ArFsInner<Private, ReadWrite> {
     }
 }
 
-#[derive(Debug)]
-pub struct DriveRef<'a> {
-    drive_id: DriveId,
-    container_id: ItemId<'a>,
-    owner: MaybeOwned<'a, WalletAddress>,
-}
-
-impl<'a> DriveRef<'a> {
-    fn into_owned(self) -> DriveRef<'static> {
-        DriveRef {
-            drive_id: self.drive_id,
-            container_id: self.container_id.into_owned(),
-            owner: self.owner.into_owned().into(),
-        }
-    }
-}
-
 type TagsOnly = WithTxResponseFields<false, false, false, false, false, false, true, false>;
 
 fn find_drive_ids_by_owner<'a>(
     client: &'a Client,
     owner: &'a WalletAddress,
-) -> impl Stream<Item = Result<DriveRef<'a>, Error>> + Unpin + 'a {
+) -> impl Stream<Item = Result<(DriveId, ItemArl), Error>> + Unpin + 'a {
     client
         .query_transactions_with_fields::<TagsOnly>(
             TxQuery::builder()
@@ -500,27 +558,22 @@ fn find_drive_ids_by_owner<'a>(
                 .build(),
         )
         .map(|r| match r {
-            Ok(item) => to_drive_ref(item, MaybeOwned::Borrowed(owner)),
+            Ok(item) => Ok((to_drive_id(&item)?, item.to_arl())),
             Err(e) => Err(e.into()),
         })
 }
 
-fn to_drive_ref(item: TxQueryItem, owner: MaybeOwned<WalletAddress>) -> Result<DriveRef, Error> {
+fn to_drive_id(item: &TxQueryItem) -> Result<DriveId, Error> {
     let drive_header =
         Header::<DriveHeader, DriveKind>::try_from(item.tags()).map_err(EntityError::ParseError)?;
-
-    Ok(DriveRef {
-        drive_id: drive_header.as_inner().drive_id.clone(),
-        container_id: item.id().clone().into_owned(),
-        owner,
-    })
+    Ok(drive_header.into_inner().drive_id)
 }
 
 async fn find_drive_by_id_owner<'a>(
     client: &'a Client,
     drive_id: &'a DriveId,
     owner: &'a WalletAddress,
-) -> Result<DriveRef<'a>, Error> {
+) -> Result<(DriveId, ItemArl), Error> {
     client
         .query_transactions_with_fields::<TagsOnly>(
             TxQuery::builder()
@@ -544,8 +597,8 @@ async fn find_drive_by_id_owner<'a>(
                 .build(),
         )
         .map(|r| match r {
-            Ok(item) => to_drive_ref(item, MaybeOwned::Borrowed(owner)),
-            Err(e) => Err(e.into()),
+            Ok(item) => Ok((to_drive_id(&item)?, item.to_arl())),
+            Err(e) => Err(Error::from(e)),
         })
         .try_next()
         .await?
@@ -553,6 +606,54 @@ async fn find_drive_by_id_owner<'a>(
             EntityError::NotFound {
                 entity_type: "drive",
                 details: drive_id.to_string(),
+            }
+            .into(),
+        )
+}
+
+async fn find_entity_location_by_id_drive<'a, E: Entity + HasId>(
+    client: &'a Client,
+    id: &E::Id,
+    drive_id: &'a DriveId,
+) -> Result<ItemArl, Error>
+where
+    <E as HasId>::Id: Display,
+{
+    client
+        .query_transactions_with_fields::<TagsOnly>(
+            TxQuery::builder()
+                .filter_criteria(
+                    TxQueryFilterCriteria::builder()
+                        .tags([
+                            TagFilter::builder()
+                                .name("Entity-Type")
+                                .values([E::TYPE])
+                                .build(),
+                            TagFilter::builder()
+                                .name("Folder-Id")
+                                .values([id.to_string()])
+                                .build(),
+                            TagFilter::builder()
+                                .name("Drive-Id")
+                                .values([drive_id.to_string()])
+                                .build(),
+                        ])
+                        .build(),
+                )
+                .sort_order(SortOrder::HeightDescending)
+                .max_results(NonZeroUsize::try_from(1).unwrap())
+                .build(),
+        )
+        .map(|r| match r {
+            Ok(item) => Ok::<ItemArl, Error>(item.to_arl()), // todo: implement recursive search if nested
+            Err(e) => Err(e.into()),
+        })
+        .try_next()
+        .await?
+        .ok_or(
+            EntityError::NotFound {
+                entity_type: E::TYPE,
+                details: id.to_string(),
             }
             .into(),
         )
@@ -574,30 +675,65 @@ impl MetadataReader for AsyncBundleItemReader<'_> {
     }
 }
 
-async fn drive_entity(
+async fn folder_entity(
+    folder_id: &FolderId,
     client: &Client,
-    drive_ref: &DriveRef<'_>,
+    location: &ItemArl,
+    drive_id: &DriveId,
+    owner: &WalletAddress,
     private: Option<&Private>,
-) -> Result<DriveEntity, Error> {
-    const MAX_METADATA_LEN: usize = 1024 * 1024;
+) -> Result<FolderEntity, Error> {
+    let folder_entity =
+        read_entity::<FolderKind, 1024>(client, location, drive_id, owner, private).await?;
+    if folder_entity.id() != folder_id {
+        Err(EntityError::FolderMismatch {
+            expected: folder_id.clone(),
+            actual: folder_entity.id().clone(),
+        })?;
+    }
+    if folder_entity.drive_id() != drive_id {
+        Err(EntityError::DriveMismatch {
+            expected: drive_id.clone(),
+            actual: folder_entity.drive_id().clone(),
+        })?;
+    }
+    Ok(folder_entity)
+}
 
+async fn read_entity<E: Entity, const MAX_METADATA_LEN: usize>(
+    client: &Client,
+    location: &ItemArl,
+    drive_id: &DriveId,
+    owner: &WalletAddress,
+    private: Option<&Private>,
+) -> Result<Model<E>, Error>
+where
+    Header<<E as Entity>::Header, E>: for<'a> TryFrom<&'a Vec<Tag<'a>>, Error = ParseError>,
+    Metadata<<E as Entity>::Metadata, E>: TryFrom<JsonValue, Error = ParseError>,
+{
     if let Some(address) = private.map(|p| p.wallet.address()) {
-        if &address != drive_ref.owner.as_ref() {
+        if &address != owner {
             Err(EntityError::OwnerMismatch {
                 expected: address,
-                actual: drive_ref.owner.clone().into_owned(),
+                actual: owner.clone(),
             })?;
         }
     }
+
+    let block_height = match client.tx_status(location.tx()).await? {
+        Some(TxStatus::Accepted(accepted)) => accepted.block_height,
+        _ => Err(EntityError::InvalidTxStatus(location.tx().clone()))?,
+    };
 
     let tx_e;
     let bundle_item;
     let mut reader: Box<dyn MetadataReader>;
     let owner_address;
 
-    let authenticated_tags = match &drive_ref.container_id {
-        ItemId::Tx(tx) => {
-            if let Some(tx) = client.tx_by_id(&tx).await? {
+    let authenticated_tags = match location.depth() {
+        0 => {
+            // tx
+            if let Some(tx) = client.tx_by_id(location.tx()).await? {
                 tx_e = tx;
                 let tags = tx_e.tags();
                 owner_address = tx_e.owner().address();
@@ -606,13 +742,16 @@ async fn drive_entity(
                 tags
             } else {
                 return Err(EntityError::NotFound {
-                    entity_type: DriveKind::TYPE,
-                    details: drive_ref.drive_id.to_string(),
+                    entity_type: E::TYPE,
+                    details: format!("drive_id: {}", drive_id),
                 })?;
             }
         }
-        ItemId::BundleItem { item_id, bundle_id } => {
-            if let Some(item) = client.bundle_item(item_id, bundle_id).await? {
+        1 => {
+            // simple bundle_item
+            let item_id = location.bundle_items().next().unwrap();
+
+            if let Some(item) = client.bundle_item(item_id, location.tx()).await? {
                 bundle_item = item;
                 let tags = bundle_item.tags();
                 owner_address = bundle_item.owner().address();
@@ -620,16 +759,20 @@ async fn drive_entity(
                 tags
             } else {
                 return Err(EntityError::NotFound {
-                    entity_type: DriveKind::TYPE,
-                    details: drive_ref.drive_id.to_string(),
+                    entity_type: E::TYPE,
+                    details: format!("drive_id: {}", drive_id),
                 })?;
             }
         }
+        _ => {
+            // nested bundle_item
+            return Err(Error::NestingNotSupported);
+        }
     };
 
-    if &owner_address != drive_ref.owner.as_ref() {
+    if &owner_address != owner {
         Err(EntityError::OwnerMismatch {
-            expected: drive_ref.owner.clone().into_owned(),
+            expected: owner.clone(),
             actual: owner_address,
         })?;
     }
@@ -647,13 +790,23 @@ async fn drive_entity(
     let metadata: JsonValue =
         serde_json::from_slice(buf.as_slice()).map_err(|e| EntityError::MetadataError(e.into()))?;
 
-    let drive_header = Header::<DriveHeader, DriveKind>::try_from(authenticated_tags)
-        .map_err(EntityError::from)?;
+    let header = Header::<E::Header, E>::try_from(authenticated_tags).map_err(EntityError::from)?;
 
-    let drive_metadata =
-        Metadata::<DriveMetadata, DriveKind>::try_from(metadata).map_err(EntityError::from)?;
+    let metadata = Metadata::<E::Metadata, E>::try_from(metadata).map_err(EntityError::from)?;
 
-    let drive_entity = DriveEntity::new(drive_header, drive_metadata);
+    Ok(Model::new(header, metadata, block_height, location.clone()))
+}
+
+async fn drive_entity(
+    client: &Client,
+    drive_id: &DriveId,
+    location: &ItemArl,
+    owner: &WalletAddress,
+    private: Option<&Private>,
+) -> Result<DriveEntity, Error> {
+    let drive_entity =
+        read_entity::<DriveKind, { 1024 * 1024 }>(client, location, drive_id, owner, private)
+            .await?;
 
     let privacy = private.map(|_| Privacy::Private).unwrap_or(Privacy::Public);
     if drive_entity.header().as_inner().privacy != privacy {
@@ -732,14 +885,15 @@ mod tests {
         let drive_owner = wallet.address();
         let credentials = Credentials::with_password(wallet, "foo".to_string());
 
-        let drive_ref = super::find_drive_ids_by_owner(&client, &drive_owner)
+        let (drive_id, _) = super::find_drive_ids_by_owner(&client, &drive_owner)
             .try_next()
             .await?
             .unwrap();
 
         let arfs = ArFs::builder()
             .client(client.clone())
-            .drive_id(drive_ref.drive_id)
+            .db_dir(&PathBuf::from_str("/tmp/foo/")?)
+            .drive_id(drive_id)
             .scope(Scope::private_rw(credentials))
             .build()
             .await?;
@@ -755,10 +909,11 @@ mod tests {
 
         let mut stream = super::find_drive_ids_by_owner(&client, &drive_owner);
 
-        while let Some(drive_ref) = stream.try_next().await? {
+        while let Some((drive_id, _)) = stream.try_next().await? {
             let arfs = ArFs::builder()
                 .client(client.clone())
-                .drive_id(drive_ref.drive_id)
+                .drive_id(drive_id)
+                .db_dir("/tmp/foo/")
                 .scope(Scope::public(drive_owner.clone()))
                 .build()
                 .await?;

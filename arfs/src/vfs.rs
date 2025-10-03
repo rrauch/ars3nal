@@ -1,5 +1,5 @@
 use crate::ContentType;
-use ario_client::graphql::ItemId;
+use ario_client::ItemId;
 use ario_core::blob::OwnedBlob;
 use chrono::{DateTime, Utc};
 use derive_more::Display;
