@@ -4,7 +4,6 @@ pub mod cache;
 pub mod chunk;
 pub mod data_reader;
 mod gateway;
-#[cfg(feature = "graphql")]
 pub mod graphql;
 mod price;
 mod routemaster;

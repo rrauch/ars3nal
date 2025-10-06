@@ -7,6 +7,7 @@ use bytes::{Bytes, BytesMut};
 use bytesize::ByteSize;
 use futures_lite::{Stream, StreamExt};
 use reqwest::Client as ReqwestClient;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
@@ -18,9 +19,6 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tracing::instrument;
 use url::Url;
-
-#[cfg(feature = "graphql")]
-use serde::Serialize;
 
 #[derive(Debug, Clone)]
 pub struct Api(Arc<Inner>);
@@ -55,7 +53,6 @@ pub enum Error {
     PayloadError(#[from] PayloadError),
     #[error("charset '{0:?}' unsupported")]
     UnsupportedCharset(Charset),
-    #[cfg(feature = "graphql")]
     #[error(transparent)]
     GraphQlError(#[from] crate::graphql::GraphQlError),
 }
@@ -461,7 +458,6 @@ pub(crate) struct ApiRequestBody<'a> {
 
 pub(crate) enum Payload<'a> {
     Json(&'a JsonValue),
-    #[cfg(feature = "graphql")]
     GraphQL(Vec<u8>),
 }
 
@@ -471,7 +467,6 @@ impl<'a> Into<Payload<'a>> for &'a JsonValue {
     }
 }
 
-#[cfg(feature = "graphql")]
 impl<'a, F, V: Serialize> TryFrom<&'a cynic::Operation<F, V>> for Payload<'static> {
     type Error = serde_json::Error;
 
@@ -484,7 +479,6 @@ impl<'a> Debug for Payload<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Json(_) => f.write_str("json"),
-            #[cfg(feature = "graphql")]
             Self::GraphQL(_) => f.write_str("graphql"),
         }
     }
@@ -502,7 +496,6 @@ impl<'a> TryInto<reqwest::Body> for Payload<'a> {
     fn try_into(self) -> Result<reqwest::Body, Self::Error> {
         Ok(match self {
             Self::Json(json) => reqwest::Body::from(serde_json::to_vec(json)?),
-            #[cfg(feature = "graphql")]
             Self::GraphQL(graphql) => reqwest::Body::from(graphql),
         })
     }
