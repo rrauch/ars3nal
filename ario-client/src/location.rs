@@ -4,6 +4,8 @@ use ario_core::bundle::{BundleId, BundleItemId, BundleItemIdError};
 use ario_core::tx::{TxId, TxIdError};
 use derive_where::derive_where;
 use futures_lite::StreamExt;
+use serde::de::Visitor;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
@@ -50,6 +52,12 @@ pub enum ItemArlError {
 
 impl Client {
     pub async fn location_by_item_id(&self, item_id: &ItemId<'_>) -> Result<ItemArl, super::Error> {
+        let bytes_id = item_id.as_byte_array();
+
+        if let Some(cached) = self.0.cache.get_item_location_if_cached(bytes_id).await? {
+            return Ok(cached);
+        }
+
         let mut components = vec![];
         let mut root: ItemArl;
         let mut item_id = item_id.clone().into_owned();
@@ -64,9 +72,20 @@ impl Client {
                     if components.contains(bundle_item_id.deref()) {
                         Err(Error::LoopDetected)?;
                     }
-                    let item = self.lookup_bundled_in(&bundle_item_id).await?;
+                    let parent = self.lookup_parent(&bundle_item_id).await?;
                     components.push(bundle_item_id.into_owned());
-                    item_id = item;
+
+                    if let Some(cached) = self
+                        .0
+                        .cache
+                        .get_item_location_if_cached(parent.as_byte_array())
+                        .await?
+                    {
+                        root = cached;
+                        break;
+                    }
+
+                    item_id = parent;
                 }
             }
         }
@@ -75,10 +94,16 @@ impl Client {
             components.reverse();
             root.append(components.drain(..));
         }
+
+        self.0
+            .cache
+            .insert_item_location(bytes_id.clone(), root.clone())
+            .await?;
+
         Ok(root)
     }
 
-    async fn lookup_bundled_in(
+    async fn lookup_parent(
         &self,
         bundle_item_id: &BundleItemId,
     ) -> Result<ItemId<'static>, super::Error> {
@@ -194,6 +219,63 @@ impl ArlType for ItemArlType {
 }
 
 pub type ItemArl = TypedArl<ItemArlType>;
+
+impl Serialize for ItemArl {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.to_string().as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ItemArl {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StringVisitor<'de>(PhantomData<&'de ()>);
+
+        impl StringVisitor<'_> {
+            fn from_str<E, S: AsRef<str>>(value: S) -> Result<ItemArl, E>
+            where
+                E: serde::de::Error,
+            {
+                ItemArl::from_str(value.as_ref()).map_err(serde::de::Error::custom)
+            }
+        }
+        impl<'de> Visitor<'de> for StringVisitor<'de> {
+            type Value = ItemArl;
+
+            fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
+                write!(formatter, "a string value")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Self::from_str(v)
+            }
+
+            fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Self::from_str(v)
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Self::from_str(&v)
+            }
+        }
+
+        deserializer.deserialize_str(StringVisitor(PhantomData))
+    }
+}
 
 impl TryFrom<Url> for ItemArl {
     type Error = ArlError;

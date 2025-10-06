@@ -1,7 +1,8 @@
-use crate::Cache;
 use crate::cache::Error::L2Error;
 use crate::cache::{Context, Error, HasWeight, InnerCache, L2MetadataCache};
+use crate::location::ItemArl;
 use crate::tx::Offset as TxOffset;
+use crate::{ByteArray, Cache, U32};
 use ario_core::MaybeOwned;
 use ario_core::bundle::{
     AuthenticatedBundleItem, Bundle, BundleId, BundleItemAuthenticator, BundleItemId,
@@ -112,6 +113,22 @@ pub trait L2Cache: Send + Sync {
         &self,
         item_id: &BundleItemId,
         bundle_id: &BundleId,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn get_item_location(
+        &self,
+        item_id: &ByteArray<U32>,
+    ) -> impl Future<Output = Result<Option<ItemArl>, std::io::Error>> + Send;
+
+    fn insert_item_location(
+        &self,
+        item_id: ByteArray<U32>,
+        location: ItemArl,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn invalidate_item_location(
+        &self,
+        item_id: &ByteArray<U32>,
     ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
 }
 
@@ -251,6 +268,57 @@ impl Cache {
             )
             .await?)
     }
+
+    pub(crate) async fn get_item_location_if_cached(
+        &self,
+        item_id: &ByteArray<U32>,
+    ) -> Result<Option<ItemArl>, crate::Error> {
+        let key = ItemLocationByAnyIdKey::from(item_id);
+        Ok(self
+            .metadata_cache
+            .try_get_value(
+                key,
+                async |key| Ok(None),
+                async |key, l2| l2.get_item_location(key).await,
+                async |key, value, l2| {
+                    l2.insert_item_location(key.0.clone().into_owned(), value)
+                        .await
+                },
+            )
+            .await?)
+    }
+
+    pub(crate) async fn insert_item_location(
+        &self,
+        item_id: ByteArray<U32>,
+        location: ItemArl,
+    ) -> Result<(), crate::Error> {
+        if let Some(l2) = self.metadata_cache.l2.as_ref() {
+            self.metadata_cache
+                .l1
+                .insert(
+                    MaybeOwnedMetaKey::from(ItemLocationByAnyIdKey::from(item_id.clone()))
+                        .to_owned(),
+                    Some(location.clone().into_meta_value()),
+                )
+                .await;
+
+            l2.insert_item_location(item_id, location)
+                .await
+                .map_err(L2Error)?;
+            Ok(())
+        } else {
+            self.metadata_cache
+                .l1
+                .insert(
+                    MaybeOwnedMetaKey::from(ItemLocationByAnyIdKey::from(item_id.clone()))
+                        .to_owned(),
+                    Some(location.into_meta_value()),
+                )
+                .await;
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -272,6 +340,9 @@ impl<'a> ToOwned for MaybeOwnedMetaKey<'a> {
             Self::TxOffset(o) => MetaKey(MaybeOwnedMetaKey::TxOffset(o.to_owned())),
             Self::BundleByTxId(o) => MetaKey(MaybeOwnedMetaKey::BundleByTxId(o.to_owned())),
             Self::BundleItemByIdTx(o) => MetaKey(MaybeOwnedMetaKey::BundleItemByIdTx(o.to_owned())),
+            Self::ItemLocationByAnyIdKey(o) => {
+                MetaKey(MaybeOwnedMetaKey::ItemLocationByAnyIdKey(o.to_owned()))
+            }
         }
     }
 }
@@ -293,6 +364,7 @@ pub(super) enum MetaValue {
             BundleItemAuthenticator<'static>,
         ),
     ),
+    ItemLocation(ItemArl),
 }
 
 impl HasWeight for MetaValue {
@@ -497,12 +569,47 @@ impl Value
     }
 }
 
+type ItemLocationByAnyIdKey<'a> = KeyWrapper<'a, ByteArray<U32>>;
+
+impl<'a> Key for ItemLocationByAnyIdKey<'a> {
+    type Value = ItemArl;
+}
+
+impl<'a> From<ItemLocationByAnyIdKey<'a>> for MaybeOwnedMetaKey<'a> {
+    fn from(value: ItemLocationByAnyIdKey<'a>) -> Self {
+        Self::ItemLocationByAnyIdKey(value)
+    }
+}
+
+impl<'a> MaybeAsRef<ItemLocationByAnyIdKey<'a>> for MaybeOwnedMetaKey<'a> {
+    fn maybe_as_ref(&self) -> Option<&ItemLocationByAnyIdKey<'a>> {
+        match self {
+            MaybeOwnedMetaKey::ItemLocationByAnyIdKey(inner) => Some(inner),
+            _ => None,
+        }
+    }
+}
+
+impl Value for ItemArl {
+    fn into_meta_value(self) -> MetaValue {
+        MetaValue::ItemLocation(self)
+    }
+
+    fn try_from_meta_value(value: MetaValue) -> Option<Self> {
+        match value {
+            MetaValue::ItemLocation(inner) => Some(inner),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum MaybeOwnedMetaKey<'a> {
     TxById(TxByIdKey<'a>),
     TxOffset(TxOffsetKey<'a>),
     BundleByTxId(BundleByTxIdKey<'a>),
     BundleItemByIdTx(BundleItemByIdKey<'a>),
+    ItemLocationByAnyIdKey(ItemLocationByAnyIdKey<'a>),
 }
 
 trait MaybeAsRef<T: Sized> {

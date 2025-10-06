@@ -16,6 +16,7 @@ pub use bytesize::ByteSize;
 pub use chrono::{DateTime, Utc};
 
 pub type ByteArray<N: ArraySize> = Array<u8, N>;
+pub use hybrid_array::sizes::U32;
 
 use crate::api::Api;
 use crate::routemaster::{Handle, Routemaster};
@@ -170,6 +171,11 @@ impl<'a> ItemId<'a> {
             Self::Tx(tx) => Self::Tx(tx.deref().into()),
             Self::BundleItem(item) => Self::BundleItem(item.deref().into()),
         }
+    }
+
+    pub(crate) fn as_byte_array(&self) -> &ByteArray<U32> {
+        let bytes = self.as_slice();
+        bytes.try_into().expect("bytes to always be 32 bytes")
     }
 }
 
