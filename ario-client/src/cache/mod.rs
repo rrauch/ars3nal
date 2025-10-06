@@ -11,7 +11,7 @@ use ario_core::network::Network;
 use bytesize::ByteSize;
 use moka::future::Cache as MokaCache;
 use moka::future::CacheBuilder as MokaCacheBuilder;
-use std::fmt::{Debug, Formatter, Write};
+use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

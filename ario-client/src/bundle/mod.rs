@@ -7,7 +7,6 @@ use ario_core::bundle::{
     BundleItemReader, BundleReader,
 };
 use ario_core::tx::{AuthenticatedTx, TxId};
-use futures_lite::{AsyncRead, AsyncSeek};
 
 impl Client {
     pub async fn bundle_by_tx(&self, tx_id: &TxId) -> Result<Option<Bundle>, super::Error> {
@@ -111,7 +110,7 @@ impl Client {
     pub async fn read_bundle_item(
         &self,
         item: &AuthenticatedBundleItem<'_>,
-    ) -> Result<AsyncBundleItemReader, super::Error> {
+    ) -> Result<AsyncBundleItemReader<'_>, super::Error> {
         let (entry, item, authenticator, tx) =
             match self._bundle_item(item.id(), item.bundle_id()).await? {
                 Some((entry, item, authenticator, tx, ..)) => (entry, item, authenticator, tx),

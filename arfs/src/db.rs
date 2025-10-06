@@ -1,14 +1,13 @@
 use crate::serde_tag::Error as TagError;
-use crate::types::drive::{DriveEntity, DriveHeader, DriveId, DriveKind, DriveMetadata};
-use crate::types::drive_signature::{
-    DriveSignatureEntity, DriveSignatureHeader, DriveSignatureKind,
-};
+use crate::types::drive::{DriveEntity, DriveId, DriveKind};
+use crate::types::drive_signature::{DriveSignatureEntity, DriveSignatureKind};
 use crate::types::file::{FileEntity, FileKind};
-use crate::types::folder::{FolderEntity, FolderId, FolderKind};
+use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::snapshot::{SnapshotEntity, SnapshotKind};
 use crate::types::{Entity, Header, Metadata, Model, ParseError};
 use crate::{Privacy, Scope};
-use ario_client::{Client, ItemArl};
+use ario_client::Client;
+use ario_client::location::ItemArl;
 use ario_core::BlockNumber;
 use ario_core::blob::OwnedBlob;
 use ario_core::network::NetworkIdentifier;
@@ -151,8 +150,8 @@ async fn bootstrap(
     scope: &Scope,
 ) -> Result<Config, super::Error> {
     let owner = scope.owner();
-    let (drive_id, location) =
-        crate::find_drive_by_id_owner(client, drive_id, owner.as_ref()).await?;
+    let (drive_id, item) = crate::find_drive_by_id_owner(client, drive_id, owner.as_ref()).await?;
+    let location = client.location_by_item_id(&item.id()).await?;
     let drive_entity = crate::drive_entity(
         client,
         &drive_id,

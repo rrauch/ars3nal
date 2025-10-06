@@ -14,15 +14,16 @@ use crate::db::Db;
 use crate::db::Error as DbError;
 use crate::types::drive::{DriveEntity, DriveHeader, DriveId, DriveKind};
 use crate::types::folder::{FolderEntity, FolderId, FolderKind};
-use crate::types::{AuthMode, Entity, Header, Metadata, Model, ParseError, HasId};
+use crate::types::{AuthMode, Entity, HasId, Header, Metadata, Model, ParseError};
 use crate::vfs::Error as VfsError;
 use ario_client::Client;
+use ario_client::Error as ClientError;
 use ario_client::data_reader::{AsyncBundleItemReader, AsyncTxReader};
 use ario_client::graphql::{
     SortOrder, TagFilter, TxQuery, TxQueryFilterCriteria, TxQueryItem, WithTxResponseFields,
 };
+use ario_client::location::ItemArl;
 use ario_client::tx::Status as TxStatus;
-use ario_client::{Error as ClientError, ItemArl};
 use ario_core::confidential::{Confidential, NewSecretExt};
 use ario_core::tag::Tag;
 use ario_core::tx::TxId;
@@ -121,8 +122,9 @@ impl ArFs {
         )
         .await?;
 
-        let (drive_id, location) =
+        let (drive_id, item) =
             find_drive_by_id_owner(&client, &drive_id, scope.owner().as_ref()).await?;
+        let location = client.location_by_item_id(&item.id()).await?;
         let drive = drive_entity(
             &client,
             &drive_id,
@@ -541,7 +543,7 @@ type TagsOnly = WithTxResponseFields<false, false, false, false, false, false, t
 fn find_drive_ids_by_owner<'a>(
     client: &'a Client,
     owner: &'a WalletAddress,
-) -> impl Stream<Item = Result<(DriveId, ItemArl), Error>> + Unpin + 'a {
+) -> impl Stream<Item = Result<(DriveId, TxQueryItem), Error>> + Unpin + 'a {
     client
         .query_transactions_with_fields::<TagsOnly>(
             TxQuery::builder()
@@ -558,7 +560,7 @@ fn find_drive_ids_by_owner<'a>(
                 .build(),
         )
         .map(|r| match r {
-            Ok(item) => Ok((to_drive_id(&item)?, item.to_arl())),
+            Ok(item) => Ok((to_drive_id(&item)?, item)),
             Err(e) => Err(e.into()),
         })
 }
@@ -573,7 +575,7 @@ async fn find_drive_by_id_owner<'a>(
     client: &'a Client,
     drive_id: &'a DriveId,
     owner: &'a WalletAddress,
-) -> Result<(DriveId, ItemArl), Error> {
+) -> Result<(DriveId, TxQueryItem), Error> {
     client
         .query_transactions_with_fields::<TagsOnly>(
             TxQuery::builder()
@@ -597,7 +599,7 @@ async fn find_drive_by_id_owner<'a>(
                 .build(),
         )
         .map(|r| match r {
-            Ok(item) => Ok((to_drive_id(&item)?, item.to_arl())),
+            Ok(item) => Ok((to_drive_id(&item)?, item)),
             Err(e) => Err(Error::from(e)),
         })
         .try_next()
@@ -619,7 +621,7 @@ async fn find_entity_location_by_id_drive<'a, E: Entity + HasId>(
 where
     <E as HasId>::Id: Display,
 {
-    client
+    let item = client
         .query_transactions_with_fields::<TagsOnly>(
             TxQuery::builder()
                 .filter_criteria(
@@ -644,19 +646,16 @@ where
                 .max_results(NonZeroUsize::try_from(1).unwrap())
                 .build(),
         )
-        .map(|r| match r {
-            Ok(item) => Ok::<ItemArl, Error>(item.to_arl()), // todo: implement recursive search if nested
-            Err(e) => Err(e.into()),
-        })
         .try_next()
         .await?
-        .ok_or(
-            EntityError::NotFound {
-                entity_type: E::TYPE,
-                details: id.to_string(),
-            }
-            .into(),
-        )
+        .ok_or(EntityError::NotFound {
+            entity_type: E::TYPE,
+            details: id.to_string(),
+        })?;
+    client
+        .location_by_item_id(&item.id())
+        .await
+        .map_err(|e| e.into())
 }
 
 trait MetadataReader: AsyncRead + AsyncSeek + Send + Unpin {

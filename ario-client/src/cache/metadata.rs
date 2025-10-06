@@ -242,7 +242,7 @@ impl Cache {
                         },
                     )
                 },
-                async |key, value, l2| {
+                async |_, value, l2| {
                     let item = value.0;
                     let authenticator = value.1;
                     l2.insert_bundle_item(item.invalidate(), authenticator)

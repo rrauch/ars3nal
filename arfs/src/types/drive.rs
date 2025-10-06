@@ -1,8 +1,7 @@
 use crate::types::folder::FolderId;
 use crate::types::{
-    AuthMode, BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType, HasDriveId, HasId,
-    HasName, HasTimestamp, MaybeHasCipher, Model, SignatureFormat, TaggedId, TimestampSeconds,
-    ToFromStr,
+    AuthMode, BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType, HasId, HasName,
+    HasTimestamp, MaybeHasCipher, Model, SignatureFormat, TaggedId, TimestampSeconds, ToFromStr,
 };
 use crate::{ContentType, Privacy, Timestamp};
 use ario_core::blob::{Blob, OwnedBlob};
@@ -133,7 +132,7 @@ mod tests {
     use crate::types::folder::FolderId;
     use crate::types::{Header, Metadata};
     use crate::{ArFsVersion, ContentType, Privacy};
-    use ario_client::ItemArl;
+    use ario_client::location::ItemArl;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;
     use ario_core::{BlockNumber, JsonValue};

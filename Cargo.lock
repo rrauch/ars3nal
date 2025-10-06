@@ -142,6 +142,7 @@ dependencies = [
  "futures-concurrency",
  "futures-lite",
  "hex-literal",
+ "hybrid-array",
  "itertools",
  "moka",
  "n0-watcher",

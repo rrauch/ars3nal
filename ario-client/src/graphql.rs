@@ -1,6 +1,7 @@
 use crate::api::RequestMethod::Post;
 use crate::api::{Api, ApiRequest, ApiRequestBody, ContentType, ViaJson};
-use crate::{Client, ItemArl, ItemId, api};
+use crate::{ByteArray, Client, ItemId, api};
+use ario_core::base64::{TryFromBase64, TryFromBase64Error};
 use ario_core::{BlockId, BlockIdError, BlockNumber, Gateway, tx};
 use async_stream::try_stream;
 use bytesize::ByteSize;
@@ -9,7 +10,7 @@ pub use cynic::QueryBuilder as GraphQlQueryBuilder;
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -18,7 +19,8 @@ use thiserror::Error;
 
 use crate::graphql::ConversionError::{ByteSizeError, InvalidTimestamp};
 use ario_core::MaybeOwned;
-use ario_core::base64::{Base64Error, FromBase64};
+use ario_core::base64::{Base64Error, FromBase64, ToBase64};
+use ario_core::blob::{AsBlob, Blob};
 use ario_core::bundle::{
     BundleAnchor, BundleAnchorError, BundleId, BundleItemId, BundleItemIdError,
 };
@@ -31,6 +33,7 @@ use cynic::schema::HasField;
 use cynic::{Operation, OperationBuilder, QueryFragment, QueryVariablesFields};
 use derive_where::derive_where;
 use futures_lite::Stream;
+use hybrid_array::sizes::U32;
 
 #[cynic::schema("arweave")]
 mod schema {}
@@ -66,6 +69,8 @@ pub enum ConversionError {
     BlockIdError(#[from] BlockIdError),
     #[error(transparent)]
     BundleItemIdError(#[from] BundleItemIdError),
+    #[error("invalid bundled in id value")]
+    BundledInIdError,
     #[error(transparent)]
     TxAnchorError(#[from] TxAnchorError),
     #[error(transparent)]
@@ -212,12 +217,78 @@ pub struct TxQuery<'a> {
     sort_order: SortOrder,
 }
 
+#[derive(Debug, Clone)]
+pub enum TxQueryId<'a> {
+    ItemId(ItemId<'a>),
+    Unknown(MaybeOwned<'a, ByteArray<U32>>),
+}
+
+impl<'a> From<&'a ItemId<'a>> for TxQueryId<'a> {
+    fn from(value: &'a ItemId<'a>) -> Self {
+        Self::ItemId(value.borrow())
+    }
+}
+
+impl<'a> From<ItemId<'a>> for TxQueryId<'a> {
+    fn from(value: ItemId<'a>) -> Self {
+        Self::ItemId(value)
+    }
+}
+
+impl<'a> From<&'a TxId> for TxQueryId<'a> {
+    fn from(value: &'a TxId) -> Self {
+        Self::ItemId(ItemId::Tx(value.into()))
+    }
+}
+
+impl From<TxId> for TxQueryId<'static> {
+    fn from(value: TxId) -> Self {
+        Self::ItemId(ItemId::Tx(value.into()))
+    }
+}
+
+impl<'a> From<&'a BundleItemId> for TxQueryId<'a> {
+    fn from(value: &'a BundleItemId) -> Self {
+        Self::ItemId(ItemId::BundleItem(value.into()))
+    }
+}
+
+impl From<BundleItemId> for TxQueryId<'static> {
+    fn from(value: BundleItemId) -> Self {
+        Self::ItemId(ItemId::BundleItem(value.into()))
+    }
+}
+
+impl<'a> From<&'a BundledInId> for TxQueryId<'a> {
+    fn from(value: &'a BundledInId) -> Self {
+        Self::Unknown((&value.0).into())
+    }
+}
+
+impl From<BundledInId> for TxQueryId<'static> {
+    fn from(value: BundledInId) -> Self {
+        Self::Unknown(value.0.into())
+    }
+}
+
+impl<'a> Display for TxQueryId<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ItemId(item) => Display::fmt(item, f),
+            Self::Unknown(bytes) => {
+                let base64 = bytes.as_blob().to_base64();
+                f.write_str(base64.as_str())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, bon::Builder)]
 pub struct TxQueryFilterCriteria<'a> {
-    #[builder(with = |iter: impl IntoIterator<Item: Into<MaybeOwned<'a, TxId>>>| {
+    #[builder(with = |iter: impl IntoIterator<Item: Into<TxQueryId<'a>>>| {
             iter.into_iter().map(|v| v.into()).collect()
         }, default)]
-    ids: Vec<MaybeOwned<'a, TxId>>,
+    ids: Vec<TxQueryId<'a>>,
     #[builder(with = |iter: impl IntoIterator<Item: Into<MaybeOwned<'a, WalletAddress>>>| {
             iter.into_iter().map(|v| v.into()).collect()
         }, default)]
@@ -459,7 +530,8 @@ struct GraphQlTxQuery<T: QueryFragment<VariablesFields = ()> + Debug>
 where
     <T as QueryFragment>::SchemaType: IsFieldType<schema::Transaction>,
 {
-    #[arguments(ids: $ids, owners: $owners, recipients: $recipients, tags: $tags, bundledIn: $bundled_in, block: $block_range, first: $first, sort: $sort_order)]
+    #[arguments(ids: $ids, owners: $owners, recipients: $recipients, tags: $tags, bundledIn: $bundled_in, block: $block_range, first: $first, sort: $sort_order
+    )]
     transactions: Option<TransactionConnection<T>>,
 }
 
@@ -684,6 +756,27 @@ pub struct BundleItem {
     pub content_type: Option<String>,
     pub tags: Vec<Tag<'static>>,
     pub block: Option<Block>,
+    pub bundled_in: BundledInId,
+}
+
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct BundledInId(ByteArray<U32>);
+
+impl TryFrom<&RawBundle> for BundledInId {
+    type Error = ConversionError;
+
+    fn try_from(value: &RawBundle) -> Result<Self, Self::Error> {
+        let bytes = Blob::try_from_base64(value.id.inner().as_bytes()).map_err(|e| match e {
+            TryFromBase64Error::Base64DecodingError(base64) => ConversionError::Base64Error(base64),
+            TryFromBase64Error::OtherError(_) => unreachable!(),
+        })?;
+        Ok(BundledInId(
+            bytes
+                .try_into()
+                .map_err(|_| ConversionError::BundledInIdError)?,
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -700,6 +793,13 @@ impl TxQueryItem {
             Self::BundleItem(bundle_item) => {
                 ItemId::BundleItem(MaybeOwned::Borrowed(&bundle_item.id))
             }
+        }
+    }
+
+    pub(crate) fn into_id(self) -> ItemId<'static> {
+        match self {
+            Self::Tx(tx) => ItemId::Tx(MaybeOwned::Owned(tx.id)),
+            Self::BundleItem(bundle_item) => ItemId::BundleItem(MaybeOwned::Owned(bundle_item.id)),
         }
     }
 
@@ -732,16 +832,6 @@ impl TxQueryItem {
         match self {
             Self::Tx(tx) => tx.block.as_ref(),
             Self::BundleItem(bundle_item) => bundle_item.block.as_ref(),
-        }
-    }
-
-    #[inline]
-    pub fn to_arl(&self) -> ItemArl {
-        match self {
-            Self::Tx(tx) => ItemArl::from(tx.id.clone()),
-            Self::BundleItem(bundle_item) => {
-                ItemArl::from((bundle_item.bundle_id.clone(), bundle_item.id.clone()))
-            }
         }
     }
 }
@@ -818,6 +908,7 @@ impl<S: TxQueryFieldSelector> TryFrom<RawTx<S>> for TxQueryItem {
                 content_type,
                 tags,
                 block,
+                bundled_in: bundled_in.try_into()?,
             })
         } else {
             // plain tx

@@ -112,7 +112,7 @@ mod tests {
     use crate::types::snapshot::{SnapshotEntity, SnapshotHeader, SnapshotId, SnapshotKind};
     use crate::types::{Header, Metadata};
     use crate::{ArFsVersion, ContentType};
-    use ario_client::ItemArl;
+    use ario_client::location::ItemArl;
     use ario_core::BlockNumber;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;

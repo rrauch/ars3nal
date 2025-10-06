@@ -7,7 +7,7 @@ pub mod snapshot;
 use crate::serde_tag::{BytesToStr, Chain, ToFromStr};
 use crate::types::drive::DriveId;
 use crate::{Timestamp, serde_tag};
-use ario_client::ItemArl;
+use ario_client::location::ItemArl;
 use ario_core::base64::Base64Error;
 use ario_core::blob::{Blob, OwnedBlob};
 use ario_core::tag::Tag;

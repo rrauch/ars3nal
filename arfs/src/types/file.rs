@@ -1,4 +1,4 @@
-use crate::types::drive::{DriveId, DriveKind};
+use crate::types::drive::DriveId;
 use crate::types::folder::FolderId;
 use crate::types::{
     BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType, HasDriveId, HasId, HasName,
@@ -180,7 +180,7 @@ mod tests {
     use crate::types::folder::FolderId;
     use crate::types::{Header, Metadata};
     use crate::{ArFsVersion, ContentType};
-    use ario_client::ItemArl;
+    use ario_client::location::ItemArl;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;
     use ario_core::tx::TxId;

@@ -1,5 +1,9 @@
-use crate::types::drive::{DriveId, DriveKind};
-use crate::types::{BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType, HasId, HasName, HasTimestamp, HasVisibility, MaybeHasCipher, Model, TaggedId, TimestampSeconds, ToFromStr, Visibility, bool_false, HasDriveId};
+use crate::types::drive::DriveId;
+use crate::types::{
+    BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType, HasDriveId, HasId, HasName,
+    HasTimestamp, HasVisibility, MaybeHasCipher, Model, TaggedId, TimestampSeconds, ToFromStr,
+    Visibility, bool_false,
+};
 use crate::{ContentType, Timestamp};
 use ario_core::blob::{Blob, OwnedBlob};
 use chrono::{DateTime, Utc};
@@ -84,7 +88,7 @@ impl MaybeHasCipher for FolderKind {
 impl HasDriveId for FolderKind {
     fn drive_id(entity: &Model<Self>) -> &DriveId
     where
-        Self: Entity + Sized
+        Self: Entity + Sized,
     {
         &entity.header.inner.drive_id
     }
@@ -138,7 +142,7 @@ mod tests {
     use crate::types::folder::{FolderEntity, FolderHeader, FolderId, FolderKind, FolderMetadata};
     use crate::types::{Header, Metadata};
     use crate::{ArFsVersion, ContentType};
-    use ario_client::ItemArl;
+    use ario_client::location::ItemArl;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;
     use ario_core::{BlockNumber, JsonValue};

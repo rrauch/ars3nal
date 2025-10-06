@@ -1,6 +1,4 @@
-use crate::types::{
-    BytesToStr, Chain, Cipher, DisplayFromStr, Entity, MaybeHasCipher, Model, SignatureFormat,
-};
+use crate::types::{BytesToStr, Chain, Cipher, DisplayFromStr, Entity, Model, SignatureFormat};
 use ario_core::blob::{Blob, OwnedBlob};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
@@ -52,7 +50,7 @@ mod tests {
         DriveSignatureEntity, DriveSignatureHeader, DriveSignatureKind,
     };
     use crate::types::{Cipher, Header, Metadata, SignatureFormat};
-    use ario_client::ItemArl;
+    use ario_client::location::ItemArl;
     use ario_core::BlockNumber;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;
