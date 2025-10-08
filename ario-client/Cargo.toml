@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ario-core = { workspace = true }
+ario-core = { workspace = true, features = ["hazmat"] }
 
 async-stream = { workspace = true }
 bon = { workspace = true }
@@ -12,6 +12,7 @@ buf-list = "1.0"
 bytemuck = { workspace = true, features = ["derive"] }
 bytes = { workspace = true }
 bytesize = { workspace = true }
+castaway = "0.2"
 chrono = { workspace = true, features = ["serde"] }
 cynic = { version = "3" }
 cynic-codegen = { version = "3", optional = true }

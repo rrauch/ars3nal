@@ -18,6 +18,7 @@ use crate::types::{AuthMode, Entity, HasId, Header, Metadata, Model, ParseError}
 use crate::vfs::Error as VfsError;
 use ario_client::Client;
 use ario_client::Error as ClientError;
+use ario_client::data_reader::DataReader;
 use ario_client::graphql::{
     SortOrder, TagFilter, TxQuery, TxQueryFilterCriteria, TxQueryItem, WithTxResponseFields,
 };
@@ -732,12 +733,7 @@ where
 
     let metadata = Metadata::<E::Metadata, E>::try_from(metadata).map_err(EntityError::from)?;
 
-    Ok(Model::new(
-        header,
-        metadata,
-        block_height,
-        location.clone(),
-    ))
+    Ok(Model::new(header, metadata, block_height, location.clone()))
 }
 
 async fn drive_entity(

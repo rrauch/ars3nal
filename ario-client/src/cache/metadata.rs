@@ -198,10 +198,7 @@ impl Cache {
                 key,
                 async |key| f(key.deref()).await,
                 async |key, l2| l2.get_bundle(key).await,
-                async |key, value, l2| {
-                    l2.insert_bundle(key.0.into_owned(), value)
-                        .await
-                },
+                async |key, value, l2| l2.insert_bundle(key.0.into_owned(), value).await,
             )
             .await?)
     }
@@ -230,27 +227,17 @@ impl Cache {
             .metadata_cache
             .try_get_value(
                 key,
-                async |key| f(key.deref()).await,
-                async |key, l2| {
-                    let location = key.deref();
-                    Ok(
-                        match l2
-                            .get_bundle_item(location)
-                            .await?
-                            .map(|(item, authenticator)| {
-                                item.authenticate().map(|item| (item, authenticator))
-                            })
-                            .transpose()
-                        {
-                            Ok(r) => r,
-                            Err(_) => {
-                                // corrupted / invalid cache entry
-                                l2.invalidate_bundle_item(location).await?;
-                                None
-                            }
-                        },
-                    )
+                async |key| match f(key.deref()).await {
+                    Ok(Some(value)) => {
+                        let unauth_key = MaybeOwnedMetaKey::from(
+                            UnauthenticatedBundleItemByLocationKey::from(key.deref()),
+                        );
+                        self.metadata_cache.l1.invalidate(&unauth_key).await;
+                        Ok(Some(value))
+                    }
+                    other => other,
                 },
+                async |key, l2| Self::get_bundle_item_from_l2(key.deref(), l2).await,
                 async |key, value, l2| {
                     let location = key.deref().clone();
                     let item = value.0;
@@ -258,6 +245,57 @@ impl Cache {
                     l2.insert_bundle_item(location, item.invalidate(), authenticator)
                         .await
                 },
+            )
+            .await?
+            .map(|(item, authenticator)| (item.into(), authenticator)))
+    }
+
+    async fn get_bundle_item_from_l2(
+        location: &BundleItemArl,
+        l2: &Box<DynL2MetadataCache<'_>>,
+    ) -> Result<
+        Option<(
+            AuthenticatedBundleItem<'static>,
+            BundleItemAuthenticator<'static>,
+        )>,
+        std::io::Error,
+    > {
+        Ok(
+            match l2
+                .get_bundle_item(location)
+                .await?
+                .map(|(item, authenticator)| item.authenticate().map(|item| (item, authenticator)))
+                .transpose()
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    // corrupted / invalid cache entry
+                    l2.invalidate_bundle_item(location).await?;
+                    None
+                }
+            },
+        )
+    }
+
+    pub(crate) async fn get_unauthenticated_bundle_item(
+        &self,
+        location: &BundleItemArl,
+        f: impl AsyncFnOnce(
+            &BundleItemArl,
+        ) -> Result<Option<UnauthenticatedBundleItem<'static>>, crate::Error>,
+    ) -> Result<Option<UnauthenticatedBundleItem<'static>>, crate::Error> {
+        let key = UnauthenticatedBundleItemByLocationKey::from(location);
+        Ok(self
+            .metadata_cache
+            .try_get_value(
+                key,
+                async |key| f(key.deref()).await,
+                async |key, l2| {
+                    Ok(Self::get_bundle_item_from_l2(key.deref(), l2)
+                        .await?
+                        .map(|(i, _)| i.invalidate()))
+                },
+                async |_, _, _| Ok(()),
             )
             .await?)
     }
@@ -273,10 +311,7 @@ impl Cache {
                 key,
                 async |_| Ok(None),
                 async |key, l2| l2.get_item_location(key).await,
-                async |key, value, l2| {
-                    l2.insert_item_location(key.0.clone().into_owned(), value)
-                        .await
-                },
+                async |_, _, _| Ok(()),
             )
             .await?)
     }
@@ -335,6 +370,9 @@ impl<'a> ToOwned for MaybeOwnedMetaKey<'a> {
             Self::BundleItemByLocation(o) => {
                 MetaKey(MaybeOwnedMetaKey::BundleItemByLocation(o.to_owned()))
             }
+            Self::UnauthenticatedBundleItemByLocation(o) => MetaKey(
+                MaybeOwnedMetaKey::UnauthenticatedBundleItemByLocation(o.to_owned()),
+            ),
             Self::ItemLocationByRawId(o) => {
                 MetaKey(MaybeOwnedMetaKey::ItemLocationByRawId(o.to_owned()))
             }
@@ -359,6 +397,7 @@ pub(super) enum MetaValue {
             BundleItemAuthenticator<'static>,
         ),
     ),
+    UnauthenticatedBundleItem(UnauthenticatedBundleItem<'static>),
     ItemLocation(Arl),
 }
 
@@ -562,6 +601,46 @@ impl Value
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct UnauthenticatedBundleItemByLocationVariant;
+
+type UnauthenticatedBundleItemByLocationKey<'a> =
+    KeyWrapper<'a, BundleItemArl, UnauthenticatedBundleItemByLocationVariant>;
+
+impl Key for UnauthenticatedBundleItemByLocationKey<'_> {
+    type Value = UnauthenticatedBundleItem<'static>;
+}
+
+impl<'a> From<UnauthenticatedBundleItemByLocationKey<'a>> for MaybeOwnedMetaKey<'a> {
+    fn from(value: UnauthenticatedBundleItemByLocationKey<'a>) -> Self {
+        Self::UnauthenticatedBundleItemByLocation(value)
+    }
+}
+
+impl<'a> MaybeAsRef<UnauthenticatedBundleItemByLocationKey<'a>> for MaybeOwnedMetaKey<'a> {
+    fn maybe_as_ref(&self) -> Option<&UnauthenticatedBundleItemByLocationKey<'a>> {
+        match self {
+            MaybeOwnedMetaKey::UnauthenticatedBundleItemByLocation(bundle_item_by_id_tx) => {
+                Some(bundle_item_by_id_tx)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Value for UnauthenticatedBundleItem<'static> {
+    fn into_meta_value(self) -> MetaValue {
+        MetaValue::UnauthenticatedBundleItem(self)
+    }
+
+    fn try_from_meta_value(value: MetaValue) -> Option<Self> {
+        match value {
+            MetaValue::UnauthenticatedBundleItem(this) => Some(this),
+            _ => None,
+        }
+    }
+}
+
 type ItemLocationByRawIdKey<'a> = KeyWrapper<'a, RawItemId>;
 
 impl<'a> Key for ItemLocationByRawIdKey<'a> {
@@ -602,6 +681,7 @@ enum MaybeOwnedMetaKey<'a> {
     TxOffset(TxOffsetKey<'a>),
     BundleByLocation(BundleByLocationKey<'a>),
     BundleItemByLocation(BundleItemByLocationKey<'a>),
+    UnauthenticatedBundleItemByLocation(UnauthenticatedBundleItemByLocationKey<'a>),
     ItemLocationByRawId(ItemLocationByRawIdKey<'a>),
 }
 

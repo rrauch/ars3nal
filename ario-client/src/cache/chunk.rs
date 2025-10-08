@@ -1,7 +1,10 @@
 use crate::Cache;
 use crate::cache::{Context, Error, HasWeight, InnerCache};
-use crate::chunk::{RawTxDownloadChunk, UnauthenticatedTxDownloadChunk, AuthenticatedTxDownloadChunk};
-use ario_core::data::{DataRoot, TxDataChunk, AuthenticatedTxDataChunk};
+use crate::chunk::{
+    AuthenticatedTxDownloadChunk, RawTxDownloadChunk, UnauthenticatedTxDownloadChunk,
+};
+use ario_core::AuthenticationState;
+use ario_core::data::{AuthenticatedTxDataChunk, DataRoot, TxDataChunk};
 use std::iter;
 
 pub(super) type ChunkCache =
@@ -43,8 +46,9 @@ impl Cache {
             .try_get_with_by_ref(&offset, async {
                 if let Some(l2) = self.chunk_cache.l2.as_ref() {
                     if let Some(raw) = l2.get_chunk(&offset).await.map_err(Error::L2Error)? {
-                        if let Ok(validated) = UnauthenticatedTxDownloadChunk::from(raw)
-                            .authenticate(data_root, relative_offset)
+                        if let Ok(validated) =
+                            UnauthenticatedTxDownloadChunk::from((raw, relative_offset))
+                                .authenticate(data_root, relative_offset)
                         {
                             return Ok(Some(validated.chunk));
                         }
@@ -76,8 +80,8 @@ impl HasWeight for u128 {
     }
 }
 
-impl<'a, const VALIDATED: bool> HasWeight for TxDataChunk<'a, VALIDATED> {
+impl<'a, Auth: AuthenticationState> HasWeight for TxDataChunk<'a, Auth> {
     fn weigh(&self) -> usize {
-        self.len() + size_of_val(self)
+        self.len() as usize + size_of_val(self)
     }
 }

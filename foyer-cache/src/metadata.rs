@@ -3,9 +3,7 @@ use crate::{DEFAULT_MEM_BUF_SIZE, Error};
 use ario_client::RawItemId;
 use ario_client::cache::{Context, L2MetadataCache, Offset};
 use ario_client::location::{Arl, BundleItemArl};
-use ario_core::bundle::{
-    Bundle, BundleId, BundleItemAuthenticator, BundleItemId, UnauthenticatedBundleItem,
-};
+use ario_core::bundle::{Bundle, BundleItemAuthenticator, UnauthenticatedBundleItem};
 use ario_core::tx::{TxId, UnauthenticatedTx};
 use bon::bon;
 use equivalent::Equivalent;

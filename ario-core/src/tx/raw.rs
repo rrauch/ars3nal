@@ -7,7 +7,7 @@ use crate::tag::{Tag, TagName, TagValue};
 use crate::tx::{Format, SignatureType};
 use crate::typed::FromInner;
 use crate::validation::SupportsValidation;
-use crate::{JsonError, JsonValue};
+use crate::{Authenticated, AuthenticationState, JsonError, JsonValue, Unauthenticated};
 use bigdecimal::{BigDecimal, Zero};
 use serde::{Deserialize, Serialize};
 use serde_with::NoneAsEmptyString;
@@ -17,6 +17,7 @@ use serde_with::formats::Unpadded;
 use serde_with::serde_as;
 use serde_with::{DeserializeAs, DisplayFromStr, SerializeAs};
 use std::fmt::Display;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -24,9 +25,12 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Hash)]
 #[repr(transparent)]
-pub(super) struct RawTx<'a, const VALIDATED: bool = false>(RawTxData<'a>);
+pub(super) struct RawTx<'a, Auth: AuthenticationState = Unauthenticated>(
+    RawTxData<'a>,
+    PhantomData<Auth>,
+);
 
-impl<'a, const VALIDATED: bool> RawTx<'a, VALIDATED> {
+impl<'a, Auth: AuthenticationState> RawTx<'a, Auth> {
     pub(super) fn as_inner(&self) -> &RawTxData<'a> {
         &self.0
     }
@@ -40,12 +44,12 @@ impl<'a, const VALIDATED: bool> RawTx<'a, VALIDATED> {
     }
 }
 
-pub(super) type UnvalidatedRawTx<'a> = RawTx<'a, false>;
-pub(super) type ValidatedRawTx<'a> = RawTx<'a, true>;
+pub(super) type UnvalidatedRawTx<'a> = RawTx<'a, Unauthenticated>;
+pub(super) type ValidatedRawTx<'a> = RawTx<'a, Authenticated>;
 
 impl<'a> From<RawTxData<'a>> for UnvalidatedRawTx<'a> {
     fn from(value: RawTxData<'a>) -> Self {
-        RawTx(value)
+        RawTx(value, PhantomData)
     }
 }
 
@@ -55,10 +59,10 @@ impl<'a> From<ValidatedRawTx<'a>> for RawTxData<'a> {
     }
 }
 
-impl<'a, const VALIDATED: bool> RawTx<'a, VALIDATED> {
-    /// Ensure the raw tx data is *actually* valid when calling this function in a `VALIDATED` context
+impl<'a, Auth: AuthenticationState> RawTx<'a, Auth> {
+    /// Ensure the raw tx data is *actually* valid when calling this function in a `Authenticated` context
     pub(super) fn danger_from_raw_tx_data(data: RawTxData<'a>) -> Self {
-        Self(data)
+        Self(data, PhantomData)
     }
 }
 
@@ -71,7 +75,7 @@ impl<'a> ValidatedRawTx<'a> {
 impl UnvalidatedRawTx<'static> {
     pub fn from_json<J: JsonSource>(json: J) -> Result<Self, JsonError> {
         let tx_data = RawTxData::from_json(json)?;
-        Ok(Self(tx_data))
+        Ok(Self(tx_data, PhantomData))
     }
 }
 
@@ -164,7 +168,7 @@ impl<'a> SupportsValidation for UnvalidatedRawTx<'a> {
         if let Err(err) = self.is_valid() {
             return Err((self, err));
         }
-        Ok(RawTx(self.0))
+        Ok(RawTx(self.0, PhantomData))
     }
 }
 

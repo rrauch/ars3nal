@@ -1,5 +1,5 @@
 use crate::typed::{FromInner, Typed};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use hybrid_array::{Array, ArraySize};
 use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use std::io::Cursor;
 use std::marker::PhantomData;
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use thiserror::Error;
 
 pub type TypedBlob<'a, T> = Typed<T, Blob<'a>>;
@@ -23,6 +23,51 @@ impl<'a, T> TypedBlob<'a, T> {
 pub enum Blob<'a> {
     Bytes(Bytes),
     Slice(&'a [u8]),
+}
+
+impl<'a, T: Into<Blob<'a>>> FromIterator<T> for OwnedBlob {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self::from_iter(iter.into_iter().map(|b| b.into()))
+    }
+}
+
+impl OwnedBlob {
+    fn from_iter<'a>(iter: impl Iterator<Item = Blob<'a>>) -> Self {
+        let mut this = BytesMut::new();
+        iter.for_each(|b| Blob::_append(&mut this, b));
+        Self::Bytes(this.freeze())
+    }
+
+    fn append(&mut self, other: OwnedBlob) {
+        match self {
+            Self::Bytes(this) => {
+                let mut b1 = BytesMut::from(std::mem::take(this));
+                Blob::_append(&mut b1, other);
+                *this = b1.freeze();
+            }
+            Self::Slice(slice) => {
+                let mut b1 = BytesMut::from(&slice[..]);
+                Blob::_append(&mut b1, other);
+                *self = Self::Bytes(b1.freeze());
+            }
+        }
+    }
+
+    fn _append(this: &mut BytesMut, other: Blob<'_>) {
+        match other {
+            Blob::Bytes(other) => match other.try_into_mut() {
+                Ok(other) => {
+                    this.unsplit(other);
+                }
+                Err(other) => {
+                    this.extend_from_slice(other.as_ref());
+                }
+            },
+            Blob::Slice(slice) => {
+                this.extend_from_slice(slice);
+            }
+        }
+    }
 }
 
 pub type OwnedBlob = Blob<'static>;
@@ -111,6 +156,13 @@ impl<'a> Blob<'a> {
 
     pub fn borrow(&'a self) -> Blob<'a> {
         Blob::from(self.bytes())
+    }
+
+    pub fn slice(&self, range: Range<usize>) -> Self {
+        match self {
+            Blob::Bytes(b) => Blob::Bytes(b.slice(range)),
+            Blob::Slice(s) => Blob::Slice(&s[range]),
+        }
     }
 }
 

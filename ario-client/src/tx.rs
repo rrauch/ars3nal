@@ -165,10 +165,12 @@ impl Client {
         &self,
         tx_id: &TxId,
     ) -> Result<Option<AuthenticatedTx<'static>>, super::Error> {
-        self.0
+        Ok(self
+            .0
             .cache
             .get_tx(tx_id, async |tx_id| self._tx_by_id_live(tx_id).await)
-            .await
+            .await?
+            .map(|tx| tx.into()))
     }
 
     async fn _tx_by_id_live(
@@ -419,6 +421,7 @@ impl<'a> TxSubmission<UploadChunks<'a>> {
         reader: &mut R,
     ) -> Result<(), super::Error> {
         let len = (chunk.end - chunk.start) as usize;
+        let offset = chunk.start;
         Self::read_chunk_data(chunk.start, &mut buf[..len], reader)
             .await
             .map_err(|e| TxSubmissionError::UploadError(e))?;
@@ -431,7 +434,7 @@ impl<'a> TxSubmission<UploadChunks<'a>> {
                 &self.0.gw_handle,
                 &self.0.data,
                 chunk,
-                UnauthenticatedTxDataChunk::from_blob(Blob::Slice(data)),
+                UnauthenticatedTxDataChunk::from_byte_buffer(Blob::Slice(data).into(), offset),
             )
             .await?;
 
@@ -799,8 +802,8 @@ mod tests {
             .retrieve_chunk(tx_offset.absolute(total), total, data_root)
             .await?
         {
-            total += chunk.len() as u64;
-            hasher.update(&chunk);
+            total += chunk.len();
+            hasher.update_buf(chunk.authenticated_data().cursor());
             if total >= file_len {
                 break;
             }

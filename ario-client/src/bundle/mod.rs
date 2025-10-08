@@ -5,7 +5,7 @@ use crate::{Client, api, location};
 use ario_core::AuthenticatedItem;
 use ario_core::bundle::{
     AuthenticatedBundleItem, Bundle, BundleEntry, BundleId, BundleItemAuthenticator,
-    BundleItemReader, BundleReader,
+    BundleItemReader, BundleReader, UnauthenticatedBundleItem,
 };
 
 impl Client {
@@ -27,7 +27,9 @@ impl Client {
             .await?
             .ok_or_else(|| location::Error::NotFound)?;
 
-        let mut reader = self.new_data_reader(item.clone(), location.clone()).await?;
+        let mut reader = self
+            .data_item_reader(item.clone(), location.clone())
+            .await?;
 
         Ok(Some(
             BundleReader::new(&item, &mut reader)
@@ -40,17 +42,46 @@ impl Client {
         &self,
         location: &BundleItemArl,
     ) -> Result<Option<AuthenticatedBundleItem<'static>>, super::Error> {
-        match self._bundle_item(location).await? {
+        match self._bundle_item_authenticated(location).await? {
             Some((_, item, ..)) => Ok(Some(item)),
             None => Ok(None),
         }
     }
 
-    async fn _bundle_item_live(
+    pub(crate) async fn _bundle_item_authenticated(
+        &self,
+        location: &BundleItemArl,
+    ) -> Result<
+        Option<(
+            BundleEntry<'static>,
+            AuthenticatedBundleItem<'static>,
+            BundleItemAuthenticator<'static>,
+        )>,
+        super::Error,
+    > {
+        let (bundle_id, entry) = match self._bundle_entry(location).await? {
+            Some(entry) => entry,
+            None => return Ok(None),
+        };
+
+        Ok(self
+            .0
+            .cache
+            .get_bundle_item(location, async |_| {
+                Ok(Some(
+                    self._bundle_item_authenticated_live(&bundle_id, &entry, &location)
+                        .await?,
+                ))
+            })
+            .await?
+            .map(|(item, authenticator)| (entry.into_owned(), item, authenticator)))
+    }
+
+    async fn _bundle_item_authenticated_live(
         &self,
         bundle_id: &BundleId,
         entry: &BundleEntry<'_>,
-        container: &AuthenticatedItem<'_>,
+        location: &BundleItemArl,
     ) -> Result<
         (
             AuthenticatedBundleItem<'static>,
@@ -58,12 +89,13 @@ impl Client {
         ),
         super::Error,
     > {
-        let mut container_reader = self
-            .new_data_reader(
-                container.clone().into_owned(),
-                self.location_by_item_id(&container.id()).await?,
-            )
-            .await?;
+        let container_location = location.parent();
+        let container = self
+            .item_by_location(&container_location)
+            .await?
+            .ok_or(location::Error::NotFound)?;
+
+        let mut container_reader = self.data_item_reader(container, container_location).await?;
 
         let (item, authenticator) =
             BundleItemReader::read_async(&entry, &mut container_reader, bundle_id.clone())
@@ -77,18 +109,88 @@ impl Client {
         Ok((item, authenticator))
     }
 
-    pub(crate) async fn _bundle_item(
+    pub(crate) async fn _bundle_item_unauthenticated(
+        &self,
+        location: &BundleItemArl,
+    ) -> Result<Option<(BundleEntry<'static>, UnauthenticatedBundleItem<'static>)>, super::Error>
+    {
+        let (bundle_id, entry) = match self._bundle_entry(location).await? {
+            Some(entry) => entry,
+            None => return Ok(None),
+        };
+
+        Ok(self
+            .0
+            .cache
+            .get_unauthenticated_bundle_item(location, async |_| {
+                Ok(Some(
+                    self._bundle_item_unauthenticated_live(&bundle_id, &entry, &location)
+                        .await?,
+                ))
+            })
+            .await?
+            .map(|item| (entry.into_owned(), item)))
+    }
+
+    async fn _bundle_item_unauthenticated_live(
+        &self,
+        bundle_id: &BundleId,
+        entry: &BundleEntry<'_>,
+        location: &BundleItemArl,
+    ) -> Result<UnauthenticatedBundleItem<'static>, super::Error> {
+        let container_location = location.parent();
+        let container = self
+            .item_by_location(&container_location)
+            .await?
+            .ok_or(location::Error::NotFound)?;
+
+        let mut container_reader = self.data_item_reader(container, container_location).await?;
+
+        Ok(BundleItemReader::read_async_unauthenticated(
+            &entry,
+            &mut container_reader,
+            bundle_id.clone(),
+        )
+        .await
+        .map_err(api::Error::BundleError)?)
+    }
+
+    async fn _bundle_entry(
+        &self,
+        location: &BundleItemArl,
+    ) -> Result<Option<(BundleId, BundleEntry<'static>)>, super::Error> {
+        let bundle = match self.bundle_by_location(&location.parent()).await? {
+            Some(bundle) => bundle,
+            None => return Ok(None),
+        };
+
+        Ok(
+            match bundle
+                .entries()
+                .find(|e| e.id() == location.bundle_item_id())
+            {
+                Some(entry) => Some((bundle.id().clone(), entry.into_owned())),
+                None => None,
+            },
+        )
+    }
+
+    /*pub(crate) async fn _bundle_item<const AUTHENTICATED: bool>(
         &self,
         location: &BundleItemArl,
     ) -> Result<
         Option<(
             BundleEntry<'static>,
-            AuthenticatedBundleItem<'static>,
+            BundleItem<'static, AUTHENTICATED>,
             BundleItemAuthenticator<'static>,
-            AuthenticatedItem<'static>,
+            Item<'static, AUTHENTICATED>,
         )>,
         super::Error,
-    > {
+    >
+    where
+        BundleItem<'static, AUTHENTICATED>: From<AuthenticatedBundleItem<'static>>,
+        Item<'static, AUTHENTICATED>: From<AuthenticatedItem<'static>>,
+    {
         let bundle = match self.bundle_by_location(&location.parent()).await? {
             Some(bundle) => bundle,
             None => return Ok(None),
@@ -117,8 +219,10 @@ impl Client {
                 ))
             })
             .await?
-            .map(|(item, authenticator)| (entry.into_owned(), item, authenticator, container)))
-    }
+            .map(|(item, authenticator)| {
+                (entry.into_owned(), item, authenticator, container.into())
+            }))
+    }*/
 }
 
 #[cfg(test)]

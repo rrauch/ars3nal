@@ -17,7 +17,7 @@ use crate::typed::{Typed, WithDisplay, WithSerde};
 use crate::wallet::WalletAddress;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -122,16 +122,61 @@ pub enum GatewayError {
     UnsupportedUrl(String),
 }
 
-pub type AuthenticatedItem<'a> = Item<'a, true>;
-pub type UnauthenticatedItem<'a> = Item<'a, false>;
-
-#[derive(Debug, Clone)]
-pub enum Item<'a, const AUTHENTICATED: bool> {
-    Tx(Tx<'a, AUTHENTICATED>),
-    BundleItem(BundleItem<'a, AUTHENTICATED>),
+mod private {
+    pub trait Sealed {}
+    impl Sealed for super::Authenticated {}
+    impl Sealed for super::Unauthenticated {}
 }
 
-impl<'a, const AUTHENTICATED: bool> Item<'a, AUTHENTICATED> {
+pub trait AuthenticationState:
+    private::Sealed + Send + Sync + Debug + Clone + Copy + PartialEq + Eq + Hash + Unpin + 'static
+{
+    fn is_authenticated() -> bool;
+}
+impl AuthenticationState for Authenticated {
+    fn is_authenticated() -> bool {
+        true
+    }
+}
+impl AuthenticationState for Unauthenticated {
+    fn is_authenticated() -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct Authenticated;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Unauthenticated;
+
+pub type AuthenticatedItem<'a> = Item<'a, Authenticated>;
+pub type UnauthenticatedItem<'a> = Item<'a, Unauthenticated>;
+
+impl<'a> From<AuthenticatedItem<'a>> for UnauthenticatedItem<'a> {
+    fn from(value: AuthenticatedItem<'a>) -> Self {
+        value.invalidate()
+    }
+}
+
+impl<'a> AuthenticatedItem<'a> {
+    pub fn invalidate(self) -> UnauthenticatedItem<'a> {
+        match self {
+            Self::Tx(tx) => UnauthenticatedItem::Tx(tx.invalidate()),
+            Self::BundleItem(bundle_item) => {
+                UnauthenticatedItem::BundleItem(bundle_item.invalidate())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Item<'a, Auth: AuthenticationState> {
+    Tx(Tx<'a, Auth>),
+    BundleItem(BundleItem<'a, Auth>),
+}
+
+impl<'a, Auth: AuthenticationState> Item<'a, Auth> {
     #[inline]
     pub fn id(&self) -> ItemId {
         match self {
@@ -157,7 +202,7 @@ impl<'a, const AUTHENTICATED: bool> Item<'a, AUTHENTICATED> {
     }
 
     #[inline]
-    pub fn into_owned(self) -> Item<'static, AUTHENTICATED> {
+    pub fn into_owned(self) -> Item<'static, Auth> {
         match self {
             Self::Tx(tx) => Item::Tx(tx.into_owned()),
             Self::BundleItem(item) => Item::BundleItem(item.into_owned()),
@@ -165,16 +210,14 @@ impl<'a, const AUTHENTICATED: bool> Item<'a, AUTHENTICATED> {
     }
 }
 
-impl<'a, const AUTHENTICATED: bool> From<Tx<'a, AUTHENTICATED>> for Item<'a, AUTHENTICATED> {
-    fn from(value: Tx<'a, AUTHENTICATED>) -> Self {
+impl<'a, Auth: AuthenticationState> From<Tx<'a, Auth>> for Item<'a, Auth> {
+    fn from(value: Tx<'a, Auth>) -> Self {
         Self::Tx(value)
     }
 }
 
-impl<'a, const AUTHENTICATED: bool> From<BundleItem<'a, AUTHENTICATED>>
-    for Item<'a, AUTHENTICATED>
-{
-    fn from(value: BundleItem<'a, AUTHENTICATED>) -> Self {
+impl<'a, Auth: AuthenticationState> From<BundleItem<'a, Auth>> for Item<'a, Auth> {
+    fn from(value: BundleItem<'a, Auth>) -> Self {
         Self::BundleItem(value)
     }
 }

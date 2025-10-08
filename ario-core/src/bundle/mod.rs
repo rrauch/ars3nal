@@ -40,7 +40,10 @@ use crate::tx::TxId;
 use crate::typed::{FromInner, Typed, WithSerde};
 use crate::validation::{SupportsValidation, ValidateExt};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk, WalletSk};
-use crate::{AuthenticatedItem, ItemId, blob, data, entity};
+use crate::{
+    Authenticated, AuthenticatedItem, AuthenticationState, ItemId, Unauthenticated, blob, data,
+    entity,
+};
 use bytes::Buf;
 use futures_lite::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use hybrid_array::Array;
@@ -323,6 +326,28 @@ impl BundleItemReader {
             }
         }
     }
+
+    pub async fn read_async_unauthenticated<R: AsyncRead + AsyncSeek + Send + Unpin>(
+        entry: &BundleEntry<'_>,
+        mut reader: R,
+        bundle_id: BundleId,
+    ) -> Result<UnauthenticatedBundleItem<'static>, Error> {
+        match entry {
+            BundleEntry::V2(entry) => {
+                reader
+                    .seek(SeekFrom::Start(entry.container_location().offset()))
+                    .await?;
+                let item = v2::BundleItem::read_async_unauthenticated(
+                    reader,
+                    entry.len(),
+                    Some(entry.container_location().clone()),
+                    bundle_id,
+                )
+                .await?;
+                Ok(UnauthenticatedBundleItem::from_v2(item, entry.id())?)
+            }
+        }
+    }
 }
 
 pub struct BundleItemBuilder;
@@ -334,27 +359,29 @@ impl BundleItemBuilder {
 }
 
 #[derive(Debug, Clone, PartialEq, Hash, Serialize)]
-pub enum BundleItem<'a, const AUTHENTICATED: bool = false> {
-    V2(Arc<V2BundleItem<'a, AUTHENTICATED>>),
+pub enum BundleItem<'a, Auth: AuthenticationState = Unauthenticated> {
+    V2(Arc<V2BundleItem<'a, Auth>>),
 }
 
-impl<'a, const AUTHENTICATED: bool> From<V2BundleItem<'a, AUTHENTICATED>>
-    for BundleItem<'a, AUTHENTICATED>
-{
-    fn from(value: V2BundleItem<'a, AUTHENTICATED>) -> Self {
+impl<'a, Auth: AuthenticationState> From<V2BundleItem<'a, Auth>> for BundleItem<'a, Auth> {
+    fn from(value: V2BundleItem<'a, Auth>) -> Self {
         Self::V2(Arc::new(value))
     }
 }
 
-impl<'a, const AUTHENTICATED: bool> From<Arc<V2BundleItem<'a, AUTHENTICATED>>>
-    for BundleItem<'a, AUTHENTICATED>
-{
-    fn from(value: Arc<V2BundleItem<'a, AUTHENTICATED>>) -> Self {
+impl<'a, Auth: AuthenticationState> From<Arc<V2BundleItem<'a, Auth>>> for BundleItem<'a, Auth> {
+    fn from(value: Arc<V2BundleItem<'a, Auth>>) -> Self {
         Self::V2(value)
     }
 }
 
-pub type UnauthenticatedBundleItem<'a> = BundleItem<'a, false>;
+pub type UnauthenticatedBundleItem<'a> = BundleItem<'a, Unauthenticated>;
+
+impl<'a> From<AuthenticatedBundleItem<'a>> for UnauthenticatedBundleItem<'a> {
+    fn from(value: AuthenticatedBundleItem<'a>) -> Self {
+        value.invalidate()
+    }
+}
 
 impl<'de, 'a> Deserialize<'de> for UnauthenticatedBundleItem<'a> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -363,7 +390,7 @@ impl<'de, 'a> Deserialize<'de> for UnauthenticatedBundleItem<'a> {
     {
         #[derive(Deserialize)]
         enum Helper<'a> {
-            V2(Arc<V2BundleItem<'a, false>>),
+            V2(Arc<V2BundleItem<'a, Unauthenticated>>),
         }
 
         let helper = Helper::deserialize(deserializer)?;
@@ -373,7 +400,7 @@ impl<'de, 'a> Deserialize<'de> for UnauthenticatedBundleItem<'a> {
     }
 }
 
-pub type AuthenticatedBundleItem<'a> = BundleItem<'a, true>;
+pub type AuthenticatedBundleItem<'a> = BundleItem<'a, Authenticated>;
 
 impl<'a> AuthenticatedBundleItem<'a> {
     pub fn invalidate(self) -> UnauthenticatedBundleItem<'a> {
@@ -412,7 +439,7 @@ impl<'a> UnauthenticatedBundleItem<'a> {
 
 impl UnauthenticatedBundleItem<'static> {
     fn from_v2(
-        v2: V2BundleItem<'static, false>,
+        v2: V2BundleItem<'static, Unauthenticated>,
         expected_id: &BundleItemId,
     ) -> Result<Self, Error> {
         if v2.id() != expected_id {
@@ -470,7 +497,7 @@ impl UnauthenticatedBundleItem<'static> {
     }
 }
 
-impl<'a, const AUTHENTICATED: bool> ArEntity for BundleItem<'a, AUTHENTICATED> {
+impl<'a, Auth: AuthenticationState> ArEntity for BundleItem<'a, Auth> {
     type Id = BundleItemId;
     type Hash = BundleItemHash;
 
@@ -479,7 +506,7 @@ impl<'a, const AUTHENTICATED: bool> ArEntity for BundleItem<'a, AUTHENTICATED> {
     }
 }
 
-impl<'a, const AUTHENTICATED: bool> BundleItem<'a, AUTHENTICATED> {
+impl<'a, Auth: AuthenticationState> BundleItem<'a, Auth> {
     #[inline]
     pub fn id(&self) -> &BundleItemId {
         match self {
@@ -543,7 +570,7 @@ impl<'a, const AUTHENTICATED: bool> BundleItem<'a, AUTHENTICATED> {
         }
     }
 
-    pub fn into_owned(self) -> BundleItem<'static, AUTHENTICATED> {
+    pub fn into_owned(self) -> BundleItem<'static, Auth> {
         match self {
             Self::V2(v2) => BundleItem::V2(Arc::new(Arc::unwrap_or_clone(v2).into_owned())),
         }

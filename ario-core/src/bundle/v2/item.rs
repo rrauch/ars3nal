@@ -1,8 +1,7 @@
-use crate::ItemId;
 use crate::blob::{AsBlob, Blob, OwnedBlob};
 use crate::bundle::TagError::IncorrectTagCount;
-use crate::bundle::v2::reader::FlowExt;
 use crate::bundle::v2::reader::item::ItemReader;
+use crate::bundle::v2::reader::{Flow, FlowExt};
 use crate::bundle::v2::tag::{from_avro, to_avro};
 use crate::bundle::v2::{
     BundleItemChunker, BundleItemDataAuthenticator, BundleItemHashBuilder, ContainerLocation,
@@ -17,16 +16,21 @@ use crate::crypto::hash::HashableExt;
 use crate::tag::Tag;
 use crate::validation::SupportsValidation;
 use crate::wallet::WalletAddress;
+use crate::{Authenticated, AuthenticationState, ItemId, Unauthenticated};
 use bytes::{BufMut, BytesMut};
 use futures_lite::AsyncRead;
 use itertools::Itertools;
 use maybe_owned::MaybeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::io::Read;
+use std::marker::PhantomData;
 
 #[derive(Clone, Debug, PartialEq, Hash)]
 #[repr(transparent)]
-pub struct BundleItem<'a, const AUTHENTICATED: bool = false>(BundleItemInner<'a>);
+pub struct BundleItem<'a, Auth: AuthenticationState = Unauthenticated>(
+    BundleItemInner<'a>,
+    PhantomData<Auth>,
+);
 
 #[derive(Clone, Debug, PartialEq, Hash, Serialize, Deserialize)]
 struct BundleItemInner<'a> {
@@ -41,7 +45,7 @@ struct BundleItemInner<'a> {
     hash: BundleItemHash,
 }
 
-impl<'a, const AUTHENTICATED: bool> BundleItem<'a, AUTHENTICATED> {
+impl<'a, Auth: AuthenticationState> BundleItem<'a, Auth> {
     #[inline]
     pub fn id(&self) -> &BundleItemId {
         &self.0.id
@@ -82,27 +86,30 @@ impl<'a, const AUTHENTICATED: bool> BundleItem<'a, AUTHENTICATED> {
         self.0.signature_data.owner()
     }
 
-    pub fn into_owned(self) -> BundleItem<'static, AUTHENTICATED> {
-        BundleItem(BundleItemInner {
-            id: self.0.id,
-            bundle_id: self.0.bundle_id,
-            anchor: self.0.anchor,
-            tags: self
-                .0
-                .tags
-                .into_iter()
-                .map(|t| t.into_owned())
-                .collect_vec(),
-            target: self.0.target.clone(),
-            data_size: self.0.data_size,
-            data_offset: self.0.data_size,
-            signature_data: self.0.signature_data,
-            hash: self.0.hash,
-        })
+    pub fn into_owned(self) -> BundleItem<'static, Auth> {
+        BundleItem(
+            BundleItemInner {
+                id: self.0.id,
+                bundle_id: self.0.bundle_id,
+                anchor: self.0.anchor,
+                tags: self
+                    .0
+                    .tags
+                    .into_iter()
+                    .map(|t| t.into_owned())
+                    .collect_vec(),
+                target: self.0.target.clone(),
+                data_size: self.0.data_size,
+                data_offset: self.0.data_size,
+                signature_data: self.0.signature_data,
+                hash: self.0.hash,
+            },
+            PhantomData,
+        )
     }
 }
 
-pub type AuthenticatedItem<'a> = BundleItem<'a, true>;
+pub type AuthenticatedItem<'a> = BundleItem<'a, Authenticated>;
 
 impl AuthenticatedItem<'_> {
     pub fn try_as_blob(&self) -> Result<OwnedBlob, TagError> {
@@ -133,13 +140,13 @@ impl AuthenticatedItem<'_> {
 
 impl<'a> AuthenticatedItem<'a> {
     pub fn invalidate(self) -> UnauthenticatedItem<'a> {
-        BundleItem(self.0)
+        BundleItem(self.0, PhantomData)
     }
 }
 
-pub type UnauthenticatedItem<'a> = BundleItem<'a, false>;
+pub type UnauthenticatedItem<'a> = BundleItem<'a, Unauthenticated>;
 
-impl<'a, const AUTHENTICATED: bool> Serialize for BundleItem<'a, AUTHENTICATED> {
+impl<'a, Auth: AuthenticationState> Serialize for BundleItem<'a, Auth> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -153,7 +160,10 @@ impl<'de, 'a> Deserialize<'de> for UnauthenticatedItem<'a> {
     where
         D: Deserializer<'de>,
     {
-        Ok(Self(BundleItemInner::deserialize(deserializer)?))
+        Ok(Self(
+            BundleItemInner::deserialize(deserializer)?,
+            PhantomData,
+        ))
     }
 }
 
@@ -175,25 +185,28 @@ impl UnauthenticatedItem<'static> {
             })
             .map_err(BundleItemError::from)?;
         }
-        let item = Self(BundleItemInner {
-            id,
-            bundle_id,
-            anchor: raw
-                .anchor
-                .map(|blob| BundleAnchor::try_from(blob))
-                .transpose()
-                .map_err(|e| BundleItemError::InvalidAnchor(e.to_string()))?,
-            tags,
-            target: raw
-                .target
-                .map(|blob| WalletAddress::try_from(blob))
-                .transpose()
-                .map_err(|e| BundleItemError::InvalidWalletAddress(e.to_string()))?,
-            data_size: raw.data_size,
-            signature_data,
-            hash,
-            data_offset: raw.data_offset,
-        });
+        let item = Self(
+            BundleItemInner {
+                id,
+                bundle_id,
+                anchor: raw
+                    .anchor
+                    .map(|blob| BundleAnchor::try_from(blob))
+                    .transpose()
+                    .map_err(|e| BundleItemError::InvalidAnchor(e.to_string()))?,
+                tags,
+                target: raw
+                    .target
+                    .map(|blob| WalletAddress::try_from(blob))
+                    .transpose()
+                    .map_err(|e| BundleItemError::InvalidWalletAddress(e.to_string()))?,
+                data_size: raw.data_size,
+                signature_data,
+                hash,
+                data_offset: raw.data_offset,
+            },
+            PhantomData,
+        );
 
         Ok((item, raw.data_verifier))
     }
@@ -204,8 +217,29 @@ impl UnauthenticatedItem<'static> {
         container_location: Option<ContainerLocation>,
         bundle_id: BundleId,
     ) -> Result<(Self, BundleItemDataAuthenticator<'static>), Error> {
+        Self::_read::<_, true>(reader, len, container_location, bundle_id)
+    }
+
+    pub(crate) fn read_unauthenticated<R: Read>(
+        reader: R,
+        len: u64,
+        container_location: Option<ContainerLocation>,
+        bundle_id: BundleId,
+    ) -> Result<Self, Error> {
+        Self::_read::<_, false>(reader, len, container_location, bundle_id).map(|(item, _)| item)
+    }
+
+    fn _read<R: Read, const PROCESS_DATA: bool>(
+        reader: R,
+        len: u64,
+        container_location: Option<ContainerLocation>,
+        bundle_id: BundleId,
+    ) -> Result<(Self, BundleItemDataAuthenticator<'static>), Error>
+    where
+        ItemReader<PROCESS_DATA>: Flow<Output = RawBundleItem<'static>>,
+    {
         Ok(Self::try_from_raw(
-            ItemReader::builder()
+            ItemReader::<PROCESS_DATA>::builder()
                 .len(len)
                 .maybe_container_location(container_location)
                 .build()
@@ -218,10 +252,33 @@ impl UnauthenticatedItem<'static> {
         reader: R,
         len: u64,
         container_location: Option<ContainerLocation>,
-        bundle_id: ItemId,
+        bundle_id: BundleId,
     ) -> Result<(Self, BundleItemDataAuthenticator<'static>), Error> {
+        Self::_read_async::<_, true>(reader, len, container_location, bundle_id).await
+    }
+
+    pub(crate) async fn read_async_unauthenticated<R: AsyncRead + Unpin>(
+        reader: R,
+        len: u64,
+        container_location: Option<ContainerLocation>,
+        bundle_id: BundleId,
+    ) -> Result<Self, Error> {
+        Self::_read_async::<_, false>(reader, len, container_location, bundle_id)
+            .await
+            .map(|(item, _)| item)
+    }
+
+    async fn _read_async<R: AsyncRead + Unpin, const PROCESS_DATA: bool>(
+        reader: R,
+        len: u64,
+        container_location: Option<ContainerLocation>,
+        bundle_id: ItemId,
+    ) -> Result<(Self, BundleItemDataAuthenticator<'static>), Error>
+    where
+        ItemReader<PROCESS_DATA>: Flow<Output = RawBundleItem<'static>>,
+    {
         Ok(Self::try_from_raw(
-            ItemReader::builder()
+            ItemReader::<PROCESS_DATA>::builder()
                 .len(len)
                 .maybe_container_location(container_location)
                 .build()
@@ -255,7 +312,7 @@ impl<'a> SupportsValidation for UnauthenticatedItem<'a> {
                 }),
             ));
         }
-        Ok(BundleItem(self.0))
+        Ok(BundleItem(self.0, PhantomData))
     }
 }
 

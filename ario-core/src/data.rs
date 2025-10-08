@@ -1,18 +1,19 @@
 use crate::blob::{AsBlob, Blob, TypedBlob};
-use crate::bundle;
-use crate::bundle::MaybeOwnedBundledDataItem;
+use crate::buffer::{ByteBuffer, TypedByteBuffer};
+use crate::bundle::{BundleItemAuthenticator, BundleItemDataProof, MaybeOwnedBundledDataItem};
 use crate::chunking::{Chunker, ChunkerExt, DefaultChunker, MaybeOwnedChunk, TypedChunk};
 use crate::crypto::hash::{Hasher, Sha256};
 use crate::crypto::merkle;
 use crate::crypto::merkle::{DefaultMerkleRoot, DefaultProof, MerkleRoot, MerkleTree, Proof};
 use crate::typed::{FromInner, WithSerde};
 use crate::validation::SupportsValidation;
+use crate::{Authenticated, AuthenticationState, Unauthenticated, bundle};
 use derive_where::derive_where;
 use futures_lite::AsyncRead;
 use maybe_owned::MaybeOwned;
 use std::borrow::Borrow;
 use std::fmt::Debug;
-use std::io::Cursor;
+use std::marker::PhantomData;
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
@@ -27,58 +28,89 @@ pub type ExternalDataItem<'a> = MerkleAuthenticatableDataItem<'a, Sha256, Defaul
 pub type MaybeOwnedExternalDataItem<'a> = MaybeOwned<'a, ExternalDataItem<'a>>;
 
 #[derive_where(Clone, PartialEq, Hash, Debug)]
-pub struct AuthenticatableBlob<'a, T, const AUTHENTICATED: bool = false>(TypedBlob<'a, T>);
-pub type AuthenticatedBlob<'a, T> = AuthenticatableBlob<'a, T, true>;
-pub type UnauthenticatedBlob<'a, T> = AuthenticatableBlob<'a, T, false>;
+pub struct DataChunk<'a, T, Auth: AuthenticationState = Unauthenticated> {
+    data: TypedByteBuffer<'a, T>,
+    offset: u64,
+    _phantom: PhantomData<Auth>,
+}
 
-impl<'a, T, const AUTHENTICATED: bool> AuthenticatableBlob<'a, T, AUTHENTICATED> {
-    pub fn len(&self) -> usize {
-        self.0.len()
+pub type AuthenticatedDataChunk<'a, T> = DataChunk<'a, T, Authenticated>;
+pub type UnauthenticatedDataChunk<'a, T> = DataChunk<'a, T, Unauthenticated>;
+
+impl<'a, T, Auth: AuthenticationState> DataChunk<'a, T, Auth> {
+    pub fn len(&self) -> u64 {
+        self.data.len()
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn range(&self) -> Range<u64> {
+        self.offset..(self.offset + self.len())
     }
 }
 
-impl<'a, T> AsBlob for AuthenticatedBlob<'a, T> {
-    fn as_blob(&self) -> Blob<'_> {
-        self.0.as_blob()
+impl<'a, T> AuthenticatedDataChunk<'a, T> {
+    pub fn authenticated_data(&self) -> TypedByteBuffer<'a, (T, Authenticated)> {
+        TypedByteBuffer::cast(self.data.clone().into_untyped())
+    }
+
+    pub fn authenticated_data_erased(&self) -> TypedByteBuffer<'a, Authenticated> {
+        TypedByteBuffer::cast(self.data.clone().into_untyped())
     }
 }
 
-impl<T> AsRef<[u8]> for AuthenticatedBlob<'_, T> {
-    fn as_ref(&self) -> &[u8] {
-        self.0.bytes()
+impl<'a, T> AuthenticatedDataChunk<'a, T> {
+    pub fn invalidate(self) -> UnauthenticatedDataChunk<'a, T> {
+        UnauthenticatedDataChunk::from_byte_buffer(self.data.into_untyped(), self.offset)
+    }
+
+    pub fn into_inner(self) -> TypedByteBuffer<'a, T> {
+        self.data
     }
 }
 
-impl<'a, T> UnauthenticatedBlob<'a, T> {
-    pub(crate) fn from_inner(inner: TypedBlob<'a, T>) -> Self {
-        Self(inner)
+impl<'a, T> From<AuthenticatedDataChunk<'a, T>> for UnauthenticatedDataChunk<'a, T> {
+    fn from(value: AuthenticatedDataChunk<'a, T>) -> Self {
+        value.invalidate()
+    }
+}
+
+#[cfg(feature = "hazmat")]
+pub mod hazmat {
+    use crate::Unauthenticated;
+    use crate::buffer::TypedByteBuffer;
+    use crate::data::UnauthenticatedDataChunk;
+
+    impl<'a, T> UnauthenticatedDataChunk<'a, T> {
+        pub fn danger_unauthenticated_data(&self) -> TypedByteBuffer<'a, (T, Unauthenticated)> {
+            TypedByteBuffer::cast(self.data.clone().into_untyped())
+        }
+
+        pub fn danger_unauthenticated_data_erased(&self) -> TypedByteBuffer<'a, Unauthenticated> {
+            TypedByteBuffer::cast(self.data.clone().into_untyped())
+        }
+    }
+}
+
+impl<'a, T> UnauthenticatedDataChunk<'a, T> {
+    #[inline]
+    pub fn from_byte_buffer(data: ByteBuffer<'a>, offset: u64) -> Self {
+        Self {
+            data: TypedByteBuffer::cast(data).into(),
+            offset,
+            _phantom: PhantomData,
+        }
     }
 }
 
 pub struct TxDataKind;
-
-pub type TxDataChunk<'a, const AUTHENTICATED: bool> =
-    AuthenticatableBlob<'a, TxDataKind, AUTHENTICATED>;
-pub type AuthenticatedTxDataChunk<'a> = TxDataChunk<'a, true>;
-
-impl<'a> AuthenticatedTxDataChunk<'a> {
-    pub fn invalidate(self) -> UnauthenticatedTxDataChunk<'a> {
-        TxDataChunk::from_inner(self.0)
-    }
-
-    pub fn into_inner(self) -> TypedBlob<'a, TxDataKind> {
-        self.0
-    }
-}
-
-pub type UnauthenticatedTxDataChunk<'a> = TxDataChunk<'a, false>;
+pub type TxDataChunk<'a, Auth: AuthenticationState> = DataChunk<'a, TxDataKind, Auth>;
+pub type AuthenticatedTxDataChunk<'a> = AuthenticatedDataChunk<'a, TxDataKind>;
+pub type UnauthenticatedTxDataChunk<'a> = UnauthenticatedDataChunk<'a, TxDataKind>;
 
 impl<'a> UnauthenticatedTxDataChunk<'a> {
-    #[inline]
-    pub fn from_blob(data: Blob<'a>) -> Self {
-        Self(TypedBlob::from_inner(data))
-    }
-
     #[inline]
     pub fn authenticate(
         self,
@@ -99,11 +131,15 @@ impl<'a> SupportsValidation for UnauthenticatedTxDataChunk<'a> {
     ) -> Result<Self::Validated, (Self, Self::Error)> {
         if let Err(err) = reference
             .data_root
-            .authenticate_data(&mut Cursor::new(self.0.bytes()), &reference.proof)
+            .authenticate_data(&mut self.data.cursor(), &reference.proof)
         {
             return Err((self, err));
         }
-        Ok(AuthenticatableBlob(self.0))
+        Ok(DataChunk {
+            data: self.data,
+            offset: self.offset,
+            _phantom: PhantomData,
+        })
     }
 }
 
@@ -121,6 +157,61 @@ impl<'a> TxDataAuthenticityProof<'a> {
         Self {
             data_root: data_root.into(),
             proof: proof.into(),
+        }
+    }
+}
+
+pub struct BundleItemDataKind;
+
+pub type BundleItemDataChunk<'a, Auth: AuthenticationState> =
+    DataChunk<'a, BundleItemDataKind, Auth>;
+pub type AuthenticatedBundleItemDataChunk<'a> = AuthenticatedDataChunk<'a, BundleItemDataKind>;
+pub type UnauthenticatedBundleItemDataChunk<'a> = UnauthenticatedDataChunk<'a, BundleItemDataKind>;
+
+impl<'a> UnauthenticatedBundleItemDataChunk<'a> {
+    #[inline]
+    pub fn authenticate(
+        self,
+        proof: &BundleItemDataAuthenticityProof<'_>,
+    ) -> Result<AuthenticatedBundleItemDataChunk<'a>, (Self, bundle::Error)> {
+        self.validate_with(proof)
+    }
+}
+
+impl<'a> SupportsValidation for UnauthenticatedBundleItemDataChunk<'a> {
+    type Validated = AuthenticatedBundleItemDataChunk<'a>;
+    type Error = bundle::Error;
+    type Reference<'r> = BundleItemDataAuthenticityProof<'r>;
+
+    fn validate_with(
+        self,
+        reference: &Self::Reference<'_>,
+    ) -> Result<Self::Validated, (Self, Self::Error)> {
+        if let Err(err) = reference
+            .authenticator
+            .authenticate(&mut self.data.cursor(), &reference.proof)
+        {
+            return Err((self, err));
+        }
+        Ok(DataChunk {
+            data: self.data,
+            offset: self.offset,
+            _phantom: PhantomData,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BundleItemDataAuthenticityProof<'a> {
+    authenticator: BundleItemAuthenticator<'a>,
+    proof: BundleItemDataProof<'a>,
+}
+
+impl<'a> BundleItemDataAuthenticityProof<'a> {
+    pub fn new(authenticator: BundleItemAuthenticator<'a>, proof: BundleItemDataProof<'a>) -> Self {
+        Self {
+            authenticator,
+            proof,
         }
     }
 }

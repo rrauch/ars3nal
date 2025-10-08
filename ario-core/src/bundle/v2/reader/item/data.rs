@@ -1,13 +1,18 @@
-use crate::blob::OwnedBlob;
+use crate::blob::{Blob, OwnedBlob};
 use crate::bundle::BundleItemError;
 use crate::bundle::v2::reader::item::ItemReaderCtx;
 use crate::bundle::v2::reader::{PollResult, Result, Step};
-use crate::bundle::v2::{BundleItemDataProcessor, ContainerLocation, RawBundleItem, SignatureType};
+use crate::bundle::v2::{
+    BundleItemChunker, BundleItemDataAuthenticator, BundleItemDataProcessor, ContainerLocation,
+    DataDeepHash, RawBundleItem, SignatureType,
+};
+use crate::chunking::DefaultChunker;
+use crate::crypto::hash::HashableExt;
 use bytes::Buf;
 use std::cmp::min;
 use std::io::Cursor;
 
-pub(crate) struct Data {
+pub(crate) struct Data<const PROCESS_DATA: bool> {
     len: u64,
     owner: OwnedBlob,
     signature: OwnedBlob,
@@ -20,7 +25,7 @@ pub(crate) struct Data {
     data_offset: u64,
 }
 
-impl Data {
+impl<const PROCESS_DATA: bool> Data<PROCESS_DATA> {
     pub(super) fn new(
         pos: u64,
         len: u64,
@@ -51,7 +56,9 @@ impl Data {
             data_offset: pos,
         })
     }
+}
 
+impl Data<true> {
     fn process(&mut self, data: &[u8]) {
         self.processor
             .as_mut()
@@ -89,7 +96,7 @@ impl Data {
     }
 }
 
-impl Step<ItemReaderCtx> for Data {
+impl Step<ItemReaderCtx> for Data<true> {
     type Next = RawBundleItem<'static>;
 
     fn required_bytes(&self, ctx: &ItemReaderCtx) -> usize {
@@ -114,5 +121,33 @@ impl Step<ItemReaderCtx> for Data {
             return Ok(PollResult::NeedMoreData);
         }
         Ok(PollResult::Continue(self.finalize(ctx.pos)?))
+    }
+}
+
+// this skips actual data processing and creates dummy values for the hash / authenticator
+impl Step<ItemReaderCtx> for Data<false> {
+    type Next = RawBundleItem<'static>;
+
+    fn required_bytes(&self, _: &ItemReaderCtx) -> usize {
+        0
+    }
+
+    fn poll(&mut self, _: &mut ItemReaderCtx) -> Result<PollResult<Self::Next>> {
+        Ok(PollResult::Continue(RawBundleItem {
+            anchor: self.anchor.take(),
+            tag_data: self.tag_data.clone(),
+            tag_count: self.tag_count,
+            target: self.target.take(),
+            owner: self.owner.clone(),
+            signature: self.signature.clone(),
+            signature_type: self.signature_type,
+            data_size: self.len,
+            data_deep_hash: DataDeepHash::new_from_inner(b"".digest()), // dummy value
+            data_verifier: BundleItemDataAuthenticator::from_single_value(
+                Blob::Slice(b"".as_slice()),
+                BundleItemChunker::new(0, DefaultChunker::chunk_map(self.len)),
+            ), // dummy value
+            data_offset: self.data_offset,
+        }))
     }
 }

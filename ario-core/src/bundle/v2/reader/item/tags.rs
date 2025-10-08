@@ -10,7 +10,7 @@ use std::cmp::max;
 
 const MAX_TAG_BUF_SIZE: usize = 1024 * 1024 * 4; // 4 MiB
 
-pub(crate) struct Tags {
+pub(crate) struct Tags<const PROCESS_DATA: bool> {
     len: usize,
     buf: Option<HeapCircularBuffer>,
     count: usize,
@@ -21,7 +21,7 @@ pub(crate) struct Tags {
     anchor: Option<OwnedBlob>,
 }
 
-impl Tags {
+impl<const PROCESS_DATA: bool> Tags<PROCESS_DATA> {
     pub(super) fn new(
         len: usize,
         buf_capacity: usize,
@@ -61,8 +61,8 @@ impl Tags {
     }
 }
 
-impl Step<ItemReaderCtx> for Tags {
-    type Next = Data;
+impl<const PROCESS_DATA: bool> Step<ItemReaderCtx> for Tags<PROCESS_DATA> {
+    type Next = Data<PROCESS_DATA>;
 
     fn required_bytes(&self, ctx: &ItemReaderCtx) -> usize {
         self.len.saturating_sub(max(
@@ -93,8 +93,8 @@ impl Step<ItemReaderCtx> for Tags {
     }
 }
 
-impl Tags {
-    fn transition(&mut self, ctx: &mut ItemReaderCtx) -> Result<Data> {
+impl<const PROCESS_DATA: bool> Tags<PROCESS_DATA> {
+    fn transition(&mut self, ctx: &mut ItemReaderCtx) -> Result<Data<PROCESS_DATA>> {
         let tag_data = self.tags(ctx).map_err(|e| BundleItemError::from(e))?;
         let data_size = ctx.remaining();
         let container_location = ctx.container_location.take().map(|mut cl| {

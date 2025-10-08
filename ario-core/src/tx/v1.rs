@@ -14,35 +14,39 @@ use crate::tx::{
 use crate::typed::FromInner;
 use crate::validation::{SupportsValidation, ValidateExt};
 use crate::wallet::WalletAddress;
-use crate::{JsonError, JsonValue, entity};
+use crate::{Authenticated, AuthenticationState, JsonError, JsonValue, Unauthenticated, entity};
 use itertools::Either;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::marker::PhantomData;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Hash, Serialize)]
 #[repr(transparent)]
-pub(super) struct V1Tx<'a, const AUTHENTICATED: bool = false>(V1TxData<'a>);
+pub(super) struct V1Tx<'a, Auth: AuthenticationState = Unauthenticated>(
+    V1TxData<'a>,
+    PhantomData<Auth>,
+);
 
-pub(super) type UnauthenticatedV1Tx<'a> = V1Tx<'a, false>;
+pub(super) type UnauthenticatedV1Tx<'a> = V1Tx<'a, Unauthenticated>;
 
 impl<'de, 'a> Deserialize<'de> for UnauthenticatedV1Tx<'a> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        Ok(Self(V1TxData::deserialize(deserializer)?))
+        Ok(Self(V1TxData::deserialize(deserializer)?, PhantomData))
     }
 }
 
-pub(super) type AuthenticatedV1Tx<'a> = V1Tx<'a, true>;
+pub(super) type AuthenticatedV1Tx<'a> = V1Tx<'a, Authenticated>;
 
-impl<'a, const AUTHENTICATED: bool> V1Tx<'a, AUTHENTICATED> {
+impl<'a, Auth: AuthenticationState> V1Tx<'a, Auth> {
     pub(super) fn as_inner(&self) -> &V1TxData<'a> {
         &self.0
     }
 
-    pub(super) fn into_owned(self) -> V1Tx<'static, AUTHENTICATED> {
-        V1Tx(self.0.into_owned())
+    pub(super) fn into_owned(self) -> V1Tx<'static, Auth> {
+        V1Tx(self.0.into_owned(), PhantomData)
     }
 
     pub(super) fn to_json_string(&self) -> Result<String, JsonError> {
@@ -54,8 +58,8 @@ impl<'a, const AUTHENTICATED: bool> V1Tx<'a, AUTHENTICATED> {
     }
 }
 
-impl<'a, const AUTHENTICATED: bool> From<V1Tx<'a, AUTHENTICATED>> for RawTx<'a, AUTHENTICATED> {
-    fn from(value: V1Tx<'a, AUTHENTICATED>) -> Self {
+impl<'a, Auth: AuthenticationState> From<V1Tx<'a, Auth>> for RawTx<'a, Auth> {
+    fn from(value: V1Tx<'a, Auth>) -> Self {
         let v1 = value.0;
         Self::danger_from_raw_tx_data(RawTxData {
             format: Format::V1,
@@ -79,7 +83,7 @@ impl<'a, const AUTHENTICATED: bool> From<V1Tx<'a, AUTHENTICATED>> for RawTx<'a, 
 
 impl<'a> AuthenticatedV1Tx<'a> {
     pub fn invalidate(self) -> UnauthenticatedV1Tx<'a> {
-        V1Tx(self.0)
+        V1Tx(self.0, PhantomData)
     }
 }
 
@@ -90,13 +94,13 @@ impl UnauthenticatedV1Tx<'static> {
             .map_err(|(_, e)| e)?
             .try_into()?;
 
-        Ok(Self(tx_data))
+        Ok(Self(tx_data, PhantomData))
     }
 }
 
 impl<'a> UnauthenticatedV1Tx<'a> {
     pub(crate) fn try_from_raw(raw: ValidatedRawTx<'a>) -> Result<Self, TxError> {
-        Ok(Self(V1TxData::try_from(raw)?))
+        Ok(Self(V1TxData::try_from(raw)?, PhantomData))
     }
 }
 
@@ -112,7 +116,7 @@ impl<'a> SupportsValidation for UnauthenticatedV1Tx<'a> {
         if let Err(err) = self.0.signature_data.verify_sig(&(self.0.tx_hash())) {
             return Err((self, err.into()));
         }
-        Ok(V1Tx(self.0))
+        Ok(V1Tx(self.0, PhantomData))
     }
 }
 

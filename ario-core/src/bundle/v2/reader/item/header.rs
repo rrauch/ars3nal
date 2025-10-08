@@ -16,7 +16,7 @@ enum Field {
     TagSize,
 }
 
-pub(crate) struct Header {
+pub(crate) struct Header<const PROCESS_DATA: bool> {
     next_field: Field,
     owner: Option<OwnedBlob>,
     signature: Option<OwnedBlob>,
@@ -27,8 +27,8 @@ pub(crate) struct Header {
     tag_size: u64,
 }
 
-impl Step<ItemReaderCtx> for Header {
-    type Next = Tags;
+impl<const PROCESS_DATA: bool> Step<ItemReaderCtx> for Header<PROCESS_DATA> {
+    type Next = Tags<PROCESS_DATA>;
 
     fn required_bytes(&self, ctx: &ItemReaderCtx) -> usize {
         let len = match &self.next_field {
@@ -59,7 +59,7 @@ impl Step<ItemReaderCtx> for Header {
     }
 }
 
-impl Header {
+impl<const PROCESS_DATA: bool> Header<PROCESS_DATA> {
     pub(super) fn new() -> Self {
         Self {
             next_field: Field::SignatureType,
@@ -73,7 +73,7 @@ impl Header {
         }
     }
 
-    fn transition(&mut self, ctx: &ItemReaderCtx) -> Result<Tags> {
+    fn transition(&mut self, ctx: &ItemReaderCtx) -> Result<Tags<PROCESS_DATA>> {
         //todo: additional verification
         let (owner, signature, signature_type) = match (
             self.owner.take(),

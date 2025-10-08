@@ -4,14 +4,15 @@ use crate::api::{
 };
 use crate::routemaster::Handle;
 use crate::{Client, api};
-use ario_core::Gateway;
 use ario_core::base64::OptionalBase64As;
 use ario_core::blob::{AsBlob, Blob};
+use ario_core::buffer::ByteBuffer;
 use ario_core::crypto::merkle::{DefaultProof, ProofError};
 use ario_core::data::{
     AuthenticatedTxDataChunk, Authenticator, DataRoot, ExternalDataItemAuthenticator,
     TxDataAuthenticityProof, TxDataChunk, UnauthenticatedTxDataChunk,
 };
+use ario_core::{Authenticated, AuthenticationState, Gateway, Unauthenticated};
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
@@ -84,7 +85,7 @@ impl Client {
             &gw,
             authenticator,
             offset,
-            UnauthenticatedTxDataChunk::from_blob(data),
+            UnauthenticatedTxDataChunk::from_byte_buffer(data.into(), offset.start),
         )
         .await
     }
@@ -100,9 +101,9 @@ impl Client {
         if len == 0 {
             return Err(UploadError::EmptyChunk.into());
         }
-        if unauthenticated_data.len() != len as usize {
+        if unauthenticated_data.len() != len {
             return Err(UploadError::IncorrectChunkLen {
-                expected: len as usize,
+                expected: len,
                 actual: unauthenticated_data.len(),
             }
             .into());
@@ -125,7 +126,8 @@ impl Client {
             data_size: authenticator.data_item().data_size(),
             data_path: proof.as_blob(),
             offset: offset.start,
-            chunk: authenticated_data,
+            //chunk: authenticated_data,
+            chunk: authenticated_data.authenticated_data().make_contiguous(),
         };
 
         let api = &self.0.api;
@@ -160,7 +162,7 @@ impl Client {
             .with_gw(async |gw| self.0.api.download_chunk(gw, offset).await)
             .await?
         {
-            Some(chunk) => chunk.into(),
+            Some(chunk) => (chunk, relative_offset).into(),
             None => {
                 return Ok(None);
             }
@@ -183,7 +185,7 @@ pub enum UploadError {
     #[error("chunk cannot be empty")]
     EmptyChunk,
     #[error("chunk length incorrect; expected '{expected}' but got '{actual}'")]
-    IncorrectChunkLen { expected: usize, actual: usize },
+    IncorrectChunkLen { expected: u64, actual: u64 },
 }
 
 #[derive(Error, Debug)]
@@ -204,10 +206,11 @@ struct UploadChunk<'a> {
     #[serde_as(as = "DisplayFromStr")]
     offset: u64,
     #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
-    chunk: AuthenticatedTxDataChunk<'a>,
+    chunk: Blob<'a>,
+    //chunk: AuthenticatedTxDataChunk<'a>,
 }
 
-pub(crate) type UnauthenticatedTxDownloadChunk<'a> = TxDownloadChunk<'a, false>;
+pub(crate) type UnauthenticatedTxDownloadChunk<'a> = TxDownloadChunk<'a, Unauthenticated>;
 impl<'a> UnauthenticatedTxDownloadChunk<'a> {
     pub(crate) fn authenticate(
         self,
@@ -232,19 +235,19 @@ impl<'a> UnauthenticatedTxDownloadChunk<'a> {
     }
 }
 
-pub(crate) type AuthenticatedTxDownloadChunk<'a> = TxDownloadChunk<'a, true>;
+pub(crate) type AuthenticatedTxDownloadChunk<'a> = TxDownloadChunk<'a, Authenticated>;
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TxDownloadChunk<'a, const AUTHENTICATED: bool> {
-    pub(crate) chunk: TxDataChunk<'a, AUTHENTICATED>,
+pub(crate) struct TxDownloadChunk<'a, Auth: AuthenticationState> {
+    pub(crate) chunk: TxDataChunk<'a, Auth>,
     data_path: Blob<'a>,
     tx_path: Option<Blob<'a>>,
 }
 
-impl<'a> From<RawTxDownloadChunk<'a>> for UnauthenticatedTxDownloadChunk<'a> {
-    fn from(raw: RawTxDownloadChunk<'a>) -> Self {
+impl<'a> From<(RawTxDownloadChunk<'a>, u64)> for UnauthenticatedTxDownloadChunk<'a> {
+    fn from((raw, offset): (RawTxDownloadChunk<'a>, u64)) -> Self {
         Self {
-            chunk: TxDataChunk::from_blob(raw.chunk),
+            chunk: TxDataChunk::from_byte_buffer(raw.chunk.into(), offset),
             data_path: raw.data_path,
             tx_path: raw.tx_path,
         }
@@ -254,7 +257,7 @@ impl<'a> From<RawTxDownloadChunk<'a>> for UnauthenticatedTxDownloadChunk<'a> {
 impl<'a> From<AuthenticatedTxDownloadChunk<'a>> for RawTxDownloadChunk<'a> {
     fn from(value: AuthenticatedTxDownloadChunk<'a>) -> Self {
         Self {
-            chunk: value.chunk.into_inner().as_blob().into_owned(),
+            chunk: value.chunk.into_inner().into_untyped(),
             data_path: value.data_path,
             tx_path: value.tx_path,
         }
@@ -265,7 +268,7 @@ impl<'a> From<AuthenticatedTxDownloadChunk<'a>> for RawTxDownloadChunk<'a> {
 #[derive(Clone, Deserialize, Debug, PartialEq)]
 pub struct RawTxDownloadChunk<'a> {
     #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
-    pub chunk: Blob<'a>,
+    pub chunk: ByteBuffer<'a>,
     #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
     pub data_path: Blob<'a>,
     #[serde_as(as = "OptionalBase64As")]

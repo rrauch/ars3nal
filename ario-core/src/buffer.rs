@@ -1,12 +1,18 @@
+use crate::blob::{Blob, OwnedBlob, TypedBlob};
 use bytes::buf::UninitSlice;
 use bytes::{Buf, BufMut};
+use derive_where::derive_where;
 use futures_lite::{AsyncRead, AsyncReadExt, AsyncWrite, ready};
 use hybrid_array::ArraySize;
+use maybe_owned::MaybeOwned;
+use rangemap::RangeMap;
 use std::cmp::min;
 use std::io::{Cursor, ErrorKind, Read, Write};
+use std::marker::PhantomData;
+use std::ops::Range;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::{io, ptr};
+use std::{io, iter, ptr};
 use thiserror::Error;
 use zeroize::Zeroize;
 
@@ -298,10 +304,7 @@ impl<T: BufMut> BufMutExt<T> for T {
         Ok(read)
     }
 
-    async fn fill_async<R: AsyncRead + Unpin>(
-        &mut self,
-        mut reader: R,
-    ) -> io::Result<usize> {
+    async fn fill_async<R: AsyncRead + Unpin>(&mut self, mut reader: R) -> io::Result<usize> {
         let mut read = 0;
         while self.has_remaining_mut() {
             let chunk = unsafe {
@@ -629,6 +632,322 @@ unsafe impl<S: CBStorage> BufMut for CircularBuffer<S> {
         let slice = if !first.is_empty() { first } else { second };
 
         UninitSlice::new(slice)
+    }
+}
+
+#[derive_where(Debug, PartialEq, Hash, Clone)]
+pub struct TypedByteBuffer<'a, T> {
+    chunks: RangeMap<u64, Blob<'a>>,
+    len: u64,
+    _phantom: PhantomData<T>,
+}
+
+pub type ByteBuffer<'a> = TypedByteBuffer<'a, ()>;
+
+impl<'a, T: Into<Blob<'a>>> From<T> for ByteBuffer<'a> {
+    fn from(value: T) -> Self {
+        Self::from_iter(iter::once(TypedBlob::new_from_inner(value.into())))
+    }
+}
+
+impl<'a, T> TypedByteBuffer<'a, T> {
+    pub(crate) fn cast<U>(self) -> TypedByteBuffer<'a, U> {
+        // the compiler is supposed to optimize this into a no-op
+        TypedByteBuffer {
+            chunks: self.chunks,
+            len: self.len,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn into_untyped(self) -> ByteBuffer<'a> {
+        self.cast()
+    }
+
+    pub fn into_owned(self) -> TypedByteBuffer<'static, T> {
+        TypedByteBuffer {
+            chunks: self
+                .chunks
+                .into_iter()
+                .map(|(r, b)| (r, b.into_owned()))
+                .collect(),
+            len: self.len,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn cursor<'b>(&'b self) -> TypedByteBufferCursor<'b, 'a, T> {
+        TypedByteBufferCursor {
+            buffer: MaybeOwned::Borrowed(self),
+            pos: 0,
+        }
+    }
+
+    pub fn into_cursor(self) -> TypedByteBufferCursor<'static, 'a, T> {
+        TypedByteBufferCursor {
+            buffer: MaybeOwned::Owned(self),
+            pos: 0,
+        }
+    }
+
+    pub fn to_range(&self, range: Range<u64>) -> Self {
+        assert!(range.end <= self.len(), "range exceeds buffer length");
+        self.clone().into_range(range)
+    }
+
+    pub fn into_range(self, range: Range<u64>) -> Self {
+        assert!(range.end <= self.len(), "range exceeds buffer length");
+
+        let mut new_chunks = RangeMap::new();
+
+        for (chunk_range, blob) in self.chunks.overlapping(&range) {
+            let intersect_start = chunk_range.start.max(range.start);
+            let intersect_end = chunk_range.end.min(range.end);
+
+            // Calculate which portion of the blob we need
+            let blob_offset = (intersect_start - chunk_range.start) as usize;
+            let blob_len = (intersect_end - intersect_start) as usize;
+
+            // Slice the blob to the exact portion we need
+            let sliced_blob = blob.slice(blob_offset..blob_offset + blob_len);
+
+            // Insert at normalized position (relative to new buffer start)
+            let new_start = intersect_start - range.start;
+            let new_end = new_start + blob_len as u64;
+            new_chunks.insert(new_start..new_end, sliced_blob);
+        }
+
+        Self {
+            chunks: new_chunks,
+            len: range.end - range.start,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn split_at(self, mid: u64) -> (Self, Self) {
+        let len = self.len();
+        assert!(mid <= len, "split position exceeds buffer length");
+        (self.to_range(0..mid), self.into_range(mid..len))
+    }
+
+    pub fn into_chunks<F>(self, mut should_split: F) -> impl Iterator<Item = Self>
+    where
+        F: FnMut(u64, &[u8]) -> ChunkDecision,
+    {
+        let mut remaining = Some(self);
+
+        iter::from_fn(move || {
+            let mut buffer = remaining.take()?;
+
+            while !buffer.is_empty() {
+                let mut pos = 0u64;
+
+                while pos < buffer.len() {
+                    let chunk = buffer.chunk_at(pos);
+                    let buffer_len = buffer.len();
+
+                    match should_split(pos, chunk) {
+                        ChunkDecision::Emit(split_offset) => {
+                            let split_pos = pos + split_offset;
+                            if split_pos > 0 && split_pos < buffer_len {
+                                let (head, tail) = buffer.split_at(split_pos);
+                                remaining = Some(tail);
+                                return Some(head);
+                            }
+                        }
+                        ChunkDecision::Discard(discard_len) => {
+                            let discard_end = (pos + discard_len).min(buffer_len);
+                            buffer = buffer.into_range(discard_end..buffer_len);
+                            break; // Restart scanning from beginning of new buffer
+                        }
+                        ChunkDecision::Continue => {}
+                    }
+
+                    pos += chunk.len() as u64;
+                }
+
+                if pos >= buffer.len() {
+                    // Scanned entire buffer without decision
+                    return Some(buffer);
+                }
+            }
+
+            None
+        })
+    }
+
+    pub fn concat(buffers: impl IntoIterator<Item = Self>) -> Self {
+        let mut offset = 0u64;
+        let mut merged_chunks = RangeMap::new();
+
+        for buffer in buffers {
+            for (chunk_range, blob_ref) in buffer.chunks.iter() {
+                let new_start = offset + chunk_range.start;
+                let new_end = offset + chunk_range.end;
+
+                merged_chunks.insert(new_start..new_end, blob_ref.clone());
+            }
+
+            offset += buffer.len;
+        }
+
+        Self {
+            chunks: merged_chunks,
+            len: offset,
+            _phantom: PhantomData,
+        }
+    }
+
+    fn chunk_at(&self, pos: u64) -> &[u8] {
+        let (chunk_range, blob) = self.chunks.get_key_value(&pos).expect("chunk to be there");
+
+        let offset_in_chunk = (pos - chunk_range.start) as usize;
+        let blob_slice = blob.as_ref();
+        let remaining = &blob_slice[offset_in_chunk..];
+
+        // Clamp to buffer boundary
+        let remaining_in_buffer = (self.len - pos) as usize;
+        &remaining[..remaining.len().min(remaining_in_buffer)]
+    }
+
+    pub fn make_contiguous(self) -> OwnedBlob {
+        self.chunks.into_iter().map(|(_, b)| b).collect()
+    }
+}
+
+pub enum ChunkDecision {
+    /// Emit chunk up to offset, continue with rest
+    Emit(u64),
+    /// Discard bytes up to offset, continue scanning
+    Discard(u64),
+    /// Keep scanning
+    Continue,
+}
+
+impl<'a, T, B: Into<TypedBlob<'a, T>>> FromIterator<B> for TypedByteBuffer<'a, T> {
+    fn from_iter<I: IntoIterator<Item = B>>(iter: I) -> Self {
+        let mut len = 0;
+
+        let chunks = iter
+            .into_iter()
+            .filter_map(|b| {
+                let b = b.into();
+                if b.is_empty() {
+                    None
+                } else {
+                    let start = len;
+                    let blob_len = b.len() as u64;
+                    len += blob_len;
+                    Some((start..len, b.into_inner()))
+                }
+            })
+            .collect();
+
+        Self {
+            chunks,
+            len,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<'a, T> From<TypedBlob<'a, T>> for TypedByteBuffer<'a, T> {
+    fn from(value: TypedBlob<'a, T>) -> Self {
+        Self::from_iter(iter::once(value))
+    }
+}
+
+impl<'a, T> Extend<TypedByteBuffer<'a, T>> for TypedByteBuffer<'a, T> {
+    fn extend<I: IntoIterator<Item = TypedByteBuffer<'a, T>>>(&mut self, iter: I) {
+        let mut buffers = vec![self.clone()];
+        buffers.extend(iter);
+        *self = Self::concat(buffers);
+    }
+}
+
+impl<'a, T> FromIterator<TypedByteBuffer<'a, T>> for TypedByteBuffer<'a, T> {
+    fn from_iter<I: IntoIterator<Item = TypedByteBuffer<'a, T>>>(iter: I) -> Self {
+        Self::concat(iter)
+    }
+}
+
+#[derive_where(Debug)]
+pub struct TypedByteBufferCursor<'buf, 'data, T> {
+    buffer: MaybeOwned<'buf, TypedByteBuffer<'data, T>>,
+    pos: u64,
+}
+
+pub type ByteBufferCursor<'buf, 'data> = TypedByteBufferCursor<'buf, 'data, ()>;
+pub type OwnedTypedByteBufferCursor<T> = TypedByteBufferCursor<'static, 'static, T>;
+pub type OwnedByteBufferCursor = ByteBufferCursor<'static, 'static>;
+
+impl<'buf, 'data, T> Buf for TypedByteBufferCursor<'buf, 'data, T> {
+    #[inline]
+    fn remaining(&self) -> usize {
+        self.buffer.len().saturating_sub(self.pos) as usize
+    }
+
+    fn chunk(&self) -> &[u8] {
+        if self.pos >= self.buffer.len() {
+            &[]
+        } else {
+            self.buffer.chunk_at(self.pos)
+        }
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        if cnt > self.remaining() {
+            panic!(
+                "advanced beyond eof: {} > {}",
+                self.pos + cnt as u64,
+                self.buffer.len()
+            );
+        }
+        self.pos = self.pos.saturating_add(cnt as u64);
+    }
+}
+
+impl<'buf, 'data, T> Read for TypedByteBufferCursor<'buf, 'data, T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let chunk = self.chunk();
+        let n = buf.len().min(chunk.len());
+        buf[..n].copy_from_slice(&chunk[..n]);
+        self.advance(n);
+        Ok(n)
+    }
+}
+
+impl<'buf, 'data, T> io::Seek for TypedByteBufferCursor<'buf, 'data, T> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        let new_pos = match pos {
+            io::SeekFrom::Start(n) => n,
+            io::SeekFrom::End(n) => (self.buffer.len() as i64)
+                .checked_add(n)
+                .and_then(|p| u64::try_from(p).ok())
+                .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "invalid seek position"))?,
+            io::SeekFrom::Current(n) => (self.pos as i64)
+                .checked_add(n)
+                .and_then(|p| u64::try_from(p).ok())
+                .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "invalid seek position"))?,
+        };
+
+        if new_pos > self.buffer.len() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "invalid seek position",
+            ));
+        }
+
+        self.pos = new_pos;
+        Ok(self.pos)
     }
 }
 

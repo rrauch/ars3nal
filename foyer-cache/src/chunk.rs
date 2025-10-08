@@ -75,9 +75,7 @@ impl L2ChunkCache for FoyerChunkCache {
 impl Code for Chunk {
     fn encode(&self, writer: &mut impl Write) -> Result<(), CodeError> {
         self.0.chunk.len().encode(writer)?;
-        writer
-            .write_all(self.0.chunk.bytes())
-            .map_err(CodeError::from)?;
+        std::io::copy(&mut self.0.chunk.cursor(), writer).map_err(CodeError::from)?;
         self.0.data_path.len().encode(writer)?;
         writer
             .write_all(self.0.data_path.bytes())
@@ -105,15 +103,15 @@ impl Code for Chunk {
         };
 
         Ok(Chunk(RawTxDownloadChunk {
-            chunk,
+            chunk: chunk.into(),
             data_path,
             tx_path,
         }))
     }
 
     fn estimated_size(&self) -> usize {
-        size_of::<usize>()
-            + self.0.chunk.len()
+        size_of::<u64>()
+            + self.0.chunk.len() as usize
             + size_of::<usize>()
             + self.0.data_path.len()
             + size_of::<usize>()

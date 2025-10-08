@@ -2,7 +2,7 @@ mod data;
 mod header;
 mod tags;
 
-use super::{Flow, Result};
+use super::{Flow, Result, Step};
 use crate::buffer::HeapCircularBuffer;
 use crate::bundle::v2::reader::item::data::Data;
 use crate::bundle::v2::reader::item::header::Header;
@@ -13,13 +13,16 @@ use bon::bon;
 use bytes::BufMut;
 use itertools::Either;
 
-pub(crate) enum ItemReader {
-    Header(IncrementalInputProcessor<ItemReaderCtx, Header>),
-    Tags(IncrementalInputProcessor<ItemReaderCtx, Tags>),
-    Data(IncrementalInputProcessor<ItemReaderCtx, Data>),
+pub(crate) enum ItemReader<const PROCESS_DATA: bool> {
+    Header(IncrementalInputProcessor<ItemReaderCtx, Header<PROCESS_DATA>>),
+    Tags(IncrementalInputProcessor<ItemReaderCtx, Tags<PROCESS_DATA>>),
+    Data(IncrementalInputProcessor<ItemReaderCtx, Data<PROCESS_DATA>>),
 }
 
-impl Flow for ItemReader {
+impl<const PROCESS_DATA: bool> Flow for ItemReader<PROCESS_DATA>
+where
+    Data<PROCESS_DATA>: Step<ItemReaderCtx, Next = RawBundleItem<'static>>,
+{
     type Output = RawBundleItem<'static>;
     type Buf<'a> = Box<dyn BufMut + 'a>;
 
@@ -57,7 +60,7 @@ impl Flow for ItemReader {
 }
 
 #[bon]
-impl ItemReader {
+impl<const PROCESS_DATA: bool> ItemReader<PROCESS_DATA> {
     #[builder]
     pub fn new(
         len: u64,

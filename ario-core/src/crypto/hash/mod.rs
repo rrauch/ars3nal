@@ -5,7 +5,7 @@ use crate::blob::{AsBlob, Blob};
 use crate::crypto::{Output, OutputLen};
 use crate::typed::Typed;
 use bytemuck::TransparentWrapper;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use derive_where::derive_where;
 use digest::FixedOutputReset;
 use hybrid_array::sizes::U32;
@@ -191,6 +191,14 @@ pub trait Hasher: Send + Sync {
 
     fn new() -> Self;
     fn update(&mut self, data: impl AsRef<[u8]>);
+    fn update_buf(&mut self, mut buf: impl Buf) {
+        while buf.has_remaining() {
+            let chunk = buf.chunk();
+            self.update(chunk);
+            buf.advance(chunk.len());
+        }
+    }
+
     fn finalize(self) -> Digest<Self>
     where
         Self: Sized;
@@ -229,6 +237,7 @@ where
 pub trait HasherExt<H: Hasher> {
     fn digest(input: impl AsRef<[u8]>) -> Digest<H>;
     fn digest_from_iter<T: AsRef<[u8]>, I: Iterator<Item = T>>(iter: I) -> Digest<H>;
+    fn digest_from_buf<T: Buf>(buf: T) -> Digest<H>;
 }
 
 impl<H: Hasher> HasherExt<H> for H {
@@ -241,6 +250,12 @@ impl<H: Hasher> HasherExt<H> for H {
     fn digest_from_iter<T: AsRef<[u8]>, I: IntoIterator<Item = T>>(iter: I) -> Digest<H> {
         let mut hasher = H::new();
         iter.into_iter().for_each(|t| hasher.update(t.as_ref()));
+        hasher.finalize()
+    }
+
+    fn digest_from_buf<T: Buf>(buf: T) -> Digest<H> {
+        let mut hasher = H::new();
+        hasher.update_buf(buf);
         hasher.finalize()
     }
 }

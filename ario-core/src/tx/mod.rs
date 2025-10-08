@@ -27,7 +27,9 @@ use crate::tx::v2::{TxDraft, UnauthenticatedV2Tx, V2Tx, V2TxBuilder, V2TxDataErr
 use crate::typed::{FromInner, Typed, WithSerde};
 use crate::validation::ValidateExt;
 use crate::wallet::{WalletAddress, WalletPk};
-use crate::{JsonError, JsonValue, blob, entity};
+use crate::{
+    Authenticated, AuthenticationState, JsonError, JsonValue, Unauthenticated, blob, entity,
+};
 use bigdecimal::BigDecimal;
 use hybrid_array::Array;
 use hybrid_array::sizes::U48;
@@ -48,9 +50,9 @@ static ZERO_WINSTON: LazyLock<Money<Winston>> = LazyLock::new(|| Winston::zero()
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[repr(transparent)]
-pub struct Tx<'a, const AUTHENTICATED: bool>(TxInner<'a, AUTHENTICATED>);
+pub struct Tx<'a, Auth: AuthenticationState>(TxInner<'a, Auth>);
 
-impl<'a, const AUTHENTICATED: bool> ArEntity for Tx<'a, AUTHENTICATED> {
+impl<'a, Auth: AuthenticationState> ArEntity for Tx<'a, Auth> {
     type Id = TxId;
     type Hash = TxHash;
 
@@ -60,20 +62,20 @@ impl<'a, const AUTHENTICATED: bool> ArEntity for Tx<'a, AUTHENTICATED> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-enum TxInner<'a, const AUTHENTICATED: bool> {
-    V1(V1Tx<'a, AUTHENTICATED>),
-    V2(V2Tx<'a, AUTHENTICATED>),
+enum TxInner<'a, Auth: AuthenticationState> {
+    V1(V1Tx<'a, Auth>),
+    V2(V2Tx<'a, Auth>),
 }
 
-impl<'de, 'a> Deserialize<'de> for TxInner<'a, false> {
+impl<'de, 'a> Deserialize<'de> for TxInner<'a, Unauthenticated> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
         enum Helper<'a> {
-            V1(V1Tx<'a, false>),
-            V2(V2Tx<'a, false>),
+            V1(V1Tx<'a, Unauthenticated>),
+            V2(V2Tx<'a, Unauthenticated>),
         }
 
         let helper = Helper::deserialize(deserializer)?;
@@ -84,8 +86,8 @@ impl<'de, 'a> Deserialize<'de> for TxInner<'a, false> {
     }
 }
 
-impl<'a, const AUTHENTICATED: bool> TxInner<'a, AUTHENTICATED> {
-    fn into_owned(self) -> TxInner<'static, AUTHENTICATED> {
+impl<'a, Auth: AuthenticationState> TxInner<'a, Auth> {
+    fn into_owned(self) -> TxInner<'static, Auth> {
         match self {
             Self::V1(v1) => TxInner::V1(v1.into_owned()),
             Self::V2(v2) => TxInner::V2(v2.into_owned()),
@@ -101,7 +103,7 @@ impl TxBuilder {
     }
 }
 
-pub type UnauthenticatedTx<'a> = Tx<'a, false>;
+pub type UnauthenticatedTx<'a> = Tx<'a, Unauthenticated>;
 
 impl<'de, 'a> Deserialize<'de> for UnauthenticatedTx<'a> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -112,24 +114,30 @@ impl<'de, 'a> Deserialize<'de> for UnauthenticatedTx<'a> {
     }
 }
 
-pub type AuthenticatedTx<'a> = Tx<'a, true>;
+pub type AuthenticatedTx<'a> = Tx<'a, Authenticated>;
 
-impl<'a, const AUTHENTICATED: bool> From<V1Tx<'a, AUTHENTICATED>> for Tx<'a, AUTHENTICATED> {
-    fn from(value: V1Tx<'a, AUTHENTICATED>) -> Self {
+impl<'a> From<AuthenticatedTx<'a>> for UnauthenticatedTx<'a> {
+    fn from(value: AuthenticatedTx<'a>) -> Self {
+        value.invalidate()
+    }
+}
+
+impl<'a, Auth: AuthenticationState> From<V1Tx<'a, Auth>> for Tx<'a, Auth> {
+    fn from(value: V1Tx<'a, Auth>) -> Self {
         Self(TxInner::V1(value))
     }
 }
 
-impl<'a, const AUTHENTICATED: bool> From<V2Tx<'a, AUTHENTICATED>> for Tx<'a, AUTHENTICATED> {
-    fn from(value: V2Tx<'a, AUTHENTICATED>) -> Self {
+impl<'a, Auth: AuthenticationState> From<V2Tx<'a, Auth>> for Tx<'a, Auth> {
+    fn from(value: V2Tx<'a, Auth>) -> Self {
         Self(TxInner::V2(value))
     }
 }
 
-impl<'a, const AUTHENTICATED: bool> TryFrom<Tx<'a, AUTHENTICATED>> for V1Tx<'a, AUTHENTICATED> {
-    type Error = Tx<'a, AUTHENTICATED>;
+impl<'a, Auth: AuthenticationState> TryFrom<Tx<'a, Auth>> for V1Tx<'a, Auth> {
+    type Error = Tx<'a, Auth>;
 
-    fn try_from(value: Tx<'a, AUTHENTICATED>) -> Result<Self, Self::Error> {
+    fn try_from(value: Tx<'a, Auth>) -> Result<Self, Self::Error> {
         match value.0 {
             TxInner::V1(v1) => Ok(v1),
             incorrect => Err(Tx(incorrect)),
@@ -137,10 +145,10 @@ impl<'a, const AUTHENTICATED: bool> TryFrom<Tx<'a, AUTHENTICATED>> for V1Tx<'a, 
     }
 }
 
-impl<'a, const AUTHENTICATED: bool> TryFrom<Tx<'a, AUTHENTICATED>> for V2Tx<'a, AUTHENTICATED> {
-    type Error = Tx<'a, AUTHENTICATED>;
+impl<'a, Auth: AuthenticationState> TryFrom<Tx<'a, Auth>> for V2Tx<'a, Auth> {
+    type Error = Tx<'a, Auth>;
 
-    fn try_from(value: Tx<'a, AUTHENTICATED>) -> Result<Self, Self::Error> {
+    fn try_from(value: Tx<'a, Auth>) -> Result<Self, Self::Error> {
         match value.0 {
             TxInner::V2(v2) => Ok(v2),
             incorrect => Err(Tx(incorrect)),
@@ -295,7 +303,7 @@ impl AsBlob for Signature<'_> {
     }
 }
 
-impl<'a, const AUTHENTICATED: bool> Tx<'a, AUTHENTICATED> {
+impl<'a, Auth: AuthenticationState> Tx<'a, Auth> {
     pub fn format(&self) -> Format {
         match &self.0 {
             TxInner::V1(_) => Format::V1,
@@ -396,10 +404,10 @@ impl<'a, const AUTHENTICATED: bool> Tx<'a, AUTHENTICATED> {
     }
 
     pub fn is_authenticated(&self) -> bool {
-        AUTHENTICATED
+        Auth::is_authenticated()
     }
 
-    pub fn into_owned(self) -> Tx<'static, AUTHENTICATED> {
+    pub fn into_owned(self) -> Tx<'static, Auth> {
         Tx(self.0.into_owned())
     }
 
