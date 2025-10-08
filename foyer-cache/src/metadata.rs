@@ -1,8 +1,8 @@
 use crate::disk_cache::DiskCache;
 use crate::{DEFAULT_MEM_BUF_SIZE, Error};
+use ario_client::RawItemId;
 use ario_client::cache::{Context, L2MetadataCache, Offset};
-use ario_client::location::ItemArl;
-use ario_client::{ByteArray, U32};
+use ario_client::location::{Arl, BundleItemArl};
 use ario_core::bundle::{
     Bundle, BundleId, BundleItemAuthenticator, BundleItemId, UnauthenticatedBundleItem,
 };
@@ -23,18 +23,18 @@ const CTX_FILE_COMP_VERSION: usize = 1;
 enum CacheKey {
     TxId(TxId),
     TxOffset(TxId),
-    BundleId(BundleId),
-    BundleItem(BundleItemId, BundleId),
-    ItemLocationByAnyId(ByteArray<U32>),
+    BundleLocation(Arl),
+    BundleItem(BundleItemArl),
+    ItemLocationByAnyId(RawItemId),
 }
 
 #[derive(Hash)]
 enum BorrowedCacheKey<'a> {
     TxId(&'a TxId),
     TxOffset(&'a TxId),
-    BundleId(&'a BundleId),
-    BundleItem(&'a BundleItemId, &'a BundleId),
-    ItemLocationByAnyId(&'a ByteArray<U32>),
+    BundleLocation(&'a Arl),
+    BundleItem(&'a BundleItemArl),
+    ItemLocationByAnyId(&'a RawItemId),
 }
 
 impl Equivalent<CacheKey> for BorrowedCacheKey<'_> {
@@ -54,16 +54,16 @@ impl Equivalent<CacheKey> for BorrowedCacheKey<'_> {
                     false
                 }
             }
-            CacheKey::BundleId(other) => {
-                if let Self::BundleId(this) = self {
+            CacheKey::BundleLocation(other) => {
+                if let Self::BundleLocation(this) = self {
                     *this == other
                 } else {
                     false
                 }
             }
-            CacheKey::BundleItem(other_id, other_bundle) => {
-                if let Self::BundleItem(this_id, this_bundle) = self {
-                    *this_id == other_id && *this_bundle == other_bundle
+            CacheKey::BundleItem(other) => {
+                if let Self::BundleItem(this) = self {
+                    *this == other && *this == other
                 } else {
                     false
                 }
@@ -79,9 +79,9 @@ impl Equivalent<CacheKey> for BorrowedCacheKey<'_> {
     }
 }
 
-impl From<(BundleItemId, BundleId)> for CacheKey {
-    fn from(value: (BundleItemId, BundleId)) -> Self {
-        Self::BundleItem(value.0, value.1)
+impl From<BundleItemArl> for CacheKey {
+    fn from(value: BundleItemArl) -> Self {
+        Self::BundleItem(value)
     }
 }
 
@@ -94,7 +94,7 @@ enum CacheValue {
         UnauthenticatedBundleItem<'static>,
         BundleItemAuthenticator<'static>,
     ),
-    ItemLocation(ItemArl),
+    ItemLocation(Arl),
 }
 
 impl TryFrom<CacheValue> for UnauthenticatedTx<'static> {
@@ -180,7 +180,7 @@ impl
     }
 }
 
-impl TryFrom<CacheValue> for ItemArl {
+impl TryFrom<CacheValue> for Arl {
     type Error = ();
 
     fn try_from(value: CacheValue) -> Result<Self, Self::Error> {
@@ -191,8 +191,8 @@ impl TryFrom<CacheValue> for ItemArl {
     }
 }
 
-impl From<ItemArl> for CacheValue {
-    fn from(value: ItemArl) -> Self {
+impl From<Arl> for CacheValue {
+    fn from(value: Arl) -> Self {
         Self::ItemLocation(value)
     }
 }
@@ -265,24 +265,25 @@ impl L2MetadataCache for FoyerMetadataCache {
         self.0.invalidate(BorrowedCacheKey::TxOffset(id)).await
     }
 
-    async fn get_bundle(&self, bundle_id: &BundleId) -> Result<Option<Bundle>, std::io::Error> {
-        self.get(BorrowedCacheKey::BundleId(bundle_id)).await
+    async fn get_bundle(&self, location: &Arl) -> Result<Option<Bundle>, std::io::Error> {
+        self.get(BorrowedCacheKey::BundleLocation(location)).await
     }
 
-    async fn insert_bundle(&self, bundle: Bundle) -> Result<(), std::io::Error> {
+    async fn insert_bundle(&self, location: Arl, bundle: Bundle) -> Result<(), std::io::Error> {
         self.0
-            .insert(CacheKey::BundleId(bundle.id().clone()), bundle)
+            .insert(CacheKey::BundleLocation(location), bundle)
             .await
     }
 
-    async fn invalidate_bundle(&self, id: &BundleId) -> Result<(), std::io::Error> {
-        self.0.invalidate(BorrowedCacheKey::BundleId(id)).await
+    async fn invalidate_bundle(&self, location: &Arl) -> Result<(), std::io::Error> {
+        self.0
+            .invalidate(BorrowedCacheKey::BundleLocation(location))
+            .await
     }
 
     async fn get_bundle_item(
         &self,
-        item_id: &BundleItemId,
-        bundle_id: &BundleId,
+        location: &BundleItemArl,
     ) -> Result<
         Option<(
             UnauthenticatedBundleItem<'static>,
@@ -290,52 +291,36 @@ impl L2MetadataCache for FoyerMetadataCache {
         )>,
         std::io::Error,
     > {
-        self.get(BorrowedCacheKey::BundleItem(item_id, bundle_id))
-            .await
+        self.get(BorrowedCacheKey::BundleItem(location)).await
     }
 
     async fn insert_bundle_item(
         &self,
+        location: BundleItemArl,
         bundle_item: UnauthenticatedBundleItem<'static>,
         verifier: BundleItemAuthenticator<'static>,
     ) -> Result<(), std::io::Error> {
+        self.0.insert(location, (bundle_item, verifier)).await
+    }
+
+    async fn invalidate_bundle_item(&self, location: &BundleItemArl) -> Result<(), std::io::Error> {
         self.0
-            .insert(
-                (bundle_item.id().clone(), bundle_item.bundle_id().clone()),
-                (bundle_item, verifier),
-            )
+            .invalidate(BorrowedCacheKey::BundleItem(location))
             .await
     }
 
-    async fn invalidate_bundle_item(
-        &self,
-        item_id: &BundleItemId,
-        bundle_id: &BundleId,
-    ) -> Result<(), std::io::Error> {
-        self.0
-            .invalidate(BorrowedCacheKey::BundleItem(item_id, bundle_id))
-            .await
-    }
-
-    async fn get_item_location(
-        &self,
-        item_id: &ByteArray<U32>,
-    ) -> Result<Option<ItemArl>, IoError> {
+    async fn get_item_location(&self, item_id: &RawItemId) -> Result<Option<Arl>, IoError> {
         self.get(BorrowedCacheKey::ItemLocationByAnyId(item_id))
             .await
     }
 
-    async fn insert_item_location(
-        &self,
-        item_id: ByteArray<U32>,
-        location: ItemArl,
-    ) -> Result<(), IoError> {
+    async fn insert_item_location(&self, item_id: RawItemId, location: Arl) -> Result<(), IoError> {
         self.0
             .insert(CacheKey::ItemLocationByAnyId(item_id), location)
             .await
     }
 
-    async fn invalidate_item_location(&self, item_id: &ByteArray<U32>) -> Result<(), IoError> {
+    async fn invalidate_item_location(&self, item_id: &RawItemId) -> Result<(), IoError> {
         self.0
             .invalidate(BorrowedCacheKey::ItemLocationByAnyId(item_id))
             .await

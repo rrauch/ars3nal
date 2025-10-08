@@ -7,7 +7,7 @@ pub mod snapshot;
 use crate::serde_tag::{BytesToStr, Chain, ToFromStr};
 use crate::types::drive::DriveId;
 use crate::{Timestamp, serde_tag};
-use ario_client::location::ItemArl;
+use ario_client::location::Arl;
 use ario_core::base64::Base64Error;
 use ario_core::blob::{Blob, OwnedBlob};
 use ario_core::tag::Tag;
@@ -106,7 +106,7 @@ pub(crate) struct Model<E: Entity> {
     header: Header<E::Header, E>,
     metadata: Metadata<E::Metadata, E>,
     block_height: BlockNumber,
-    location: ItemArl,
+    location: Arl,
     _marker: PhantomData<E>,
 }
 
@@ -171,7 +171,7 @@ impl<E: Entity> Model<E> {
         header: Header<E::Header, E>,
         metadata: Metadata<E::Metadata, E>,
         block_height: BlockNumber,
-        location: ItemArl,
+        location: Arl,
     ) -> Self {
         Self {
             header,
@@ -206,7 +206,7 @@ impl<E: Entity> Model<E> {
         self.block_height
     }
 
-    pub fn location(&self) -> &ItemArl {
+    pub fn location(&self) -> &Arl {
         &self.location
     }
 }

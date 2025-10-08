@@ -9,6 +9,7 @@ ario-core = { workspace = true }
 async-stream = { workspace = true }
 bon = { workspace = true }
 buf-list = "1.0"
+bytemuck = { workspace = true, features = ["derive"] }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }

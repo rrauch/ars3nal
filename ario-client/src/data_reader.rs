@@ -1,10 +1,13 @@
-use crate::Client;
+use crate::location::{Arl, BundleItemArl};
 use crate::tx::Offset;
-use ario_core::MaybeOwned;
-use ario_core::bundle::{AuthenticatedBundleItem, BundleEntry, BundleItemAuthenticator};
+use crate::{Client, location};
+use ario_core::bundle::{
+    AuthenticatedBundleItem, BundleEntry, BundleItemAuthenticator, BundleItemId,
+};
 use ario_core::chunking::{DefaultChunker, MostlyFixedChunkMap};
 use ario_core::data::{AuthenticatedTxDataChunk, Authenticator, DataItem, DataRoot};
 use ario_core::tx::{AuthenticatedTx, TxId};
+use ario_core::{AuthenticatedItem, MaybeOwned};
 use bytes::Buf;
 use futures_lite::{AsyncRead, AsyncSeek};
 use futures_lite::{FutureExt, ready};
@@ -13,6 +16,7 @@ use rangemap::RangeMap;
 use std::cmp::{max, min};
 use std::collections::VecDeque;
 use std::io::{Cursor, ErrorKind, SeekFrom};
+use std::iter;
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -23,6 +27,12 @@ use thiserror::Error;
 pub enum Error {
     #[error("tx '{0}' does not have a data item")]
     NoDataItem(TxId),
+    #[error("tx '{0}' not found")]
+    TxNotFound(TxId),
+    #[error("bundle_item '{0}' not found")]
+    BundleItemNotFound(BundleItemId),
+    #[error("nested bundle items are not supported yet")]
+    NestingNotSupported,
     #[error("unsupported data item")]
     UnsupportedDataItem,
     #[error(transparent)]
@@ -31,7 +41,109 @@ pub enum Error {
     DataValidationFailure(String),
 }
 
-pub struct AsyncDataReader<D: DataSource> {
+pub trait DataReader: AsyncRead + AsyncSeek + Send + Unpin {
+    fn len(&self) -> u64;
+
+    fn item(&self) -> AuthenticatedItem<'static>;
+}
+
+impl DataReader for AsyncTxReader<'static> {
+    fn len(&self) -> u64 {
+        AsyncTxReader::len(self)
+    }
+
+    fn item(&self) -> AuthenticatedItem<'static> {
+        AuthenticatedItem::Tx(self.data_source.tx.clone().into_owned().into_owned())
+    }
+}
+
+impl DataReader for AsyncBundleItemReader<'static> {
+    fn len(&self) -> u64 {
+        AsyncBundleItemReader::len(self)
+    }
+
+    fn item(&self) -> AuthenticatedItem<'static> {
+        AuthenticatedItem::BundleItem(
+            self.data_source
+                .item
+                .clone()
+                .into_owned()
+                .into_owned()
+                .into(),
+        )
+    }
+}
+
+pub type DynDataReader = Box<dyn DataReader>;
+
+impl Client {
+    pub async fn read_data_item<'a, L: Into<Arl>>(
+        &self,
+        location: L,
+    ) -> Result<DynDataReader, super::Error> {
+        let location = location.into();
+        let item = self
+            .item_by_location(&location)
+            .await?
+            .ok_or_else(|| location::Error::NotFound)?;
+
+        self.new_data_reader(item, location).await
+    }
+
+    pub(crate) async fn new_data_reader(
+        &self,
+        authenticated_item: AuthenticatedItem<'static>,
+        location: Arl,
+    ) -> Result<DynDataReader, super::Error> {
+        let item_id = authenticated_item.id();
+        if location.item_id() != &item_id {
+            Err(location::Error::ItemMismatch {
+                expected: item_id,
+                actual: location.item_id().clone(),
+            })?;
+        }
+
+        let mut locations = iter::successors(location.parent(), |p| p.parent())
+            .chain(iter::once(location))
+            .collect_vec();
+
+        if locations.len() > 2 {
+            Err(Error::NestingNotSupported)?;
+        }
+
+        //todo: properly support nesting
+        let location = locations.remove(locations.len() - 1);
+
+        match authenticated_item {
+            AuthenticatedItem::Tx(tx) => Ok(Box::new(AsyncTxReader::new(self.clone(), tx).await?)),
+            AuthenticatedItem::BundleItem(item) => {
+                let location =
+                    BundleItemArl::try_from(location).map_err(location::Error::ArlError)?;
+
+                let (entry, item, authenticator, container) =
+                    match self._bundle_item(&location).await? {
+                        Some((entry, item, authenticator, container, ..)) => {
+                            (entry, item, authenticator, container)
+                        }
+                        None => return Err(Error::UnsupportedDataItem)?,
+                    };
+
+                //todo
+                let tx = match container {
+                    AuthenticatedItem::Tx(tx) => tx,
+                    _ => unimplemented!("nesting not supported"),
+                };
+
+                Ok(Box::new(
+                    AsyncBundleItemReader::new(self.clone(), entry, item, authenticator, tx)
+                        .await?,
+                ))
+            }
+        }
+    }
+}
+
+pub(crate) struct AsyncDataReader<D: DataSource> {
     pos: u64,
     len: u64,
     state: State<D::Chunk>,
@@ -226,7 +338,7 @@ impl<'a> TxDataSource<'a> {
     }
 }
 
-pub type AsyncTxReader<'a> = AsyncDataReader<TxDataSource<'a>>;
+pub(crate) type AsyncTxReader<'a> = AsyncDataReader<TxDataSource<'a>>;
 
 impl<'a> AsyncTxReader<'a> {
     pub async fn new(
@@ -283,7 +395,7 @@ pub struct BundleItemDataSource<'a> {
     tx_data_source: Arc<TxDataSource<'static>>,
 }
 
-pub type AsyncBundleItemReader<'a> = AsyncDataReader<BundleItemDataSource<'a>>;
+pub(crate) type AsyncBundleItemReader<'a> = AsyncDataReader<BundleItemDataSource<'a>>;
 
 impl<'a> AsyncBundleItemReader<'a> {
     pub async fn new(
@@ -602,7 +714,7 @@ mod tests {
         let tx_id = TxId::from_str("ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk")?;
         let item_id = BundleItemId::from_str("UHVB0gDKDiId6XAeZlCH_9h6h6Tz0we8MuGA0CUYxPE")?;
 
-        let tx = client.tx_by_id(&tx_id).await?.unwrap();
+        let tx = client.tx_by_id(&tx_id).await?.unwrap().into();
 
         let mut file =
             tokio::fs::File::open("./testdata/ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk.tx")
@@ -614,7 +726,7 @@ mod tests {
 
         let (bundle_item, authenticator) =
             BundleItemReader::read_async(&entry, &mut file, bundle.id().clone()).await?;
-        let bundle_item = bundle_item.authenticate()?;
+        let _bundle_item = bundle_item.authenticate()?;
 
         let chunks = authenticator.chunks().collect_vec();
         assert_eq!(chunks.len(), 3);

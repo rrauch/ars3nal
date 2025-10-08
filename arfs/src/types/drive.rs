@@ -132,7 +132,7 @@ mod tests {
     use crate::types::folder::FolderId;
     use crate::types::{Header, Metadata};
     use crate::{ArFsVersion, ContentType, Privacy};
-    use ario_client::location::ItemArl;
+    use ario_client::location::Arl;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;
     use ario_core::{BlockNumber, JsonValue};
@@ -183,7 +183,7 @@ mod tests {
             header,
             metadata,
             BlockNumber::from_inner(1),
-            ItemArl::from_str("ar://item/Y0wJvUkHFhcJZAduC8wfaiaDMHkrCoqHMSkenHD75VU").unwrap(),
+            Arl::from_str("ar://Y0wJvUkHFhcJZAduC8wfaiaDMHkrCoqHMSkenHD75VU").unwrap(),
         );
 
         assert_eq!(

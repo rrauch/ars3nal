@@ -775,6 +775,7 @@ mod tests {
     use crate::bundle::{BundleId, BundleItemBuilder, Ed25519Scheme};
     use crate::data::Authenticator;
     use crate::jwk::Jwk;
+    use crate::tx::TxId;
     use crate::validation::ValidateExt;
     use crate::wallet::Wallet;
     use bytes::BytesMut;
@@ -789,21 +790,27 @@ mod tests {
     static BUNDLE_0: &'static [u8] = include_bytes!("../../../testdata/bundle.bundle");
 
     static BUNDLE_0_ID: LazyLock<BundleId> = LazyLock::new(|| {
-        BundleId::from_str("BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ").unwrap()
+        TxId::from_str("BNttzDav3jHVnNiV7nYbQv-GY0HQ-4XXsdkE5K9ylHQ")
+            .unwrap()
+            .into()
     });
 
     static BUNDLE_1: &'static [u8] =
         include_bytes!("../../../testdata/nxoCcgVXf1A3yrMMEXAJpa0YUfgl9EONIKNVR6nr-50.bundle");
 
     static BUNDLE_1_ID: LazyLock<BundleId> = LazyLock::new(|| {
-        BundleId::from_str("nxoCcgVXf1A3yrMMEXAJpa0YUfgl9EONIKNVR6nr-50").unwrap()
+        TxId::from_str("nxoCcgVXf1A3yrMMEXAJpa0YUfgl9EONIKNVR6nr-50")
+            .unwrap()
+            .into()
     });
 
     static BUNDLE_3: &'static [u8] =
         include_bytes!("../../../testdata/Gz9dZaqN2I7AWT0vWGZWi5wlMjbImh13SOIomthyB6M.bundle");
 
     static BUNDLE_3_ID: LazyLock<BundleId> = LazyLock::new(|| {
-        BundleId::from_str("Gz9dZaqN2I7AWT0vWGZWi5wlMjbImh13SOIomthyB6M").unwrap()
+        TxId::from_str("Gz9dZaqN2I7AWT0vWGZWi5wlMjbImh13SOIomthyB6M")
+            .unwrap()
+            .into()
     });
 
     static WALLET_ED25519_JWK: &'static [u8] =
@@ -887,7 +894,7 @@ mod tests {
             &mut std::io::Cursor::new(&bytes),
             len,
             None,
-            BundleId::from_str("FTxzaw_jnVmU3LKOrkmBQ29Mhu9cFWQkhelsI4ZY1y8")?,
+            TxId::from_str("FTxzaw_jnVmU3LKOrkmBQ29Mhu9cFWQkhelsI4ZY1y8")?.into(),
         )?;
         let item = unvalidated.validate().map_err(|(_, e)| e)?;
         assert_eq!(item.id(), v2_item.id());

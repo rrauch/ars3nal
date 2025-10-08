@@ -36,11 +36,11 @@ use crate::entity::{
     Signature as EntitySignature,
 };
 use crate::tag::Tag;
-use crate::tx::{AuthenticatedTx, TxId};
+use crate::tx::TxId;
 use crate::typed::{FromInner, Typed, WithSerde};
 use crate::validation::{SupportsValidation, ValidateExt};
 use crate::wallet::{WalletAddress, WalletKind, WalletPk, WalletSk};
-use crate::{blob, data, entity};
+use crate::{AuthenticatedItem, ItemId, blob, data, entity};
 use bytes::Buf;
 use futures_lite::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use hybrid_array::Array;
@@ -134,11 +134,12 @@ pub enum Bundle {
     V2(Arc<V2Bundle>),
 }
 
-pub type BundleId = TxId;
+pub type BundleId = ItemId;
 
 pub(crate) static PLACEHOLDER_BUNDLE_ID: LazyLock<BundleId> = LazyLock::new(|| {
-    BundleId::from_str("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    TxId::from_str("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
         .expect("bundle id to be valid")
+        .into()
 });
 
 impl Bundle {
@@ -273,14 +274,14 @@ pub struct BundleReader;
 
 impl BundleReader {
     pub async fn new<R: AsyncRead + AsyncSeek + Send + Unpin>(
-        tx: &AuthenticatedTx<'_>,
+        item: &AuthenticatedItem<'_>,
         reader: R,
     ) -> Result<Bundle, Error> {
-        let bundle_type = BundleType::from_tags(tx.tags()).ok_or(Error::UnsupportedFormat)?;
+        let bundle_type = BundleType::from_tags(item.tags()).ok_or(Error::UnsupportedFormat)?;
         match bundle_type {
             BundleType::V2 => Ok(Bundle::V2(Arc::new(
                 v2::BundleReader::builder()
-                    .id(tx.id().clone())
+                    .id(item.id().clone())
                     .build()
                     .process_async(reader)
                     .await?,
@@ -539,6 +540,12 @@ impl<'a, const AUTHENTICATED: bool> BundleItem<'a, AUTHENTICATED> {
     pub fn owner(&self) -> Owner<'_> {
         match self {
             Self::V2(v2) => v2.owner(),
+        }
+    }
+
+    pub fn into_owned(self) -> BundleItem<'static, AUTHENTICATED> {
+        match self {
+            Self::V2(v2) => BundleItem::V2(Arc::new(Arc::unwrap_or_clone(v2).into_owned())),
         }
     }
 }

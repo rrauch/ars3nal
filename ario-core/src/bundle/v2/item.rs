@@ -1,3 +1,4 @@
+use crate::ItemId;
 use crate::blob::{AsBlob, Blob, OwnedBlob};
 use crate::bundle::TagError::IncorrectTagCount;
 use crate::bundle::v2::reader::FlowExt;
@@ -18,6 +19,7 @@ use crate::validation::SupportsValidation;
 use crate::wallet::WalletAddress;
 use bytes::{BufMut, BytesMut};
 use futures_lite::AsyncRead;
+use itertools::Itertools;
 use maybe_owned::MaybeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::io::Read;
@@ -78,6 +80,25 @@ impl<'a, const AUTHENTICATED: bool> BundleItem<'a, AUTHENTICATED> {
     #[inline]
     pub fn owner(&self) -> Owner<'_> {
         self.0.signature_data.owner()
+    }
+
+    pub fn into_owned(self) -> BundleItem<'static, AUTHENTICATED> {
+        BundleItem(BundleItemInner {
+            id: self.0.id,
+            bundle_id: self.0.bundle_id,
+            anchor: self.0.anchor,
+            tags: self
+                .0
+                .tags
+                .into_iter()
+                .map(|t| t.into_owned())
+                .collect_vec(),
+            target: self.0.target.clone(),
+            data_size: self.0.data_size,
+            data_offset: self.0.data_size,
+            signature_data: self.0.signature_data,
+            hash: self.0.hash,
+        })
     }
 }
 
@@ -197,7 +218,7 @@ impl UnauthenticatedItem<'static> {
         reader: R,
         len: u64,
         container_location: Option<ContainerLocation>,
-        bundle_id: BundleId,
+        bundle_id: ItemId,
     ) -> Result<(Self, BundleItemDataAuthenticator<'static>), Error> {
         Ok(Self::try_from_raw(
             ItemReader::builder()

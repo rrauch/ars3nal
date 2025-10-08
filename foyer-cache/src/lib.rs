@@ -12,6 +12,7 @@ const DEFAULT_MEM_BUF_SIZE: usize = 1024 * 1024;
 #[cfg(test)]
 mod tests {
     use crate::{FoyerChunkCache, FoyerMetadataCache};
+    use ario_client::location::BundleItemArl;
     use ario_client::{Cache, Client};
     use ario_core::Gateway;
     use ario_core::blob::Blob;
@@ -62,13 +63,14 @@ mod tests {
                 .build()
                 .await?;
 
-            let item = client.bundle_item(&item_id, &tx_id).await?.unwrap();
-            assert_eq!(item.id(), &item_id);
+            let location = BundleItemArl::from((tx_id, item_id));
+            let item = client.bundle_item(&location).await?.unwrap();
+            assert_eq!(item.id(), location.bundle_item_id());
 
             let len = item.data_size() as usize;
 
             let mut read = 0;
-            let mut reader = client.read_bundle_item(&item).await?;
+            let mut reader = client.read_data_item(location).await?;
 
             let mut hasher = Sha256::new();
             let mut buf = vec![0u8; 64 * 1024];

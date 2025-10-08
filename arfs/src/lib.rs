@@ -18,11 +18,10 @@ use crate::types::{AuthMode, Entity, HasId, Header, Metadata, Model, ParseError}
 use crate::vfs::Error as VfsError;
 use ario_client::Client;
 use ario_client::Error as ClientError;
-use ario_client::data_reader::{AsyncBundleItemReader, AsyncTxReader};
 use ario_client::graphql::{
     SortOrder, TagFilter, TxQuery, TxQueryFilterCriteria, TxQueryItem, WithTxResponseFields,
 };
-use ario_client::location::ItemArl;
+use ario_client::location::Arl;
 use ario_client::tx::Status as TxStatus;
 use ario_core::confidential::{Confidential, NewSecretExt};
 use ario_core::tag::Tag;
@@ -31,7 +30,7 @@ use ario_core::wallet::{Wallet, WalletAddress};
 use ario_core::{JsonValue, MaybeOwned};
 use core::fmt;
 use derive_more::Display;
-use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeek, Stream, StreamExt};
+use futures_lite::{AsyncReadExt, Stream, StreamExt};
 use serde_json::Error as JsonError;
 use std::fmt::{Debug, Display, Formatter};
 use std::num::NonZeroUsize;
@@ -54,8 +53,6 @@ pub enum Error {
     IoError(#[from] std::io::Error),
     #[error(transparent)]
     VfsError(#[from] VfsError),
-    #[error("nested bundle items are not supported yet")]
-    NestingNotSupported,
 }
 
 #[derive(Error, Debug)]
@@ -617,7 +614,7 @@ async fn find_entity_location_by_id_drive<'a, E: Entity + HasId>(
     client: &'a Client,
     id: &E::Id,
     drive_id: &'a DriveId,
-) -> Result<ItemArl, Error>
+) -> Result<Arl, Error>
 where
     <E as HasId>::Id: Display,
 {
@@ -658,26 +655,10 @@ where
         .map_err(|e| e.into())
 }
 
-trait MetadataReader: AsyncRead + AsyncSeek + Send + Unpin {
-    fn len(&self) -> u64;
-}
-
-impl MetadataReader for AsyncTxReader<'_> {
-    fn len(&self) -> u64 {
-        AsyncTxReader::len(self)
-    }
-}
-
-impl MetadataReader for AsyncBundleItemReader<'_> {
-    fn len(&self) -> u64 {
-        AsyncBundleItemReader::len(self)
-    }
-}
-
 async fn folder_entity(
     folder_id: &FolderId,
     client: &Client,
-    location: &ItemArl,
+    location: &Arl,
     drive_id: &DriveId,
     owner: &WalletAddress,
     private: Option<&Private>,
@@ -701,7 +682,7 @@ async fn folder_entity(
 
 async fn read_entity<E: Entity, const MAX_METADATA_LEN: usize>(
     client: &Client,
-    location: &ItemArl,
+    location: &Arl,
     drive_id: &DriveId,
     owner: &WalletAddress,
     private: Option<&Private>,
@@ -719,60 +700,18 @@ where
         }
     }
 
-    let block_height = match client.tx_status(location.tx()).await? {
+    let block_height = match client.tx_status(location.tx_id()).await? {
         Some(TxStatus::Accepted(accepted)) => accepted.block_height,
-        _ => Err(EntityError::InvalidTxStatus(location.tx().clone()))?,
+        _ => Err(EntityError::InvalidTxStatus(location.tx_id().clone()))?,
     };
 
-    let tx_e;
-    let bundle_item;
-    let mut reader: Box<dyn MetadataReader>;
-    let owner_address;
+    let mut reader = client.read_data_item(location.clone()).await?;
+    let item = reader.item();
 
-    let authenticated_tags = match location.depth() {
-        0 => {
-            // tx
-            if let Some(tx) = client.tx_by_id(location.tx()).await? {
-                tx_e = tx;
-                let tags = tx_e.tags();
-                owner_address = tx_e.owner().address();
-
-                reader = Box::new(AsyncTxReader::new(client.clone(), &tx_e).await?);
-                tags
-            } else {
-                return Err(EntityError::NotFound {
-                    entity_type: E::TYPE,
-                    details: format!("drive_id: {}", drive_id),
-                })?;
-            }
-        }
-        1 => {
-            // simple bundle_item
-            let item_id = location.bundle_items().next().unwrap();
-
-            if let Some(item) = client.bundle_item(item_id, location.tx()).await? {
-                bundle_item = item;
-                let tags = bundle_item.tags();
-                owner_address = bundle_item.owner().address();
-                reader = Box::new(client.read_bundle_item(&bundle_item).await?);
-                tags
-            } else {
-                return Err(EntityError::NotFound {
-                    entity_type: E::TYPE,
-                    details: format!("drive_id: {}", drive_id),
-                })?;
-            }
-        }
-        _ => {
-            // nested bundle_item
-            return Err(Error::NestingNotSupported);
-        }
-    };
-
-    if &owner_address != owner {
+    if &item.owner() != owner {
         Err(EntityError::OwnerMismatch {
             expected: owner.clone(),
-            actual: owner_address,
+            actual: item.owner(),
         })?;
     }
 
@@ -789,17 +728,22 @@ where
     let metadata: JsonValue =
         serde_json::from_slice(buf.as_slice()).map_err(|e| EntityError::MetadataError(e.into()))?;
 
-    let header = Header::<E::Header, E>::try_from(authenticated_tags).map_err(EntityError::from)?;
+    let header = Header::<E::Header, E>::try_from(item.tags()).map_err(EntityError::from)?;
 
     let metadata = Metadata::<E::Metadata, E>::try_from(metadata).map_err(EntityError::from)?;
 
-    Ok(Model::new(header, metadata, block_height, location.clone()))
+    Ok(Model::new(
+        header,
+        metadata,
+        block_height,
+        location.clone(),
+    ))
 }
 
 async fn drive_entity(
     client: &Client,
     drive_id: &DriveId,
-    location: &ItemArl,
+    location: &Arl,
     owner: &WalletAddress,
     private: Option<&Private>,
 ) -> Result<DriveEntity, Error> {

@@ -50,11 +50,11 @@ mod tests {
         DriveSignatureEntity, DriveSignatureHeader, DriveSignatureKind,
     };
     use crate::types::{Cipher, Header, Metadata, SignatureFormat};
-    use ario_client::location::ItemArl;
     use ario_core::BlockNumber;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;
     use std::str::FromStr;
+    use ario_client::location::Arl;
 
     #[test]
     fn drive_signature_entity_roundtrip() -> anyhow::Result<()> {
@@ -83,7 +83,7 @@ mod tests {
             header,
             Metadata::none(),
             BlockNumber::from_inner(1),
-            ItemArl::from_str("ar://item/Y0wJvUkHFhcJZAduC8wfaiaDMHkrCoqHMSkenHD75VU").unwrap(),
+            Arl::from_str("ar://Y0wJvUkHFhcJZAduC8wfaiaDMHkrCoqHMSkenHD75VU").unwrap(),
         );
 
         assert_eq!(

@@ -11,7 +11,7 @@ bip32 = { version = "0.5", features = ["k256"] }
 bip39 = { version = "2.2", features = ["zeroize"] }
 blake3 = { version = "1.8", default-features = false, features = ["std", "prefer_intrinsics"] }
 bon = { workspace = true }
-bytemuck = { version = "1.23", features = ["derive"] }
+bytemuck = { workspace = true, features = ["derive"] }
 bytes = { workspace = true }
 circular-buffer = "1.1"
 ct-codecs = "1.1"

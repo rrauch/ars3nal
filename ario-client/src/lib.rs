@@ -15,19 +15,16 @@ pub use crate::cache::Cache;
 pub use bytesize::ByteSize;
 pub use chrono::{DateTime, Utc};
 
-pub type ByteArray<N: ArraySize> = Array<u8, N>;
-pub use hybrid_array::sizes::U32;
+pub type RawItemId = Array<u8, U32>;
 
 use crate::api::Api;
 use crate::routemaster::{Handle, Routemaster};
-use ario_core::bundle::BundleItemId;
+use ario_core::Gateway;
 use ario_core::network::Network;
-use ario_core::tx::TxId;
-use ario_core::{Gateway, MaybeOwned};
-use hybrid_array::{Array, ArraySize};
+use hybrid_array::Array;
+use hybrid_array::sizes::U32;
 use reqwest::Client as ReqwestClient;
-use std::fmt::{Debug, Display, Formatter};
-use std::ops::Deref;
+use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
@@ -129,85 +126,4 @@ struct Inner {
     api: Api,
     routemaster: Routemaster,
     cache: Cache,
-}
-
-#[derive(PartialEq, Debug, Clone)]
-pub enum ItemId<'a> {
-    Tx(MaybeOwned<'a, TxId>),
-    BundleItem(MaybeOwned<'a, BundleItemId>),
-}
-
-impl<'a> ItemId<'a> {
-    pub fn as_tx(&self) -> Option<&TxId> {
-        match self {
-            Self::Tx(tx) => Some(tx.as_ref()),
-            _ => None,
-        }
-    }
-
-    pub fn as_bundle_item(&self) -> Option<&BundleItemId> {
-        match self {
-            Self::BundleItem(bundle_item) => Some(bundle_item.as_ref()),
-            _ => None,
-        }
-    }
-
-    pub fn into_owned(self) -> ItemId<'static> {
-        match self {
-            Self::Tx(tx) => ItemId::Tx(tx.into_owned().into()),
-            Self::BundleItem(bundle_item) => ItemId::BundleItem(bundle_item.into_owned().into()),
-        }
-    }
-
-    pub fn as_slice(&self) -> &[u8] {
-        match self {
-            Self::Tx(tx) => tx.as_slice(),
-            Self::BundleItem(bundle_item) => bundle_item.as_slice(),
-        }
-    }
-
-    fn borrow(&'a self) -> ItemId<'a> {
-        match self {
-            Self::Tx(tx) => Self::Tx(tx.deref().into()),
-            Self::BundleItem(item) => Self::BundleItem(item.deref().into()),
-        }
-    }
-
-    pub(crate) fn as_byte_array(&self) -> &ByteArray<U32> {
-        let bytes = self.as_slice();
-        bytes.try_into().expect("bytes to always be 32 bytes")
-    }
-}
-
-impl<'a> Display for ItemId<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tx(tx) => Display::fmt(tx, f),
-            Self::BundleItem(bundle_item) => Display::fmt(bundle_item, f),
-        }
-    }
-}
-
-impl<'a> From<&'a TxId> for ItemId<'a> {
-    fn from(value: &'a TxId) -> Self {
-        Self::Tx(value.into())
-    }
-}
-
-impl From<TxId> for ItemId<'static> {
-    fn from(value: TxId) -> Self {
-        Self::Tx(value.into())
-    }
-}
-
-impl<'a> From<&'a BundleItemId> for ItemId<'a> {
-    fn from(value: &'a BundleItemId) -> Self {
-        Self::BundleItem(value.into())
-    }
-}
-
-impl From<BundleItemId> for ItemId<'static> {
-    fn from(value: BundleItemId) -> Self {
-        Self::BundleItem(value.into())
-    }
 }

@@ -1,5 +1,5 @@
 use crate::ContentType;
-use ario_client::ItemId;
+use ario_core::ItemId;
 use ario_core::blob::OwnedBlob;
 use chrono::{DateTime, Utc};
 use derive_more::Display;
@@ -195,7 +195,7 @@ struct FileData {
     size: u64,
     last_modified: Timestamp,
     content_type: ContentType,
-    data_item_id: ItemId<'static>,
+    data_item_id: ItemId,
 }
 
 pub type Directory = VfsNode<DirData>;

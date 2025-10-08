@@ -8,11 +8,17 @@ pub use serde_json::Value as JsonValue;
 
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::Blob;
+use crate::bundle::{BundleItem, BundleItemId};
 use crate::crypto::hash::TypedDigest;
 use crate::crypto::hash::{Sha256, Sha384};
+use crate::tag::Tag;
+use crate::tx::{Tx, TxId};
 use crate::typed::{Typed, WithDisplay, WithSerde};
+use crate::wallet::WalletAddress;
+use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use thiserror::Error;
@@ -114,4 +120,111 @@ pub enum GatewayError {
     UrlError(#[from] url::ParseError),
     #[error("unsupported url: '{0}'")]
     UnsupportedUrl(String),
+}
+
+pub type AuthenticatedItem<'a> = Item<'a, true>;
+pub type UnauthenticatedItem<'a> = Item<'a, false>;
+
+#[derive(Debug, Clone)]
+pub enum Item<'a, const AUTHENTICATED: bool> {
+    Tx(Tx<'a, AUTHENTICATED>),
+    BundleItem(BundleItem<'a, AUTHENTICATED>),
+}
+
+impl<'a, const AUTHENTICATED: bool> Item<'a, AUTHENTICATED> {
+    #[inline]
+    pub fn id(&self) -> ItemId {
+        match self {
+            Self::Tx(tx) => ItemId::from(tx.id().clone()),
+            Self::BundleItem(bundle_item) => ItemId::from(bundle_item.id().clone()),
+        }
+    }
+
+    #[inline]
+    pub fn tags(&self) -> &Vec<Tag<'a>> {
+        match self {
+            Self::Tx(tx) => tx.tags(),
+            Self::BundleItem(item) => item.tags(),
+        }
+    }
+
+    #[inline]
+    pub fn owner(&self) -> WalletAddress {
+        match self {
+            Self::Tx(tx) => tx.owner().address(),
+            Self::BundleItem(item) => item.owner().address(),
+        }
+    }
+
+    #[inline]
+    pub fn into_owned(self) -> Item<'static, AUTHENTICATED> {
+        match self {
+            Self::Tx(tx) => Item::Tx(tx.into_owned()),
+            Self::BundleItem(item) => Item::BundleItem(item.into_owned()),
+        }
+    }
+}
+
+impl<'a, const AUTHENTICATED: bool> From<Tx<'a, AUTHENTICATED>> for Item<'a, AUTHENTICATED> {
+    fn from(value: Tx<'a, AUTHENTICATED>) -> Self {
+        Self::Tx(value)
+    }
+}
+
+impl<'a, const AUTHENTICATED: bool> From<BundleItem<'a, AUTHENTICATED>>
+    for Item<'a, AUTHENTICATED>
+{
+    fn from(value: BundleItem<'a, AUTHENTICATED>) -> Self {
+        Self::BundleItem(value)
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, Clone, Hash, Serialize, Deserialize)]
+pub enum ItemId {
+    Tx(TxId),
+    BundleItem(BundleItemId),
+}
+
+impl ItemId {
+    pub fn as_tx(&self) -> Option<&TxId> {
+        match self {
+            Self::Tx(tx) => Some(tx),
+            _ => None,
+        }
+    }
+
+    pub fn as_bundle_item(&self) -> Option<&BundleItemId> {
+        match self {
+            Self::BundleItem(bundle_item) => Some(bundle_item),
+            _ => None,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Tx(tx) => tx.as_slice(),
+            Self::BundleItem(bundle_item) => bundle_item.as_slice(),
+        }
+    }
+}
+
+impl Display for ItemId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tx(tx) => Display::fmt(tx, f),
+            Self::BundleItem(bundle_item) => Display::fmt(bundle_item, f),
+        }
+    }
+}
+
+impl From<TxId> for ItemId {
+    fn from(value: TxId) -> Self {
+        Self::Tx(value.into())
+    }
+}
+
+impl From<BundleItemId> for ItemId {
+    fn from(value: BundleItemId) -> Self {
+        Self::BundleItem(value.into())
+    }
 }

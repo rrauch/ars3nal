@@ -7,7 +7,7 @@ use crate::types::snapshot::{SnapshotEntity, SnapshotKind};
 use crate::types::{Entity, Header, Metadata, Model, ParseError};
 use crate::{Privacy, Scope};
 use ario_client::Client;
-use ario_client::location::ItemArl;
+use ario_client::location::Arl;
 use ario_core::BlockNumber;
 use ario_core::blob::OwnedBlob;
 use ario_core::network::NetworkIdentifier;
@@ -540,7 +540,7 @@ impl TryFrom<EntityRow<'_>> for DriveSignatureEntity {
     type Error = DataError;
 
     fn try_from(row: EntityRow) -> Result<Self, Self::Error> {
-        from_row::<DriveSignatureKind>(row, |header, _, location, block, row| {
+        from_row::<DriveSignatureKind>(row, |header, _, location, block, _| {
             Ok(DriveSignatureEntity::new(
                 header,
                 Metadata::none(),
@@ -685,7 +685,7 @@ fn from_row<E: DbEntity>(
     finalize: impl FnOnce(
         Header<<E as Entity>::Header, E>,
         Option<Metadata<<E as Entity>::Metadata, E>>,
-        ItemArl,
+        Arl,
         BlockNumber,
         EntityRow<'_>,
     ) -> Result<Model<E>, DataError>,
@@ -705,7 +705,7 @@ where
         Vec<Tag<'_>>,
     >(row.header.as_slice())?)?;
 
-    let location = ItemArl::from_str(row.location.deref())
+    let location = Arl::from_str(row.location.deref())
         .map_err(|e| DataError::ConversionError(e.to_string()))?;
 
     let block = BlockNumber::from_inner(row.block as u64);

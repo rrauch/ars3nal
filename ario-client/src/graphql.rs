@@ -1,8 +1,8 @@
 use crate::api::RequestMethod::Post;
 use crate::api::{Api, ApiRequest, ApiRequestBody, ContentType, ViaJson};
-use crate::{ByteArray, Client, ItemId, api};
+use crate::{Client, RawItemId, api};
 use ario_core::base64::{TryFromBase64, TryFromBase64Error};
-use ario_core::{BlockId, BlockIdError, BlockNumber, Gateway, tx};
+use ario_core::{BlockId, BlockIdError, BlockNumber, Gateway, ItemId, tx};
 use async_stream::try_stream;
 use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
@@ -21,9 +21,7 @@ use crate::graphql::ConversionError::{ByteSizeError, InvalidTimestamp};
 use ario_core::MaybeOwned;
 use ario_core::base64::{Base64Error, FromBase64, ToBase64};
 use ario_core::blob::{AsBlob, Blob};
-use ario_core::bundle::{
-    BundleAnchor, BundleAnchorError, BundleId, BundleItemId, BundleItemIdError,
-};
+use ario_core::bundle::{BundleAnchor, BundleAnchorError, BundleItemId, BundleItemIdError};
 use ario_core::money::{AR, Money, MoneyError, Winston};
 use ario_core::tag::Tag;
 use ario_core::tx::{QuantityError, Reward, RewardError, TxAnchor, TxAnchorError, TxId, TxIdError};
@@ -33,7 +31,6 @@ use cynic::schema::HasField;
 use cynic::{Operation, OperationBuilder, QueryFragment, QueryVariablesFields};
 use derive_where::derive_where;
 use futures_lite::Stream;
-use hybrid_array::sizes::U32;
 
 #[cynic::schema("arweave")]
 mod schema {}
@@ -219,43 +216,31 @@ pub struct TxQuery<'a> {
 
 #[derive(Debug, Clone)]
 pub enum TxQueryId<'a> {
-    ItemId(ItemId<'a>),
-    Unknown(MaybeOwned<'a, ByteArray<U32>>),
+    ItemId(MaybeOwned<'a, ItemId>),
+    Unknown(MaybeOwned<'a, RawItemId>),
 }
 
-impl<'a> From<&'a ItemId<'a>> for TxQueryId<'a> {
-    fn from(value: &'a ItemId<'a>) -> Self {
-        Self::ItemId(value.borrow())
+impl<'a> From<&'a ItemId> for TxQueryId<'a> {
+    fn from(value: &'a ItemId) -> Self {
+        Self::ItemId(value.into())
     }
 }
 
-impl<'a> From<ItemId<'a>> for TxQueryId<'a> {
-    fn from(value: ItemId<'a>) -> Self {
-        Self::ItemId(value)
-    }
-}
-
-impl<'a> From<&'a TxId> for TxQueryId<'a> {
-    fn from(value: &'a TxId) -> Self {
-        Self::ItemId(ItemId::Tx(value.into()))
+impl<'a> From<ItemId> for TxQueryId<'a> {
+    fn from(value: ItemId) -> Self {
+        Self::ItemId(value.into())
     }
 }
 
 impl From<TxId> for TxQueryId<'static> {
     fn from(value: TxId) -> Self {
-        Self::ItemId(ItemId::Tx(value.into()))
-    }
-}
-
-impl<'a> From<&'a BundleItemId> for TxQueryId<'a> {
-    fn from(value: &'a BundleItemId) -> Self {
-        Self::ItemId(ItemId::BundleItem(value.into()))
+        Self::ItemId(ItemId::Tx(value).into())
     }
 }
 
 impl From<BundleItemId> for TxQueryId<'static> {
     fn from(value: BundleItemId) -> Self {
-        Self::ItemId(ItemId::BundleItem(value.into()))
+        Self::ItemId(ItemId::BundleItem(value).into())
     }
 }
 
@@ -750,7 +735,6 @@ pub struct Tx {
 #[derive(Debug, Clone)]
 pub struct BundleItem {
     pub id: BundleItemId,
-    pub bundle_id: BundleId,
     pub anchor: Option<BundleAnchor>,
     pub data_size: Option<ByteSize>,
     pub content_type: Option<String>,
@@ -761,7 +745,7 @@ pub struct BundleItem {
 
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct BundledInId(ByteArray<U32>);
+pub struct BundledInId(RawItemId);
 
 impl TryFrom<&RawBundle> for BundledInId {
     type Error = ConversionError;
@@ -787,19 +771,17 @@ pub enum TxQueryItem {
 
 impl TxQueryItem {
     #[inline]
-    pub fn id(&self) -> ItemId<'_> {
+    pub fn id(&self) -> ItemId {
         match self {
-            Self::Tx(tx) => ItemId::Tx(MaybeOwned::Borrowed(&tx.id)),
-            Self::BundleItem(bundle_item) => {
-                ItemId::BundleItem(MaybeOwned::Borrowed(&bundle_item.id))
-            }
+            Self::Tx(tx) => ItemId::Tx(tx.id.clone()),
+            Self::BundleItem(bundle_item) => ItemId::BundleItem(bundle_item.id.clone()),
         }
     }
 
-    pub(crate) fn into_id(self) -> ItemId<'static> {
+    pub(crate) fn into_id(self) -> ItemId {
         match self {
-            Self::Tx(tx) => ItemId::Tx(MaybeOwned::Owned(tx.id)),
-            Self::BundleItem(bundle_item) => ItemId::BundleItem(MaybeOwned::Owned(bundle_item.id)),
+            Self::Tx(tx) => ItemId::Tx(tx.id),
+            Self::BundleItem(bundle_item) => ItemId::BundleItem(bundle_item.id),
         }
     }
 
@@ -898,7 +880,6 @@ impl<S: TxQueryFieldSelector> TryFrom<RawTx<S>> for TxQueryItem {
             // there isn't enough information available to reliably detect the signature / owner type
             Self::BundleItem(BundleItem {
                 id: BundleItemId::from_str(value.id.inner())?,
-                bundle_id: BundleId::from_str(bundled_in.id.inner())?,
                 anchor: value
                     .anchor
                     .filter(|v| !v.is_empty())
@@ -989,7 +970,6 @@ mod tests {
 
         let arlocal = std::env::var("ARLOCAL_URL").unwrap();
         let network_id = std::env::var("ARLOCAL_ID").unwrap_or("arlocal".to_string());
-        let wallet_jwk = std::env::var("ARLOCAL_WALLET_JWK").unwrap();
 
         let client = crate::Client::builder()
             .network(Network::Local(network_id.try_into()?))

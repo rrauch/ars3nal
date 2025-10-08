@@ -6,7 +6,7 @@ CREATE TABLE entity
     -- DR: Drive, DS: DriveSignature, FI: File, FO: Folder, SN: Snapshot
     entity_type   TEXT                NOT NULL CHECK (entity_type IN ('DR', 'DS', 'FI', 'FO', 'SN')),
 
-    location      TEXT                NOT NULL CHECK (location LIKE 'ar://item/%' AND LENGTH(location) >= 58),
+    location      TEXT                NOT NULL CHECK (location LIKE 'ar://%' AND LENGTH(location) >= 53),
     block         INTEGER             NOT NULL CHECK (block > 0),
 
     entity_id     BLOB CHECK (entity_id IS NULL OR (TYPEOF(entity_id) == 'blob' AND
@@ -15,7 +15,7 @@ CREATE TABLE entity
     header        BLOB                NOT NULL CHECK (json_valid(header, 8)),
     metadata      BLOB CHECK (metadata IS NULL OR json_valid(metadata, 8)),
 
-    data_location TEXT CHECK (data_location IS NULL OR (data_location LIKE 'ar://item/%' AND LENGTH(data_location) >= 58)),
+    data_location TEXT CHECK (data_location IS NULL OR (data_location LIKE 'ar://%' AND LENGTH(data_location) >= 53)),
 
     UNIQUE (entity_type, entity_id),
 

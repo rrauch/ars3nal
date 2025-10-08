@@ -112,12 +112,12 @@ mod tests {
     use crate::types::snapshot::{SnapshotEntity, SnapshotHeader, SnapshotId, SnapshotKind};
     use crate::types::{Header, Metadata};
     use crate::{ArFsVersion, ContentType};
-    use ario_client::location::ItemArl;
     use ario_core::BlockNumber;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;
     use chrono::DateTime;
     use std::str::FromStr;
+    use ario_client::location::Arl;
 
     #[test]
     fn snapshot_entity_roundtrip() -> anyhow::Result<()> {
@@ -166,7 +166,7 @@ mod tests {
             header,
             Metadata::none(),
             BlockNumber::from_inner(1),
-            ItemArl::from_str("ar://item/Y0wJvUkHFhcJZAduC8wfaiaDMHkrCoqHMSkenHD75VU").unwrap(),
+            Arl::from_str("ar://Y0wJvUkHFhcJZAduC8wfaiaDMHkrCoqHMSkenHD75VU").unwrap(),
         );
 
         assert_eq!(
