@@ -130,7 +130,11 @@ impl AuthenticatedItem<'_> {
             data_deep_hash: DataDeepHash::new_from_inner(b"".digest()), // dummy value
             data_verifier: BundleItemDataAuthenticator::from_single_value(
                 Blob::Slice(b"".as_slice()),
-                BundleItemChunker::new(0, DefaultChunker::chunk_map(self.0.data_size)),
+                BundleItemChunker::align(
+                    DefaultChunker::chunk_map(self.0.data_size),
+                    0,
+                    None,
+                ),
             ), // dummy value
         };
 

@@ -1,10 +1,13 @@
 use crate::blob::{AsBlob, Blob, TypedBlob};
 use crate::buffer::{ByteBuffer, TypedByteBuffer};
-use crate::bundle::{BundleItemAuthenticator, BundleItemDataProof, MaybeOwnedBundledDataItem};
+use crate::bundle::{
+    BundleItemAuthenticator, BundleItemDataProof, BundleItemKind, MaybeOwnedBundledDataItem,
+};
 use crate::chunking::{Chunker, ChunkerExt, DefaultChunker, MaybeOwnedChunk, TypedChunk};
 use crate::crypto::hash::{Hasher, Sha256};
 use crate::crypto::merkle;
 use crate::crypto::merkle::{DefaultMerkleRoot, DefaultProof, MerkleRoot, MerkleTree, Proof};
+use crate::tx::TxKind;
 use crate::typed::{FromInner, WithSerde};
 use crate::validation::SupportsValidation;
 use crate::{Authenticated, AuthenticationState, Unauthenticated, bundle};
@@ -49,14 +52,34 @@ impl<'a, T, Auth: AuthenticationState> DataChunk<'a, T, Auth> {
     pub fn range(&self) -> Range<u64> {
         self.offset..(self.offset + self.len())
     }
+
+    pub fn untagged(self) -> DataChunk<'a, (), Auth>
+    where
+        T: Untaggable,
+    {
+        DataChunk {
+            data: self.data.clone().cast(),
+            offset: self.offset,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+trait Untaggable {}
+impl Untaggable for TxKind {}
+impl Untaggable for BundleItemKind {}
+
+impl<'a, T, Auth: AuthenticationState> From<DataChunk<'a, T, Auth>> for DataChunk<'a, (), Auth>
+where
+    T: Untaggable,
+{
+    fn from(value: DataChunk<'a, T, Auth>) -> Self {
+        value.untagged()
+    }
 }
 
 impl<'a, T> AuthenticatedDataChunk<'a, T> {
     pub fn authenticated_data(&self) -> TypedByteBuffer<'a, (T, Authenticated)> {
-        TypedByteBuffer::cast(self.data.clone().into_untyped())
-    }
-
-    pub fn authenticated_data_erased(&self) -> TypedByteBuffer<'a, Authenticated> {
         TypedByteBuffer::cast(self.data.clone().into_untyped())
     }
 }
@@ -87,10 +110,6 @@ pub mod hazmat {
         pub fn danger_unauthenticated_data(&self) -> TypedByteBuffer<'a, (T, Unauthenticated)> {
             TypedByteBuffer::cast(self.data.clone().into_untyped())
         }
-
-        pub fn danger_unauthenticated_data_erased(&self) -> TypedByteBuffer<'a, Unauthenticated> {
-            TypedByteBuffer::cast(self.data.clone().into_untyped())
-        }
     }
 }
 
@@ -105,10 +124,9 @@ impl<'a, T> UnauthenticatedDataChunk<'a, T> {
     }
 }
 
-pub struct TxDataKind;
-pub type TxDataChunk<'a, Auth: AuthenticationState> = DataChunk<'a, TxDataKind, Auth>;
-pub type AuthenticatedTxDataChunk<'a> = AuthenticatedDataChunk<'a, TxDataKind>;
-pub type UnauthenticatedTxDataChunk<'a> = UnauthenticatedDataChunk<'a, TxDataKind>;
+pub type TxDataChunk<'a, Auth: AuthenticationState> = DataChunk<'a, TxKind, Auth>;
+pub type AuthenticatedTxDataChunk<'a> = AuthenticatedDataChunk<'a, TxKind>;
+pub type UnauthenticatedTxDataChunk<'a> = UnauthenticatedDataChunk<'a, TxKind>;
 
 impl<'a> UnauthenticatedTxDataChunk<'a> {
     #[inline]
@@ -161,12 +179,9 @@ impl<'a> TxDataAuthenticityProof<'a> {
     }
 }
 
-pub struct BundleItemDataKind;
-
-pub type BundleItemDataChunk<'a, Auth: AuthenticationState> =
-    DataChunk<'a, BundleItemDataKind, Auth>;
-pub type AuthenticatedBundleItemDataChunk<'a> = AuthenticatedDataChunk<'a, BundleItemDataKind>;
-pub type UnauthenticatedBundleItemDataChunk<'a> = UnauthenticatedDataChunk<'a, BundleItemDataKind>;
+pub type BundleItemDataChunk<'a, Auth: AuthenticationState> = DataChunk<'a, BundleItemKind, Auth>;
+pub type AuthenticatedBundleItemDataChunk<'a> = AuthenticatedDataChunk<'a, BundleItemKind>;
+pub type UnauthenticatedBundleItemDataChunk<'a> = UnauthenticatedDataChunk<'a, BundleItemKind>;
 
 impl<'a> UnauthenticatedBundleItemDataChunk<'a> {
     #[inline]

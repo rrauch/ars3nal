@@ -292,27 +292,45 @@ impl Arl {
     }
 }
 
-impl From<TxArl> for Arl {
-    fn from(value: TxArl) -> Self {
-        Self::Tx(value.into())
+impl From<&Arl> for Arl {
+    fn from(value: &Arl) -> Self {
+        value.clone()
     }
 }
 
-impl From<BundleItemArl> for Arl {
-    fn from(value: BundleItemArl) -> Self {
-        Self::BundleItem(value.into())
+impl From<TxArl> for Arl {
+    fn from(value: TxArl) -> Self {
+        Self::Tx(value)
+    }
+}
+
+impl From<&TxArl> for Arl {
+    fn from(value: &TxArl) -> Self {
+        value.clone().into()
     }
 }
 
 impl From<TxId> for Arl {
     fn from(value: TxId) -> Self {
-        Self::Tx(TxArl::from(value).into())
+        TxArl::from(value).into()
     }
 }
 
-impl From<(TxId, BundleItemId)> for Arl {
-    fn from((tx, item): (TxId, BundleItemId)) -> Self {
-        Self::BundleItem(BundleItemArl::from((tx, item)).into())
+impl From<&TxId> for Arl {
+    fn from(value: &TxId) -> Self {
+        TxArl::from(value).into()
+    }
+}
+
+impl From<BundleItemArl> for Arl {
+    fn from(value: BundleItemArl) -> Self {
+        Self::BundleItem(value)
+    }
+}
+
+impl From<&BundleItemArl> for Arl {
+    fn from(value: &BundleItemArl) -> Self {
+        value.clone().into()
     }
 }
 
@@ -529,14 +547,38 @@ where
     }
 }
 
+impl<'a, T: ArlType> From<&'a TypedArl<T>> for TypedArl<T> {
+    fn from(value: &'a TypedArl<T>) -> Self {
+        value.clone()
+    }
+}
+
 impl From<TxId> for TxArl {
     fn from(value: TxId) -> Self {
         Self::from_parts([value])
     }
 }
 
+impl From<&TxId> for TxArl {
+    fn from(value: &TxId) -> Self {
+        value.clone().into()
+    }
+}
+
 impl From<(TxId, BundleItemId)> for BundleItemArl {
     fn from((tx, item): (TxId, BundleItemId)) -> Self {
         Self::from_parts([ItemId::Tx(tx.into()), ItemId::BundleItem(item.into())])
+    }
+}
+
+impl From<(&TxId, &BundleItemId)> for BundleItemArl {
+    fn from((tx_id, bundle_item_id): (&TxId, &BundleItemId)) -> Self {
+        (tx_id.clone(), bundle_item_id.clone()).into()
+    }
+}
+
+impl From<&(TxId, BundleItemId)> for BundleItemArl {
+    fn from(value: &(TxId, BundleItemId)) -> Self {
+        (value.0.clone(), value.1.clone()).into()
     }
 }

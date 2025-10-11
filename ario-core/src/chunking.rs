@@ -9,6 +9,7 @@ use derive_where::derive_where;
 use futures_lite::AsyncRead;
 use futures_lite::AsyncReadExt;
 use maybe_owned::MaybeOwned;
+use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::fmt::Debug;
@@ -16,6 +17,7 @@ use std::hash::Hash;
 use std::io::Cursor;
 use std::io::Read;
 use std::ops::Range;
+use std::sync::Arc;
 
 pub type DefaultChunker = MostlyFixedChunker<Sha256, { 256 * 1024 }, { 32 * 1024 }>;
 
@@ -24,13 +26,13 @@ pub type TypedChunk<T, C: Chunker> = Typed<T, Chunk<C>>;
 #[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Chunk<C: Chunker> {
     output: C::Output,
-    offset: Range<u64>,
+    range: Range<u64>,
 }
 
 impl<C: Chunker> Hash for Chunk<C> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.output.as_blob().hash(state);
-        self.offset.hash(state)
+        self.range.hash(state)
     }
 }
 
@@ -62,23 +64,20 @@ impl<'a> IntoMaybeOwnedChunk<'a, DefaultChunker> for MaybeOwnedDefaultChunkedDat
 }
 
 impl<C: Chunker> Chunk<C> {
-    pub(crate) fn new(output: C::Output, offset: u64, len: usize) -> Self {
-        Self {
-            output,
-            offset: offset..(offset + len as u64),
-        }
+    pub(crate) fn new(output: C::Output, range: Range<u64>) -> Self {
+        Self { output, range }
     }
 
     pub fn offset(&self) -> &Range<u64> {
-        &self.offset
+        &self.range
     }
 
     pub fn len(&self) -> u64 {
-        self.offset.end - self.offset.start
+        self.range.end - self.range.start
     }
 
     pub fn is_empty(&self) -> bool {
-        self.offset.is_empty()
+        self.range.is_empty()
     }
 
     pub fn output(&self) -> &C::Output {
@@ -101,14 +100,14 @@ pub trait ChunkInfo:
     type Len: OutputLen;
 }
 
-impl<H: Hasher> ChunkInfo for Digest<H > {
+impl<H: Hasher> ChunkInfo for Digest<H> {
     type Len = <H::Output as Output>::Len;
 }
 
 pub trait Chunker: Sized + Send {
     type Output: ChunkInfo;
     fn empty() -> Self::Output;
-    fn single_chunk(input: &mut impl Buf, offset: u64) -> Chunk<Self>;
+    fn single_chunk(input: &mut impl Buf, pos: u64) -> Chunk<Self>;
     fn update(&mut self, input: &mut impl Buf) -> impl IntoIterator<Item = Chunk<Self>>;
     fn finalize(self) -> impl IntoIterator<Item = Chunk<Self>>;
     fn max_chunk_size() -> usize;
@@ -202,9 +201,9 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunke
         H::new().finalize()
     }
 
-    fn single_chunk(input: &mut impl Buf, offset: u64) -> Chunk<Self> {
+    fn single_chunk(input: &mut impl Buf, pos: u64) -> Chunk<Self> {
         let mut hasher = H::new();
-        let len = (input.remaining() as u64) + offset;
+        let len = (input.remaining() as u64) + pos;
         while input.has_remaining() {
             let data = input.chunk();
             hasher.update(data);
@@ -212,7 +211,7 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize> Chunke
         }
         Chunk {
             output: hasher.finalize(),
-            offset: offset..len,
+            range: pos..len,
         }
     }
 
@@ -293,7 +292,7 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
 
         chunks.push(Chunk {
             output: data_hash,
-            offset: self.current_chunk_start_offset..offset_end,
+            range: self.current_chunk_start_offset..offset_end,
         });
 
         self.buf.advance(processed);
@@ -308,6 +307,102 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize, const MIN_CHUNK_SIZE: usize>
     }
 }
 
+pub trait ChunkMap: Send + Sync + Unpin {
+    /// Number of chunks
+    fn len(&self) -> usize;
+
+    /// Total size of underlying data
+    fn size(&self) -> u64;
+
+    fn max_chunk_size() -> usize
+    where
+        Self: Sized;
+
+    /// Chunk range at `pos`
+    fn chunk_at(&self, pos: u64) -> Option<Range<u64>>;
+
+    fn iter_range(&self, range: Range<u64>) -> Box<dyn Iterator<Item = Range<u64>> + '_> {
+        Box::new(self.iter().filter(move |r| {
+            if r.start < range.end && range.start < r.end {
+                true
+            } else {
+                false
+            }
+        }))
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = Range<u64>> + '_>;
+}
+
+pub type DefaultChunkMap = MostlyFixedChunkMap<{ 256 * 1024 }>;
+
+#[derive(Clone, Debug)]
+#[repr(transparent)]
+pub struct FixedRangeMap<const MAX_CHUNK_SIZE: usize>(RangeMap<u64, usize>);
+
+impl<const MAX_CHUNK_SIZE: usize> FixedRangeMap<MAX_CHUNK_SIZE> {
+    pub fn try_from_iter<T: IntoIterator<Item = Range<u64>>>(
+        iter: T,
+    ) -> Result<Self, std::io::Error> {
+        let range_map: RangeMap<u64, usize> =
+            iter.into_iter().enumerate().map(|(i, r)| (r, i)).collect();
+
+        Self::check_ranges(&range_map)?;
+        Ok(Self(range_map))
+    }
+
+    pub fn try_from_range_map(range_map: RangeMap<u64, usize>) -> Result<Self, std::io::Error> {
+        Self::check_ranges(&range_map)?;
+        Ok(Self(range_map))
+    }
+
+    pub fn try_from_chunk_map<M: ChunkMap>(chunk_map: &M) -> Result<Self, std::io::Error> {
+        Self::try_from_iter(chunk_map.iter())
+    }
+
+    fn check_ranges(range_map: &RangeMap<u64, usize>) -> Result<(), std::io::Error> {
+        // todo: better error handling
+        if let (Some((first, _)), Some((last, _))) =
+            (range_map.first_range_value(), range_map.last_range_value())
+        {
+            let outer_range = first.start..last.end;
+            if range_map.gaps(&outer_range).count() > 1 {
+                // gaps detected in chunk ranges
+                Err(std::io::Error::other("chunk range not contiguous"))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<const MAX_CHUNK_SIZE: usize> ChunkMap for FixedRangeMap<MAX_CHUNK_SIZE> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn size(&self) -> u64 {
+        match (self.0.first_range_value(), self.0.last_range_value()) {
+            (Some((first, _)), Some((last, _))) => last.end.saturating_sub(first.start),
+            _ => 0,
+        }
+    }
+
+    fn max_chunk_size() -> usize
+    where
+        Self: Sized,
+    {
+        MAX_CHUNK_SIZE
+    }
+
+    fn chunk_at(&self, pos: u64) -> Option<Range<u64>> {
+        self.0.get_key_value(&pos).map(|(r, _)| r.clone())
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = Range<u64>> + '_> {
+        Box::new(self.0.iter().map(|(r, _)| r.clone()))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MostlyFixedChunkMap<const FULL_CHUNK_SIZE: usize> {
     len: usize,
@@ -316,6 +411,31 @@ pub struct MostlyFixedChunkMap<const FULL_CHUNK_SIZE: usize> {
     full_chunk_end: u64,
     penultimate_chunk: Option<Range<u64>>,
     ultimate_chunk: Option<Range<u64>>,
+}
+
+impl<const FULL_CHUNK_SIZE: usize> ChunkMap for MostlyFixedChunkMap<FULL_CHUNK_SIZE> {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn max_chunk_size() -> usize
+    where
+        Self: Sized,
+    {
+        FULL_CHUNK_SIZE
+    }
+
+    fn chunk_at(&self, pos: u64) -> Option<Range<u64>> {
+        self.get_by_pos(pos)
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = Range<u64>> + '_> {
+        Box::new(MostlyFixedChunkMap::iter(self))
+    }
 }
 
 impl<const FULL_CHUNK_SIZE: usize> MostlyFixedChunkMap<FULL_CHUNK_SIZE> {
@@ -366,22 +486,22 @@ impl<const FULL_CHUNK_SIZE: usize> MostlyFixedChunkMap<FULL_CHUNK_SIZE> {
         }
     }
 
-    pub fn get_by_offset(&self, offset: u64) -> Option<Range<u64>> {
-        if offset >= self.size {
+    pub fn get_by_pos(&self, pos: u64) -> Option<Range<u64>> {
+        if pos >= self.size {
             return None;
         }
 
-        if offset < self.full_chunk_end {
+        if pos < self.full_chunk_end {
             let chunk_size = FULL_CHUNK_SIZE as u64;
-            let start = (offset / chunk_size) * chunk_size;
+            let start = (pos / chunk_size) * chunk_size;
             return Some(start..(start + chunk_size));
         }
 
         self.penultimate_chunk
             .as_ref()
-            .filter(|r| r.contains(&offset))
+            .filter(|r| r.contains(&pos))
             .or(self.ultimate_chunk.as_ref())
-            .filter(|r| r.contains(&offset))
+            .filter(|r| r.contains(&pos))
             .cloned()
     }
 
@@ -436,21 +556,144 @@ impl<'a, const FULL_CHUNK_SIZE: usize> Iterator for MostlyFixedChunkMapIter<'a, 
     }
 }
 
-pub struct AlignedChunker<H: Hasher, const MAX_CHUNK_SIZE: usize> {
+#[derive(Clone)]
+#[repr(transparent)]
+pub struct AnyChunkMap(Arc<dyn ChunkMap>);
+
+impl AnyChunkMap {
+    pub fn new<M: ChunkMap + 'static>(value: M) -> Self {
+        Self(Arc::new(value))
+    }
+}
+
+impl ChunkMap for AnyChunkMap {
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline]
+    fn size(&self) -> u64 {
+        self.0.size()
+    }
+
+    fn max_chunk_size() -> usize
+    where
+        Self: Sized,
+    {
+        0
+    }
+
+    #[inline]
+    fn chunk_at(&self, pos: u64) -> Option<Range<u64>> {
+        self.0.chunk_at(pos)
+    }
+
+    #[inline]
+    fn iter_range(&self, range: Range<u64>) -> Box<dyn Iterator<Item = Range<u64>> + '_> {
+        self.0.iter_range(range)
+    }
+
+    #[inline]
+    fn iter(&self) -> Box<dyn Iterator<Item = Range<u64>> + '_> {
+        self.0.iter()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AlignedChunkMap<M: ChunkMap, const MAX_CHUNK_SIZE: usize = 0> {
     offset: u64,
+    limit: Option<u64>,
+    inner: M,
+}
+
+impl<M: ChunkMap, const MAX_CHUNK_SIZE: usize> AlignedChunkMap<M, MAX_CHUNK_SIZE> {
+    pub fn new(inner: M, offset: u64, limit: Option<u64>) -> Self {
+        Self {
+            offset,
+            limit,
+            inner,
+        }
+    }
+}
+
+impl<M: ChunkMap, const MAX_CHUNK_SIZE: usize> ChunkMap for AlignedChunkMap<M, MAX_CHUNK_SIZE> {
+    fn len(&self) -> usize {
+        self.iter().count()
+    }
+
+    fn size(&self) -> u64 {
+        let size = self.inner.size().saturating_sub(self.offset);
+        self.limit.map_or(size, |lim| size.min(lim))
+    }
+
+    fn max_chunk_size() -> usize
+    where
+        Self: Sized,
+    {
+        if MAX_CHUNK_SIZE > 0 {
+            MAX_CHUNK_SIZE
+        } else {
+            M::max_chunk_size()
+        }
+    }
+
+    fn chunk_at(&self, pos: u64) -> Option<Range<u64>> {
+        if self.limit.is_some_and(|lim| pos >= lim) {
+            return None;
+        }
+
+        let abs_limit = self.limit.map(|lim| self.offset.saturating_add(lim));
+
+        self.inner
+            .chunk_at(pos.saturating_add(self.offset))
+            .map(|r| {
+                let start = r.start.max(self.offset).saturating_sub(self.offset);
+                let end = abs_limit
+                    .map_or(r.end, |lim| r.end.min(lim))
+                    .saturating_sub(self.offset);
+                start..end
+            })
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = Range<u64>> + '_> {
+        let offset = self.offset;
+        let abs_limit = self.limit.map(|lim| offset.saturating_add(lim));
+
+        Box::new(self.inner.iter().filter_map(move |r| {
+            if r.end <= offset {
+                return None;
+            }
+
+            let start = r.start.max(offset).saturating_sub(offset);
+
+            if let Some(lim) = abs_limit {
+                if r.start >= lim {
+                    return None;
+                }
+                let end = r.end.min(lim).saturating_sub(offset);
+                Some(start..end)
+            } else {
+                let end = r.end.saturating_sub(offset);
+                Some(start..end)
+            }
+        }))
+    }
+}
+
+pub struct MapGuidedChunker<M: ChunkMap, H: Hasher> {
     pos: u64,
     current_chunk_start: u64,
     current_chunk_remaining: usize,
     hasher: H,
-    chunk_map: MostlyFixedChunkMap<MAX_CHUNK_SIZE>,
+    chunk_map: M,
 }
 
-impl<H: Hasher, const MAX_CHUNK_SIZE: usize> AlignedChunker<H, MAX_CHUNK_SIZE> {
-    pub fn new(offset: u64, chunk_map: MostlyFixedChunkMap<MAX_CHUNK_SIZE>) -> Self {
-        let (current_chunk_start, current_chunk_remaining) = Self::calc_chunk(&chunk_map, offset);
+impl<M: ChunkMap, H: Hasher> MapGuidedChunker<M, H> {
+    pub fn new(chunk_map: M) -> Self {
+        let (current_chunk_start, current_chunk_remaining) = Self::calc_chunk(&chunk_map, 0);
         Self {
-            offset,
-            pos: offset,
+            pos: 0,
             current_chunk_start,
             current_chunk_remaining,
             hasher: H::new(),
@@ -458,12 +701,10 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize> AlignedChunker<H, MAX_CHUNK_SIZE> {
         }
     }
 
-    fn calc_chunk(chunk_map: &MostlyFixedChunkMap<MAX_CHUNK_SIZE>, offset: u64) -> (u64, usize) {
-        let current_chunk = chunk_map
-            .get_by_offset(offset)
-            .unwrap_or_else(|| offset..offset + MAX_CHUNK_SIZE as u64);
-        let len = (current_chunk.end - offset) as usize;
-        (offset, len)
+    fn calc_chunk(chunk_map: &M, pos: u64) -> (u64, usize) {
+        let range = chunk_map.chunk_at(pos).unwrap_or_else(|| pos..pos);
+        let len = (range.end - range.start) as usize;
+        (range.start, len)
     }
 
     fn advance(&mut self, len: usize) -> Option<Chunk<Self>> {
@@ -476,8 +717,7 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize> AlignedChunker<H, MAX_CHUNK_SIZE> {
             let hasher = std::mem::replace(&mut self.hasher, H::new());
             chunk = Some(Chunk::new(
                 hasher.finalize(),
-                self.current_chunk_start - self.offset,
-                (self.pos - self.current_chunk_start) as usize,
+                self.current_chunk_start..self.pos,
             ));
 
             let (next_chunk_start, next_chunk_len) = Self::calc_chunk(&self.chunk_map, self.pos);
@@ -488,16 +728,16 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize> AlignedChunker<H, MAX_CHUNK_SIZE> {
     }
 }
 
-impl<H: Hasher, const MAX_CHUNK_SIZE: usize> Chunker for AlignedChunker<H, MAX_CHUNK_SIZE> {
+impl<M: ChunkMap, H: Hasher> Chunker for MapGuidedChunker<M, H> {
     type Output = Digest<H>;
 
     fn empty() -> Self::Output {
         H::new().finalize()
     }
 
-    fn single_chunk(input: &mut impl Buf, offset: u64) -> Chunk<Self> {
+    fn single_chunk(input: &mut impl Buf, pos: u64) -> Chunk<Self> {
         let mut hasher = H::new();
-        let len = (input.remaining() as u64) + offset;
+        let len = (input.remaining() as u64) + pos;
         while input.has_remaining() {
             let data = input.chunk();
             hasher.update(data);
@@ -505,7 +745,7 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize> Chunker for AlignedChunker<H, MAX_C
         }
         Chunk {
             output: hasher.finalize(),
-            offset: offset..len,
+            range: pos..len,
         }
     }
 
@@ -529,22 +769,21 @@ impl<H: Hasher, const MAX_CHUNK_SIZE: usize> Chunker for AlignedChunker<H, MAX_C
         if len > 0 {
             chunks.push(Chunk::new(
                 self.hasher.finalize(),
-                self.current_chunk_start - self.offset,
-                len,
+                self.current_chunk_start..self.pos,
             ))
         }
         chunks
     }
 
     fn max_chunk_size() -> usize {
-        MAX_CHUNK_SIZE
+        M::max_chunk_size()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::base64::ToBase64;
-    use crate::chunking::{AlignedChunker, Chunk, Chunker, ChunkerExt};
+    use crate::chunking::{AlignedChunkMap, Chunk, Chunker, ChunkerExt, MapGuidedChunker};
     use crate::chunking::{DefaultChunker, MostlyFixedChunker};
     use crate::crypto::hash::{Hasher, Sha256};
     use std::fs::File;
@@ -566,7 +805,7 @@ mod tests {
             let map = MostlyFixedChunker::<H, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE>::chunk_map(len);
             assert_eq!(map.len(), chunks.len());
             for (c, range) in chunks.iter().zip(map.iter()) {
-                assert_eq!(&c.offset, &range);
+                assert_eq!(&c.range, &range);
             }
         }
         Ok(())
@@ -579,14 +818,14 @@ mod tests {
 
         assert_eq!(chunks.len(), 8);
 
-        assert_eq!(chunks[0].offset.start, 0);
+        assert_eq!(chunks[0].range.start, 0);
         assert_eq!(chunks[0].len(), 262144);
         assert_eq!(
             chunks[0].output.to_base64(),
             "R9tpW9gwYRmLjsYUCZvGJynV1OCHjfIgjbSUek-qIe4"
         );
 
-        assert_eq!(chunks[7].offset.start, 1835008);
+        assert_eq!(chunks[7].range.start, 1835008);
         assert_eq!(chunks[7].len(), 66754);
         assert_eq!(
             chunks[7].output.to_base64(),
@@ -603,14 +842,14 @@ mod tests {
 
         assert_eq!(chunks.len(), 2);
 
-        assert_eq!(chunks[0].offset.start, 0);
+        assert_eq!(chunks[0].range.start, 0);
         assert_eq!(chunks[0].len(), 262144);
         assert_eq!(
             chunks[0].output.to_base64(),
             "BOLZqkj-lt7NKlGkHbo1uZNEPQuaulpfMk_Wyfs9cyI"
         );
 
-        assert_eq!(chunks[1].offset.start, 262144);
+        assert_eq!(chunks[1].range.start, 262144);
         assert_eq!(chunks[1].len(), 68727);
         assert_eq!(
             chunks[1].output.to_base64(),
@@ -627,14 +866,14 @@ mod tests {
 
         assert_eq!(chunks.len(), 3);
 
-        assert_eq!(chunks[0].offset.start, 0);
+        assert_eq!(chunks[0].range.start, 0);
         assert_eq!(chunks[0].len(), 262144);
         assert_eq!(
             chunks[0].output.to_base64(),
             "KeHLQhG8YcahPHQOcTZ3VTnyOvZSCbwEuBx8rMmilEU"
         );
 
-        assert_eq!(chunks[2].offset.start, 524288);
+        assert_eq!(chunks[2].range.start, 524288);
         assert_eq!(chunks[2].len(), 159533);
         assert_eq!(
             chunks[2].output.to_base64(),
@@ -653,14 +892,14 @@ mod tests {
 
         assert_eq!(chunks.len(), 2);
 
-        assert_eq!(chunks[0].offset.start, 0);
+        assert_eq!(chunks[0].range.start, 0);
         assert_eq!(chunks[0].len(), 131073);
         assert_eq!(
             chunks[0].output.to_base64(),
             "0oEgnMctR7CQF1siYhhA2euCZ9CcwF3BIr-qdZqCgw8"
         );
 
-        assert_eq!(chunks[1].offset.start, 131073);
+        assert_eq!(chunks[1].range.start, 131073);
         assert_eq!(chunks[1].len(), 131072);
         assert_eq!(
             chunks[1].output.to_base64(),
@@ -678,7 +917,7 @@ mod tests {
         verify_chunk_map(&chunks)?;
 
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].offset.start, 0);
+        assert_eq!(chunks[0].range.start, 0);
         assert_eq!(chunks[0].len(), 16 * 1024);
         assert_eq!(
             chunks[0].output.to_base64(),
@@ -730,15 +969,16 @@ mod tests {
 
     #[test]
     fn aligned_chunker() -> anyhow::Result<()> {
-        let chunker = AlignedChunker::<Sha256, _>::new(
-            (DefaultChunker::max_chunk_size() - 100) as u64,
+        let chunker = MapGuidedChunker::<_, Sha256>::new(AlignedChunkMap::<_, 0>::new(
             DefaultChunker::chunk_map(ONE_MB.len() as u64),
-        );
+            (DefaultChunker::max_chunk_size() - 100) as u64,
+            None,
+        ));
         let data = vec![0x01u8; 256];
         let chunks = chunker.try_from_reader(&mut Cursor::new(&data))?;
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks.get(0).as_ref().unwrap().offset, 0..100);
-        assert_eq!(chunks.get(1).as_ref().unwrap().offset, 100..256);
+        assert_eq!(chunks.get(0).as_ref().unwrap().range, 0..100);
+        assert_eq!(chunks.get(1).as_ref().unwrap().range, 100..256);
         Ok(())
     }
 }

@@ -277,14 +277,14 @@ pub struct BundleReader;
 
 impl BundleReader {
     pub async fn new<R: AsyncRead + AsyncSeek + Send + Unpin>(
-        item: &AuthenticatedItem<'_>,
+        container: &AuthenticatedItem<'_>,
         reader: R,
     ) -> Result<Bundle, Error> {
-        let bundle_type = BundleType::from_tags(item.tags()).ok_or(Error::UnsupportedFormat)?;
+        let bundle_type = BundleType::from_tags(container.tags()).ok_or(Error::UnsupportedFormat)?;
         match bundle_type {
             BundleType::V2 => Ok(Bundle::V2(Arc::new(
                 v2::BundleReader::builder()
-                    .id(item.id().clone())
+                    .id(container.id().clone())
                     .build()
                     .process_async(reader)
                     .await?,

@@ -145,7 +145,7 @@ impl Step<ItemReaderCtx> for Data<false> {
             data_deep_hash: DataDeepHash::new_from_inner(b"".digest()), // dummy value
             data_verifier: BundleItemDataAuthenticator::from_single_value(
                 Blob::Slice(b"".as_slice()),
-                BundleItemChunker::new(0, DefaultChunker::chunk_map(self.len)),
+                BundleItemChunker::align(DefaultChunker::chunk_map(self.len), 0, None),
             ), // dummy value
             data_offset: self.data_offset,
         }))

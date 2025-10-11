@@ -706,7 +706,7 @@ where
         _ => Err(EntityError::InvalidTxStatus(location.tx_id().clone()))?,
     };
 
-    let mut reader = client.read_data_item(location.clone()).await?;
+    let mut reader = client.read_any(location.clone()).await?;
     let item = reader.item();
 
     if &item.owner() != owner {

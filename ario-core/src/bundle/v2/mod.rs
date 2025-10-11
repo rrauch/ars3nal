@@ -11,7 +11,9 @@ use crate::bundle::{
     BundleAnchor, BundleId, BundleItemError, BundleItemHash, BundleItemId, BundleItemKind,
     BundleItemSignatureScheme, Error, KyveSignatureData, Owner, PLACEHOLDER_BUNDLE_ID, Signature,
 };
-use crate::chunking::{AlignedChunker, Chunk, Chunker, DefaultChunker};
+use crate::chunking::{
+    AlignedChunkMap, AnyChunkMap, Chunk, ChunkMap, Chunker, DefaultChunker, MapGuidedChunker,
+};
 use crate::crypto::ec::ethereum::{EthereumAddress, EthereumPublicKeyExt};
 use crate::crypto::edwards::multi_aptos;
 use crate::crypto::hash::deep_hash::DeepHashable;
@@ -314,7 +316,7 @@ impl BundleItemDataProcessor {
         let container_location = container_location.unwrap_or_default();
         let chunk_map = DefaultChunker::chunk_map(container_location.container_size);
         Self {
-            chunker: BundleItemChunker::new(container_location.offset, chunk_map),
+            chunker: BundleItemChunker::align(chunk_map, container_location.offset, None),
             chunks: vec![],
             hasher: Sha384::new(),
             processed: 0,
@@ -753,7 +755,18 @@ impl WithSerde for DataDeepHash {}
 struct BundleItemTagsKind;
 type TagsDeepHash = TypedDigest<BundleItemTagsKind, Sha384>;
 
-type BundleItemChunker = AlignedChunker<Blake3, { 256 * 1024 }>;
+type BundleItemChunker = MapGuidedChunker<AlignedChunkMap<AnyChunkMap, { 256 * 1024 }>, Blake3>;
+
+impl BundleItemChunker {
+    pub fn align<M: ChunkMap + 'static>(container_map: M, offset: u64, limit: Option<u64>) -> Self {
+        MapGuidedChunker::<_, Blake3>::new(AlignedChunkMap::<AnyChunkMap, { 256 * 1024 }>::new(
+            AnyChunkMap::new(container_map),
+            offset,
+            limit,
+        ))
+    }
+}
+
 pub(super) type BundleItemMerkleRoot = MerkleRoot<Blake3, BundleItemChunker, 32>;
 pub(super) type BundleItemMerkleTree<'a> = MerkleTree<'a, Blake3, BundleItemChunker, 32>;
 

@@ -336,7 +336,7 @@ impl<'a, H: Hasher, C: Chunker, const NOTE_SIZE: usize> Leaf<'a, H, C, NOTE_SIZE
     }
 
     fn empty() -> Self {
-        let empty_chunk = Chunk::new(C::empty(), 0, 0);
+        let empty_chunk = Chunk::new(C::empty(), 0..0);
 
         Self::from_chunk(empty_chunk)
     }

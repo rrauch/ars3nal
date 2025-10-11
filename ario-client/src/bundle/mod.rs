@@ -1,8 +1,8 @@
 mod bundler;
 
 use crate::location::{Arl, BundleItemArl};
-use crate::{Client, api, location};
-use ario_core::AuthenticatedItem;
+use crate::{Client, api};
+use ario_core::Unauthenticated;
 use ario_core::bundle::{
     AuthenticatedBundleItem, Bundle, BundleEntry, BundleId, BundleItemAuthenticator,
     BundleItemReader, BundleReader, UnauthenticatedBundleItem,
@@ -22,17 +22,13 @@ impl Client {
         &self,
         location: &Arl,
     ) -> Result<Option<Bundle>, super::Error> {
-        let item = self
-            .item_by_location(&location)
-            .await?
-            .ok_or_else(|| location::Error::NotFound)?;
-
-        let mut reader = self
-            .data_item_reader(item.clone(), location.clone())
-            .await?;
-
+        let container = match self.item_by_location(location).await? {
+            Some(container) => container,
+            None => return Ok(None),
+        };
+        let mut container_reader = self.read_any(location).await?;
         Ok(Some(
-            BundleReader::new(&item, &mut reader)
+            BundleReader::new(&container, &mut container_reader)
                 .await
                 .map_err(|e| api::Error::BundleError(e))?,
         ))
@@ -69,7 +65,7 @@ impl Client {
             .cache
             .get_bundle_item(location, async |_| {
                 Ok(Some(
-                    self._bundle_item_authenticated_live(&bundle_id, &entry, &location)
+                    self._bundle_item_authenticated_live(&bundle_id, &entry, location)
                         .await?,
                 ))
             })
@@ -90,12 +86,7 @@ impl Client {
         super::Error,
     > {
         let container_location = location.parent();
-        let container = self
-            .item_by_location(&container_location)
-            .await?
-            .ok_or(location::Error::NotFound)?;
-
-        let mut container_reader = self.data_item_reader(container, container_location).await?;
+        let mut container_reader = self.any_reader(&container_location).await?;
 
         let (item, authenticator) =
             BundleItemReader::read_async(&entry, &mut container_reader, bundle_id.clone())
@@ -138,13 +129,10 @@ impl Client {
         entry: &BundleEntry<'_>,
         location: &BundleItemArl,
     ) -> Result<UnauthenticatedBundleItem<'static>, super::Error> {
-        let container_location = location.parent();
-        let container = self
-            .item_by_location(&container_location)
+        let mut container_reader = self
+            .any_reader::<Unauthenticated>(location.parent())
             .await?
-            .ok_or(location::Error::NotFound)?;
-
-        let mut container_reader = self.data_item_reader(container, container_location).await?;
+            .danger_make_readable();
 
         Ok(BundleItemReader::read_async_unauthenticated(
             &entry,
@@ -174,55 +162,6 @@ impl Client {
             },
         )
     }
-
-    /*pub(crate) async fn _bundle_item<const AUTHENTICATED: bool>(
-        &self,
-        location: &BundleItemArl,
-    ) -> Result<
-        Option<(
-            BundleEntry<'static>,
-            BundleItem<'static, AUTHENTICATED>,
-            BundleItemAuthenticator<'static>,
-            Item<'static, AUTHENTICATED>,
-        )>,
-        super::Error,
-    >
-    where
-        BundleItem<'static, AUTHENTICATED>: From<AuthenticatedBundleItem<'static>>,
-        Item<'static, AUTHENTICATED>: From<AuthenticatedItem<'static>>,
-    {
-        let bundle = match self.bundle_by_location(&location.parent()).await? {
-            Some(bundle) => bundle,
-            None => return Ok(None),
-        };
-
-        let container = match self.tx_by_id(location.tx_id()).await? {
-            Some(tx) => AuthenticatedItem::from(tx),
-            None => return Ok(None),
-        };
-
-        let entry = match bundle
-            .entries()
-            .find(|e| e.id() == location.bundle_item_id())
-        {
-            Some(entry) => entry,
-            None => return Ok(None),
-        };
-
-        Ok(self
-            .0
-            .cache
-            .get_bundle_item(location, async |_| {
-                Ok(Some(
-                    self._bundle_item_live(bundle.id(), &entry, &container)
-                        .await?,
-                ))
-            })
-            .await?
-            .map(|(item, authenticator)| {
-                (entry.into_owned(), item, authenticator, container.into())
-            }))
-    }*/
 }
 
 #[cfg(test)]
@@ -264,7 +203,7 @@ mod tests {
         let len = item.data_size() as usize;
 
         let mut read = 0;
-        let mut reader = client.read_data_item(location.clone()).await?;
+        let mut reader = client.read_any(location.clone()).await?;
 
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 64 * 1024];
