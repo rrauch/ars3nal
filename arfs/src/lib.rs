@@ -2,6 +2,7 @@ extern crate core;
 
 mod db;
 pub(crate) mod serde_tag;
+mod sync;
 pub(crate) mod types;
 mod vfs;
 
@@ -12,6 +13,7 @@ pub use vfs::{Directory, File, Inode, Timestamp, Vfs};
 
 use crate::db::Db;
 use crate::db::Error as DbError;
+use crate::sync::Syncer;
 use crate::types::drive::{DriveEntity, DriveHeader, DriveId, DriveKind};
 use crate::types::folder::{FolderEntity, FolderId, FolderKind};
 use crate::types::{AuthMode, Entity, HasId, Header, Metadata, Model, ParseError};
@@ -38,6 +40,7 @@ use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use strum::EnumString;
 use thiserror::Error;
 use zeroize::Zeroize;
@@ -54,6 +57,8 @@ pub enum Error {
     IoError(#[from] std::io::Error),
     #[error(transparent)]
     VfsError(#[from] VfsError),
+    #[error(transparent)]
+    SyncError(#[from] sync::Error),
 }
 
 #[derive(Error, Debug)]
@@ -109,6 +114,8 @@ impl ArFs {
         #[builder(default = 25)] max_db_connections: u8,
         drive_id: DriveId,
         scope: Scope,
+        #[builder(default = Duration::from_secs(900))] sync_interval: Duration,
+        #[builder(default = Duration::from_secs(60))] sync_min_initial: Duration,
     ) -> Result<Self, Error> {
         tokio::fs::create_dir_all(db_dir).await?;
         let db = Db::new(
@@ -131,7 +138,13 @@ impl ArFs {
             scope.as_private(),
         )
         .await?;
-        Ok(Self(Arc::new(ErasedArFs::new(client, db, drive, scope))))
+
+        let syncer =
+            Syncer::new(client.clone(), db.clone(), sync_interval, sync_min_initial).await?;
+
+        Ok(Self(Arc::new(ErasedArFs::new(
+            client, db, syncer, drive, scope,
+        ))))
     }
 
     #[inline]
@@ -280,22 +293,22 @@ enum ErasedArFs {
 }
 
 impl ErasedArFs {
-    fn new(client: Client, db: Db, drive: DriveEntity, scope: Scope) -> Self {
+    fn new(client: Client, db: Db, syncer: Syncer, drive: DriveEntity, scope: Scope) -> Self {
         match scope {
             Scope::Public(public) => match public {
                 Access::ReadOnly(owner) => {
-                    Self::PublicRO(ArFsInner::new_public_ro(client, db, drive, owner))
+                    Self::PublicRO(ArFsInner::new_public_ro(client, db, syncer, drive, owner))
                 }
                 Access::ReadWrite(wallet) => {
-                    Self::PublicRW(ArFsInner::new_public_rw(client, db, drive, wallet))
+                    Self::PublicRW(ArFsInner::new_public_rw(client, db, syncer, drive, wallet))
                 }
             },
             Scope::Private(private) => match private {
                 Access::ReadOnly(creds) => {
-                    Self::PrivateRO(ArFsInner::new_private_ro(client, db, drive, creds))
+                    Self::PrivateRO(ArFsInner::new_private_ro(client, db, syncer, drive, creds))
                 }
                 Access::ReadWrite(creds) => {
-                    Self::PrivateRW(ArFsInner::new_private_rw(client, db, drive, creds))
+                    Self::PrivateRW(ArFsInner::new_private_rw(client, db, syncer, drive, creds))
                 }
             },
         }
@@ -303,10 +316,17 @@ impl ErasedArFs {
 }
 
 impl ArFsInner<Public, ReadOnly> {
-    fn new_public_ro(client: Client, db: Db, drive: DriveEntity, owner: WalletAddress) -> Self {
+    fn new_public_ro(
+        client: Client,
+        db: Db,
+        syncer: Syncer,
+        drive: DriveEntity,
+        owner: WalletAddress,
+    ) -> Self {
         ArFsInner {
             client,
             db,
+            syncer,
             drive,
             privacy: Public { owner },
             mode: ReadOnly,
@@ -315,10 +335,17 @@ impl ArFsInner<Public, ReadOnly> {
 }
 
 impl ArFsInner<Public, ReadWrite<Wallet>> {
-    fn new_public_rw(client: Client, db: Db, drive: DriveEntity, wallet: Wallet) -> Self {
+    fn new_public_rw(
+        client: Client,
+        db: Db,
+        syncer: Syncer,
+        drive: DriveEntity,
+        wallet: Wallet,
+    ) -> Self {
         ArFsInner {
             client,
             db,
+            syncer,
             drive,
             privacy: Public {
                 owner: wallet.address(),
@@ -332,12 +359,14 @@ impl ArFsInner<Private, ReadOnly> {
     fn new_private_ro(
         client: Client,
         db: Db,
+        syncer: Syncer,
         drive: DriveEntity,
         credentials: Credentials,
     ) -> Self {
         ArFsInner {
             client,
             db,
+            syncer,
             drive,
             privacy: credentials.0,
             mode: ReadOnly,
@@ -349,12 +378,14 @@ impl ArFsInner<Private, ReadWrite> {
     fn new_private_rw(
         client: Client,
         db: Db,
+        syncer: Syncer,
         drive: DriveEntity,
         credentials: Credentials,
     ) -> Self {
         ArFsInner {
             client,
             db,
+            syncer,
             drive,
             privacy: credentials.0,
             mode: ReadWrite::default(),
@@ -411,6 +442,7 @@ struct ReadOnly;
 struct ArFsInner<PRIVACY, MODE> {
     client: Client,
     db: Db,
+    syncer: Syncer,
     drive: DriveEntity,
     privacy: PRIVACY,
     mode: MODE,

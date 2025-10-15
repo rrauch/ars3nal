@@ -1,10 +1,11 @@
 use crate::serde_tag::Error as TagError;
+use crate::sync::{LogEntry as SyncLogEntry, Success as SyncSuccess, SyncResult};
 use crate::types::drive::{DriveEntity, DriveId, DriveKind};
 use crate::types::drive_signature::{DriveSignatureEntity, DriveSignatureKind};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::snapshot::{SnapshotEntity, SnapshotKind};
-use crate::types::{Entity, Header, Metadata, Model, ParseError};
+use crate::types::{Entity, HasId, Header, Metadata, Model, ParseError};
 use crate::{Privacy, Scope};
 use ario_client::Client;
 use ario_client::location::Arl;
@@ -13,9 +14,12 @@ use ario_core::blob::OwnedBlob;
 use ario_core::network::NetworkIdentifier;
 use ario_core::tag::Tag;
 use ario_core::wallet::WalletAddress;
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use serde_sqlite_jsonb::Error as JsonbError;
+use sqlx::Transaction as SqlxTransaction;
 use sqlx::migrate::MigrateError;
+use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{ConnectOptions, Error as SqlxError, Pool, Sqlite, SqliteConnection};
 use std::borrow::Cow;
@@ -94,12 +98,12 @@ struct SqlitePool {
 }
 
 impl SqlitePool {
-    pub fn read(&self) -> &Pool<Sqlite> {
-        &self.reader
+    pub async fn read(&self) -> Result<Transaction<ReadOnly>, SqlxError> {
+        Ok(Transaction(ReadOnly(self.reader.acquire().await?)))
     }
 
-    pub fn write(&self) -> &Pool<Sqlite> {
-        &self.writer
+    pub async fn write(&self) -> Result<Transaction<ReadWrite>, SqlxError> {
+        Ok(Transaction(ReadWrite(self.writer.begin().await?)))
     }
 }
 
@@ -141,6 +145,99 @@ impl Db {
             db_file,
         })))
     }
+
+    pub async fn read(&self) -> Result<Transaction<ReadOnly>, Error> {
+        Ok(self.0.pool.read().await?)
+    }
+
+    pub async fn write(&self) -> Result<Transaction<ReadWrite>, Error> {
+        Ok(self.0.pool.write().await?)
+    }
+}
+
+#[repr(transparent)]
+pub struct ReadOnly(PoolConnection<Sqlite>);
+
+impl AsMut<SqliteConnection> for ReadOnly {
+    fn as_mut(&mut self) -> &mut SqliteConnection {
+        &mut self.0
+    }
+}
+
+#[repr(transparent)]
+pub struct ReadWrite(SqlxTransaction<'static, Sqlite>);
+
+impl AsMut<SqliteConnection> for ReadWrite {
+    #[inline]
+    fn as_mut(&mut self) -> &mut SqliteConnection {
+        &mut self.0
+    }
+}
+
+trait Read: AsMut<SqliteConnection> {
+    #[inline]
+    fn conn(&mut self) -> &mut SqliteConnection {
+        self.as_mut()
+    }
+}
+impl Read for Transaction<ReadOnly> {}
+
+trait Write: Read {}
+impl Read for Transaction<ReadWrite> {}
+impl Write for Transaction<ReadWrite> {}
+
+trait TxScope: AsMut<SqliteConnection> + Send + Sync + Unpin + 'static {}
+impl<T: AsMut<SqliteConnection> + Send + Sync + Unpin + 'static> TxScope for T {}
+
+#[repr(transparent)]
+pub(crate) struct Transaction<Scope: TxScope>(Scope);
+
+impl Transaction<ReadWrite> {
+    #[inline]
+    pub async fn commit(self) -> Result<(), Error> {
+        Ok(self.0.0.commit().await?)
+    }
+
+    #[inline]
+    pub async fn rollback(self) -> Result<(), Error> {
+        Ok(self.0.0.rollback().await?)
+    }
+}
+
+impl<Scope: TxScope> AsMut<SqliteConnection> for Transaction<Scope> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut SqliteConnection {
+        self.0.as_mut()
+    }
+}
+
+impl<C: TxScope> Transaction<C>
+where
+    Self: Read,
+{
+    pub async fn entity_by_id<E: Entity + HasId<Id: AsRef<[u8]>>>(
+        &mut self,
+        id: &<E as HasId>::Id,
+    ) -> Result<Model<E>, Error>
+    where
+        E: DbEntity,
+    {
+        let id = get_id_for_entity_id::<E, _>(id, self).await?;
+        get_entity(id, self).await
+    }
+
+    pub async fn latest_sync_log_entry(&mut self) -> Result<Option<SyncLogEntry>, Error> {
+        get_latest_sync_log_entry(self).await
+    }
+}
+
+impl<C: TxScope> Transaction<C>
+where
+    Self: Write,
+{
+    pub async fn sync_log_entry(&mut self, log_entry: &SyncLogEntry) -> Result<(), Error> {
+        insert_sync_log_entry(log_entry, self).await
+    }
 }
 
 async fn bootstrap(
@@ -178,10 +275,10 @@ async fn bootstrap(
     )
     .await?;
 
-    let mut tx = pool.write().begin().await.map_err(Error::SqlxError)?;
+    let mut tx = pool.write().await.map_err(Error::SqlxError)?;
 
-    insert_entity(&root_folder_entity, tx.as_mut()).await?;
-    insert_entity(&drive_entity, tx.as_mut()).await?;
+    insert_entity(&root_folder_entity, &mut tx).await?;
+    insert_entity(&drive_entity, &mut tx).await?;
 
     let config = Config::from(
         drive_entity,
@@ -189,17 +286,16 @@ async fn bootstrap(
         owner.into_owned(),
         client.network().id().clone(),
     );
-    insert_config(&config, None, tx.as_mut()).await?;
-
-    tx.commit().await.map_err(Error::SqlxError)?;
+    insert_config(&config, None, &mut tx).await?;
+    tx.commit().await?;
 
     Ok(config)
 }
 
-async fn insert_config(
+async fn insert_config<C: Write>(
     config: &Config,
     signature_id: Option<i64>,
-    conn: &mut SqliteConnection,
+    conn: &mut C,
 ) -> Result<(), Error> {
     let name = config.drive.name();
     let owner = config.owner.as_slice();
@@ -210,7 +306,7 @@ async fn insert_config(
         "SELECT id FROM entity WHERE entity_type = 'DR' AND entity_id = ?",
         drive_entity_id,
     )
-    .fetch_one(&mut *conn)
+    .fetch_one(conn.conn())
     .await?
     .id;
 
@@ -222,7 +318,7 @@ async fn insert_config(
         owner,
         network_id,
     )
-        .execute(conn)
+        .execute(conn.conn())
         .await?;
     Ok(())
 }
@@ -262,6 +358,134 @@ fn check_config(
     Ok(())
 }
 
+async fn get_latest_sync_log_entry<C: Read>(conn: &mut C) -> Result<Option<SyncLogEntry>, Error> {
+    let row: SyncLogRow = match sqlx::query_as!(
+        SyncLogRow,
+        "SELECT
+             start_time, duration_ms, result, insertions, deletions, modifications, block_height, error
+         FROM
+             sync_log
+         ORDER BY
+             start_time
+         DESC
+         LIMIT 1"
+    )
+        .fetch_optional(conn.conn())
+        .await?
+    {
+        Some(row) => row,
+        None => return Ok(None),
+    };
+
+    Ok(Some(row.try_into()?))
+}
+
+async fn insert_sync_log_entry<C: Write>(
+    sync_log_entry: &SyncLogEntry,
+    conn: &mut C,
+) -> Result<(), Error> {
+    let row = SyncLogRow::from(sync_log_entry);
+
+    sqlx::query!(
+        "INSERT INTO sync_log
+             (start_time, duration_ms, result, insertions, deletions, modifications, block_height, error)
+         VALUES
+             (?, ?, ?, ?, ?, ?, ?, ?)",
+        row.start_time,
+        row.duration_ms,
+        row.result,
+        row.insertions,
+        row.deletions,
+        row.modifications,
+        row.block_height,
+        row.error,
+    )
+        .execute(conn.conn())
+        .await?;
+    Ok(())
+}
+
+struct SyncLogRow {
+    start_time: NaiveDateTime,
+    duration_ms: i64,
+    result: String,
+    insertions: Option<i64>,
+    deletions: Option<i64>,
+    modifications: Option<i64>,
+    block_height: Option<i64>,
+    error: Option<String>,
+}
+
+impl TryFrom<SyncLogRow> for SyncLogEntry {
+    type Error = DataError;
+
+    fn try_from(value: SyncLogRow) -> Result<Self, Self::Error> {
+        let start_time = value.start_time.and_utc();
+        let duration = Duration::from_millis(value.duration_ms as u64);
+
+        let result = match value.result.as_ref() {
+            "S" => SyncResult::OK(SyncSuccess {
+                insertions: value.insertions.map(|v| v as usize).unwrap_or_default(),
+                deletions: value.deletions.map(|v| v as usize).unwrap_or_default(),
+                modifications: value.modifications.map(|v| v as usize).unwrap_or_default(),
+                block: BlockNumber::from_inner(
+                    value
+                        .block_height
+                        .ok_or_else(|| DataError::MissingData("block_height not set".to_string()))?
+                        as u64,
+                ),
+            }),
+            "E" => SyncResult::Error(value.error),
+            other => Err(DataError::ConversionError(format!(
+                "invalid result value: '{}'",
+                other
+            )))?,
+        };
+
+        Ok(Self {
+            start_time,
+            duration,
+            result,
+        })
+    }
+}
+
+impl From<&SyncLogEntry> for SyncLogRow {
+    fn from(value: &SyncLogEntry) -> Self {
+        let (result, block_height, insertions, deletions, modifications, error);
+
+        match &value.result {
+            SyncResult::OK(success) => {
+                result = "S".into();
+                insertions = Some(success.insertions as i64);
+                deletions = Some(success.deletions as i64);
+                modifications = Some(success.modifications as i64);
+                block_height = Some(i64::try_from(*success.block.as_ref()).unwrap_or(i64::MAX));
+                error = None;
+            }
+            SyncResult::Error(err) => {
+                result = "E".into();
+                insertions = None;
+                deletions = None;
+                modifications = None;
+                block_height = None;
+                error = err.as_ref().map(|d| d.into());
+            }
+        }
+
+        Self {
+            start_time: value.start_time.naive_utc(),
+            duration_ms: value.duration.as_millis() as i64,
+            result,
+            insertions,
+            deletions,
+            modifications,
+            block_height,
+            error,
+        }
+    }
+}
+
 struct ConfigRow {
     drive_id: i64,
     signature_id: Option<i64>,
@@ -281,7 +505,7 @@ struct EntityRow<'a> {
     data_location: Option<Cow<'a, str>>,
 }
 
-async fn get_entity<E: DbEntity>(id: i64, tx: &mut SqliteConnection) -> Result<Model<E>, Error> {
+async fn get_entity<E: DbEntity, C: Read>(id: i64, tx: &mut C) -> Result<Model<E>, Error> {
     let row = sqlx::query!(
         "SELECT id, entity_type, location, block, entity_id, header, metadata, data_location
              FROM entity
@@ -289,7 +513,7 @@ async fn get_entity<E: DbEntity>(id: i64, tx: &mut SqliteConnection) -> Result<M
         id,
         <E as DbEntity>::TYPE,
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await
     .map(|r| EntityRow {
         id: r.id,
@@ -307,10 +531,7 @@ async fn get_entity<E: DbEntity>(id: i64, tx: &mut SqliteConnection) -> Result<M
     Ok(E::try_from_row(row)?)
 }
 
-async fn insert_entity<E: DbEntity>(
-    entity: &Model<E>,
-    tx: &mut SqliteConnection,
-) -> Result<i64, Error> {
+async fn insert_entity<E: DbEntity, C: Write>(entity: &Model<E>, tx: &mut C) -> Result<i64, Error> {
     let row = E::to_row(entity)?;
 
     let entity_type = <E as DbEntity>::TYPE;
@@ -337,24 +558,24 @@ async fn insert_entity<E: DbEntity>(
         metadata,
         data_location,
     )
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?
     .last_insert_rowid())
 }
 
-async fn get_config(tx: &mut SqliteConnection) -> Result<Option<Config>, Error> {
+async fn get_config<C: Read>(tx: &mut C) -> Result<Option<Config>, Error> {
     let config_row: ConfigRow = match sqlx::query_as!(
         ConfigRow,
         "SELECT drive_id, signature_id, name, owner, network_id FROM config"
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?
     {
         Some(config_row) => config_row,
         None => return Ok(None),
     };
 
-    let drive = get_entity::<DriveKind>(config_row.drive_id, &mut *tx).await?;
+    let drive = get_entity::<DriveKind, _>(config_row.drive_id, tx).await?;
 
     let signature: Option<Model<DriveSignatureKind>> = if let Some(sig_id) = config_row.signature_id
     {
@@ -364,6 +585,13 @@ async fn get_config(tx: &mut SqliteConnection) -> Result<Option<Config>, Error> 
     };
 
     Ok(Some(Config::try_from(config_row, drive, signature)?))
+}
+
+async fn clear_temp_tables<C: Write>(tx: &mut C) -> Result<(), Error> {
+    sqlx::query!("DELETE FROM vfs_affected_inodes")
+        .execute(tx.conn())
+        .await?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -450,7 +678,13 @@ async fn db_init(
         })
         .await?;
 
-    let mut conn = reader.acquire().await?;
+    let pool = SqlitePool { writer, reader };
+
+    let mut tx = pool.write().await?;
+    clear_temp_tables(&mut tx).await?;
+    tx.commit().await?;
+
+    let mut conn = pool.read().await?;
 
     let config = get_config(&mut conn).await?;
     if config.is_none() {
@@ -458,11 +692,13 @@ async fn db_init(
         if sqlx::query!(
             "SELECT NOT EXISTS (
                              SELECT 1 FROM entity UNION ALL
+                             SELECT 1 FROM vfs UNION ALL
+                             SELECT 1 FROM sync_log UNION ALL
                              SELECT 1 FROM config
                              LIMIT 1
                      ) AS is_empty"
         )
-        .fetch_one(conn.as_mut())
+        .fetch_one(conn.conn())
         .await?
         .is_empty
             != 1
@@ -471,7 +707,7 @@ async fn db_init(
         }
     }
 
-    Ok((config, SqlitePool { writer, reader }))
+    Ok((config, pool))
 }
 
 trait DbEntity: Entity + Sized {
@@ -678,6 +914,22 @@ fn parse_entity_id<ID: TryFrom<Vec<u8>, Error: Display>>(
         .transpose()
         .map_err(|e| DataError::ConversionError(e.to_string()))?
         .ok_or(DataError::MissingData("entity_id is missing".to_string()))
+}
+
+async fn get_id_for_entity_id<E: DbEntity + HasId<Id: AsRef<[u8]>>, C: Read>(
+    entity_id: &<E as HasId>::Id,
+    conn: &mut C,
+) -> Result<i64, Error> {
+    let entity_id = entity_id.as_ref();
+    let entity_type = <E as DbEntity>::TYPE;
+    Ok(sqlx::query!(
+        "SELECT id FROM entity where entity_type = ? AND entity_id = ?",
+        entity_type,
+        entity_id,
+    )
+    .fetch_one(conn.conn())
+    .await
+    .map(|r| r.id)?)
 }
 
 fn from_row<E: DbEntity>(
