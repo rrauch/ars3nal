@@ -135,7 +135,7 @@ impl Cache {
     pub(crate) async fn get_tx(
         &self,
         tx_id: &TxId,
-        f: impl AsyncFnOnce(&TxId) -> Result<Option<AuthenticatedTx<'static>>, crate::Error>,
+        f: impl AsyncFnOnce(&TxId) -> Result<Option<AuthenticatedTx<'static>>, crate::Error> + Send,
     ) -> Result<Option<AuthenticatedTx<'static>>, crate::Error> {
         let key = TxByIdKey::from(tx_id);
         Ok(self
@@ -168,7 +168,7 @@ impl Cache {
     pub(crate) async fn get_tx_offset(
         &self,
         tx_id: &TxId,
-        f: impl AsyncFnOnce(&TxId) -> Result<Option<TxOffset>, crate::Error>,
+        f: impl AsyncFnOnce(&TxId) -> Result<Option<TxOffset>, crate::Error> + Send,
     ) -> Result<Option<TxOffset>, crate::Error> {
         let key = TxOffsetKey::from(tx_id);
         Ok(self
@@ -189,7 +189,7 @@ impl Cache {
     pub(crate) async fn get_bundle(
         &self,
         location: &Arl,
-        f: impl AsyncFnOnce(&Arl) -> Result<Option<Bundle>, crate::Error>,
+        f: impl AsyncFnOnce(&Arl) -> Result<Option<Bundle>, crate::Error> + Send,
     ) -> Result<Option<Bundle>, crate::Error> {
         let key = BundleByLocationKey::from(location);
         Ok(self
@@ -214,7 +214,7 @@ impl Cache {
                 BundleItemAuthenticator<'static>,
             )>,
             crate::Error,
-        >,
+        > + Send,
     ) -> Result<
         Option<(
             AuthenticatedBundleItem<'static>,
@@ -252,7 +252,7 @@ impl Cache {
 
     async fn get_bundle_item_from_l2(
         location: &BundleItemArl,
-        l2: &Box<DynL2MetadataCache<'_>>,
+        l2: &Box<DynL2MetadataCache<'static>>,
     ) -> Result<
         Option<(
             AuthenticatedBundleItem<'static>,
@@ -282,7 +282,8 @@ impl Cache {
         location: &BundleItemArl,
         f: impl AsyncFnOnce(
             &BundleItemArl,
-        ) -> Result<Option<UnauthenticatedBundleItem<'static>>, crate::Error>,
+        ) -> Result<Option<UnauthenticatedBundleItem<'static>>, crate::Error>
+        + Send,
     ) -> Result<Option<UnauthenticatedBundleItem<'static>>, crate::Error> {
         let key = UnauthenticatedBundleItemByLocationKey::from(location);
         Ok(self
@@ -407,7 +408,7 @@ impl HasWeight for MetaValue {
     }
 }
 
-trait Key: PartialEq + Eq + Hash + Clone {
+trait Key: PartialEq + Eq + Hash + Clone + Send {
     type Value: Value;
 }
 
@@ -419,7 +420,7 @@ trait Value: Clone + Send {
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 #[repr(transparent)]
 struct KeyWrapper<'a, T, Variant = ()>(MaybeOwned<'a, T>, PhantomData<Variant>);
-impl<T, Variant> Deref for KeyWrapper<'_, T, Variant> {
+impl<'a, T, Variant> Deref for KeyWrapper<'a, T, Variant> {
     type Target = T;
 
     #[inline]
@@ -440,9 +441,9 @@ impl<'a, T, Variant> From<&'a T> for KeyWrapper<'a, T, Variant> {
     }
 }
 
-impl<T: Clone, Variant> KeyWrapper<'_, T, Variant>
+impl<'a, T: Clone, Variant> KeyWrapper<'a, T, Variant>
 where
-    T: 'static,
+    KeyWrapper<'static, T, Variant>: 'static,
 {
     fn to_owned(&self) -> KeyWrapper<'static, T, Variant> {
         KeyWrapper(MaybeOwned::Owned(self.0.clone().into_owned()), PhantomData)
@@ -450,7 +451,7 @@ where
 }
 
 type TxByIdKey<'a> = KeyWrapper<'a, TxId>;
-impl Key for TxByIdKey<'_> {
+impl<'a> Key for TxByIdKey<'a> {
     type Value = AuthenticatedTx<'static>;
 }
 
@@ -486,7 +487,7 @@ impl Value for AuthenticatedTx<'static> {
 struct TxOffsetVariant;
 
 type TxOffsetKey<'a> = KeyWrapper<'a, TxId, TxOffsetVariant>;
-impl Key for TxOffsetKey<'_> {
+impl<'a> Key for TxOffsetKey<'a> {
     type Value = Offset;
 }
 
@@ -522,7 +523,7 @@ impl Value for Offset {
 struct BundleByLocationVariant;
 
 type BundleByLocationKey<'a> = KeyWrapper<'a, Arl, BundleByLocationVariant>;
-impl Key for BundleByLocationKey<'_> {
+impl<'a> Key for BundleByLocationKey<'a> {
     type Value = Bundle;
 }
 
@@ -559,7 +560,7 @@ struct BundleItemByLocationVariant;
 
 type BundleItemByLocationKey<'a> = KeyWrapper<'a, BundleItemArl, BundleItemByLocationVariant>;
 
-impl Key for BundleItemByLocationKey<'_> {
+impl<'a> Key for BundleItemByLocationKey<'a> {
     type Value = (
         AuthenticatedBundleItem<'static>,
         BundleItemAuthenticator<'static>,
@@ -607,7 +608,7 @@ struct UnauthenticatedBundleItemByLocationVariant;
 type UnauthenticatedBundleItemByLocationKey<'a> =
     KeyWrapper<'a, BundleItemArl, UnauthenticatedBundleItemByLocationVariant>;
 
-impl Key for UnauthenticatedBundleItemByLocationKey<'_> {
+impl<'a> Key for UnauthenticatedBundleItemByLocationKey<'a> {
     type Value = UnauthenticatedBundleItem<'static>;
 }
 
@@ -693,12 +694,18 @@ impl MetadataCache {
     async fn try_get_value<'a, T: Key>(
         &self,
         key: T,
-        retrieve: impl AsyncFnOnce(&T) -> Result<Option<T::Value>, crate::Error>,
+        retrieve: impl AsyncFnOnce(&T) -> Result<Option<T::Value>, crate::Error> + Send,
         l2_get: impl AsyncFnOnce(
             &T,
-            &Box<DynL2MetadataCache>,
-        ) -> Result<Option<T::Value>, std::io::Error>,
-        l2_insert: impl AsyncFnOnce(T, T::Value, &Box<DynL2MetadataCache>) -> Result<(), std::io::Error>,
+            &Box<DynL2MetadataCache<'static>>,
+        ) -> Result<Option<T::Value>, std::io::Error>
+        + Send,
+        l2_insert: impl AsyncFnOnce(
+            T,
+            T::Value,
+            &Box<DynL2MetadataCache<'static>>,
+        ) -> Result<(), std::io::Error>
+        + Send,
     ) -> Result<Option<T::Value>, Error>
     where
         MaybeOwnedMetaKey<'a>: From<T>,
