@@ -104,6 +104,11 @@ pub enum MetadataError {
 #[repr(transparent)]
 pub struct ArFs(Arc<ErasedArFs>);
 
+struct SyncSettings {
+    sync_interval: Duration,
+    sync_min_initial: Duration,
+}
+
 #[bon::bon]
 impl ArFs {
     #[builder(derive(Debug))]
@@ -139,12 +144,14 @@ impl ArFs {
         )
         .await?;
 
-        let syncer =
-            Syncer::new(client.clone(), db.clone(), sync_interval, sync_min_initial).await?;
+        let sync_settings = SyncSettings {
+            sync_interval,
+            sync_min_initial,
+        };
 
-        Ok(Self(Arc::new(ErasedArFs::new(
-            client, db, syncer, drive, scope,
-        ))))
+        Ok(Self(Arc::new(
+            ErasedArFs::new(client, db, sync_settings, drive, scope).await?,
+        )))
     }
 
     #[inline]
@@ -293,103 +300,145 @@ enum ErasedArFs {
 }
 
 impl ErasedArFs {
-    fn new(client: Client, db: Db, syncer: Syncer, drive: DriveEntity, scope: Scope) -> Self {
-        match scope {
+    async fn new(
+        client: Client,
+        db: Db,
+        sync_settings: SyncSettings,
+        drive: DriveEntity,
+        scope: Scope,
+    ) -> Result<Self, Error> {
+        Ok(match scope {
             Scope::Public(public) => match public {
-                Access::ReadOnly(owner) => {
-                    Self::PublicRO(ArFsInner::new_public_ro(client, db, syncer, drive, owner))
-                }
-                Access::ReadWrite(wallet) => {
-                    Self::PublicRW(ArFsInner::new_public_rw(client, db, syncer, drive, wallet))
-                }
+                Access::ReadOnly(owner) => Self::PublicRO(
+                    ArFsInner::new_public_ro(client, db, sync_settings, drive, owner).await?,
+                ),
+                Access::ReadWrite(wallet) => Self::PublicRW(
+                    ArFsInner::new_public_rw(client, db, sync_settings, drive, wallet).await?,
+                ),
             },
             Scope::Private(private) => match private {
-                Access::ReadOnly(creds) => {
-                    Self::PrivateRO(ArFsInner::new_private_ro(client, db, syncer, drive, creds))
-                }
-                Access::ReadWrite(creds) => {
-                    Self::PrivateRW(ArFsInner::new_private_rw(client, db, syncer, drive, creds))
-                }
+                Access::ReadOnly(creds) => Self::PrivateRO(
+                    ArFsInner::new_private_ro(client, db, sync_settings, drive, creds).await?,
+                ),
+                Access::ReadWrite(creds) => Self::PrivateRW(
+                    ArFsInner::new_private_rw(client, db, sync_settings, drive, creds).await?,
+                ),
             },
-        }
+        })
     }
 }
 
 impl ArFsInner<Public, ReadOnly> {
-    fn new_public_ro(
+    async fn new_public_ro(
         client: Client,
         db: Db,
-        syncer: Syncer,
+        sync_settings: SyncSettings,
         drive: DriveEntity,
         owner: WalletAddress,
-    ) -> Self {
-        ArFsInner {
+    ) -> Result<Self, Error> {
+        let privacy = Arc::new(Public { owner });
+        let syncer = Syncer::new(
+            client.clone(),
+            db.clone(),
+            privacy.clone(),
+            sync_settings.sync_interval,
+            sync_settings.sync_min_initial,
+        )
+        .await?;
+        Ok(ArFsInner {
             client,
             db,
             syncer,
             drive,
-            privacy: Public { owner },
+            privacy,
             mode: ReadOnly,
-        }
+        })
     }
 }
 
 impl ArFsInner<Public, ReadWrite<Wallet>> {
-    fn new_public_rw(
+    async fn new_public_rw(
         client: Client,
         db: Db,
-        syncer: Syncer,
+        sync_settings: SyncSettings,
         drive: DriveEntity,
         wallet: Wallet,
-    ) -> Self {
-        ArFsInner {
+    ) -> Result<Self, Error> {
+        let privacy = Arc::new(Public {
+            owner: wallet.address(),
+        });
+        let syncer = Syncer::new(
+            client.clone(),
+            db.clone(),
+            privacy.clone(),
+            sync_settings.sync_interval,
+            sync_settings.sync_min_initial,
+        )
+        .await?;
+        Ok(ArFsInner {
             client,
             db,
             syncer,
             drive,
-            privacy: Public {
-                owner: wallet.address(),
-            },
+            privacy,
             mode: ReadWrite(wallet),
-        }
+        })
     }
 }
 
 impl ArFsInner<Private, ReadOnly> {
-    fn new_private_ro(
+    async fn new_private_ro(
         client: Client,
         db: Db,
-        syncer: Syncer,
+        sync_settings: SyncSettings,
         drive: DriveEntity,
         credentials: Credentials,
-    ) -> Self {
-        ArFsInner {
+    ) -> Result<Self, Error> {
+        let privacy = Arc::new(credentials.0);
+        let syncer = Syncer::new(
+            client.clone(),
+            db.clone(),
+            privacy.clone(),
+            sync_settings.sync_interval,
+            sync_settings.sync_min_initial,
+        )
+        .await?;
+        Ok(ArFsInner {
             client,
             db,
             syncer,
             drive,
-            privacy: credentials.0,
+            privacy,
             mode: ReadOnly,
-        }
+        })
     }
 }
 
 impl ArFsInner<Private, ReadWrite> {
-    fn new_private_rw(
+    async fn new_private_rw(
         client: Client,
         db: Db,
-        syncer: Syncer,
+        sync_settings: SyncSettings,
         drive: DriveEntity,
         credentials: Credentials,
-    ) -> Self {
-        ArFsInner {
+    ) -> Result<Self, Error> {
+        let privacy = Arc::new(credentials.0);
+        let syncer = Syncer::new(
+            client.clone(),
+            db.clone(),
+            privacy.clone(),
+            sync_settings.sync_interval,
+            sync_settings.sync_min_initial,
+        )
+        .await?;
+        Ok(ArFsInner {
             client,
             db,
             syncer,
             drive,
-            privacy: credentials.0,
+            privacy,
             mode: ReadWrite::default(),
-        }
+        })
     }
 }
 
@@ -444,7 +493,7 @@ struct ArFsInner<PRIVACY, MODE> {
     db: Db,
     syncer: Syncer,
     drive: DriveEntity,
-    privacy: PRIVACY,
+    privacy: Arc<PRIVACY>,
     mode: MODE,
 }
 

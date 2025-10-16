@@ -1,8 +1,11 @@
 use crate::db::Db;
+use crate::types::drive::{DriveEntity, DriveId};
+use crate::{Private, Public};
 use ario_client::Client;
 use ario_core::BlockNumber;
 use chrono::{DateTime, Utc};
 use std::cmp::max;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::watch;
@@ -10,7 +13,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 #[derive(Error, Debug)]
-pub enum Error {}
+pub enum Error {
+    #[error("mode is unsupported: {0}")]
+    UnsupportedMode(String),
+}
 
 #[derive(Clone, Debug)]
 pub struct LogEntry {
@@ -44,12 +50,16 @@ pub struct Syncer {
 }
 
 impl Syncer {
-    pub(crate) async fn new(
+    pub(crate) async fn new<PRIVACY: Send + Sync + 'static>(
         client: Client,
         db: Db,
+        privacy: Arc<PRIVACY>,
         sync_interval: Duration,
         min_initial_wait: Duration,
-    ) -> Result<Self, crate::Error> {
+    ) -> Result<Self, crate::Error>
+    where
+        BackgroundTask<PRIVACY>: SyncNow,
+    {
         let root_ct = CancellationToken::new();
 
         let earliest_sync = Utc::now() + min_initial_wait;
@@ -70,6 +80,7 @@ impl Syncer {
         let task_ct = root_ct.child_token();
         let task = BackgroundTask::new(
             db.clone(),
+            privacy,
             task_ct.clone(),
             status_tx,
             next_sync,
@@ -114,17 +125,23 @@ pub enum Status {
     Dead,
 }
 
-struct BackgroundTask {
+trait SyncNow {
+    fn sync(&mut self) -> impl Future<Output = Result<Success, crate::Error>> + Send;
+}
+
+struct BackgroundTask<PRIVACY> {
     db: Db,
+    privacy: Arc<PRIVACY>,
     ct: CancellationToken,
     status_tx: watch::Sender<Status>,
     next_sync: DateTime<Utc>,
     sync_interval: Duration,
 }
 
-impl BackgroundTask {
+impl<PRIVACY> BackgroundTask<PRIVACY> {
     fn new(
         db: Db,
+        privacy: Arc<PRIVACY>,
         ct: CancellationToken,
         status_tx: watch::Sender<Status>,
         next_sync: DateTime<Utc>,
@@ -132,6 +149,7 @@ impl BackgroundTask {
     ) -> Self {
         Self {
             db,
+            privacy,
             ct,
             status_tx,
             next_sync,
@@ -140,7 +158,10 @@ impl BackgroundTask {
     }
 
     #[tracing::instrument(name = "background_run", skip(self))]
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(mut self) -> Result<(), Error>
+    where
+        Self: SyncNow,
+    {
         loop {
             let next_sync_in = (self.next_sync - Utc::now())
                 .to_std()
@@ -192,12 +213,6 @@ impl BackgroundTask {
         Ok(())
     }
 
-    #[tracing::instrument(name = "background_sync", skip(self))]
-    async fn sync(&mut self) -> Result<Success, crate::Error> {
-        tracing::debug!("starting sync");
-        todo!()
-    }
-
     #[tracing::instrument(name = "update_log", skip(self))]
     async fn update_log(&self, log_entry: &LogEntry) -> Result<(), crate::Error> {
         tracing::debug!("starting sync");
@@ -205,5 +220,22 @@ impl BackgroundTask {
         tx.sync_log_entry(&log_entry).await?;
         tx.commit().await?;
         Ok(())
+    }
+}
+
+impl SyncNow for BackgroundTask<Public> {
+    #[tracing::instrument(name = "background_sync_public", skip(self))]
+    async fn sync(&mut self) -> Result<Success, crate::Error> {
+        tracing::debug!("starting sync");
+        todo!()
+    }
+}
+
+impl SyncNow for BackgroundTask<Private> {
+    #[tracing::instrument(name = "background_sync_private", skip(self))]
+    async fn sync(&mut self) -> Result<Success, crate::Error> {
+        Err(Error::UnsupportedMode(
+            "private drives are not yet supported".to_string(),
+        ))?
     }
 }
