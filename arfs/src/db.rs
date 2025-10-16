@@ -6,7 +6,7 @@ use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::snapshot::{SnapshotEntity, SnapshotKind};
 use crate::types::{Entity, HasId, Header, Metadata, Model, ParseError};
-use crate::{Privacy, Scope};
+use crate::{Privacy, Scope, resolve};
 use ario_client::Client;
 use ario_client::location::Arl;
 use ario_core::BlockNumber;
@@ -50,6 +50,8 @@ pub enum Error {
 pub enum DbStateError {
     #[error("expected database to empty but contains data")]
     NotEmpty,
+    #[error("database does not hold a valid config")]
+    NoConfig,
     #[error("wrong privacy mode: expected '{expected}' but got '{actual}'")]
     IncorrectPrivacy { expected: Privacy, actual: Privacy },
     #[error("wrong drive owner: expected '{expected}' but got '{actual}'")]
@@ -229,6 +231,10 @@ where
     pub async fn latest_sync_log_entry(&mut self) -> Result<Option<SyncLogEntry>, Error> {
         get_latest_sync_log_entry(self).await
     }
+
+    pub async fn config(&mut self) -> Result<Config, Error> {
+        get_config(self).await?.ok_or(DbStateError::NoConfig.into())
+    }
 }
 
 impl<C: TxScope> Transaction<C>
@@ -247,9 +253,10 @@ async fn bootstrap(
     scope: &Scope,
 ) -> Result<Config, super::Error> {
     let owner = scope.owner();
-    let (drive_id, item) = crate::find_drive_by_id_owner(client, drive_id, owner.as_ref()).await?;
+    let (drive_id, item) =
+        resolve::find_drive_by_id_owner(client, drive_id, owner.as_ref()).await?;
     let location = client.location_by_item_id(&item.id()).await?;
-    let drive_entity = crate::drive_entity(
+    let drive_entity = resolve::drive_entity(
         client,
         &drive_id,
         &location,
@@ -258,14 +265,14 @@ async fn bootstrap(
     )
     .await?;
 
-    let root_folder_location = crate::find_entity_location_by_id_drive::<FolderKind>(
+    let root_folder_location = resolve::find_entity_location_by_id_drive::<FolderKind>(
         client,
         drive_entity.root_folder(),
         &drive_id,
     )
     .await?;
 
-    let root_folder_entity = crate::folder_entity(
+    let root_folder_entity = resolve::folder_entity(
         drive_entity.root_folder(),
         client,
         &root_folder_location,
@@ -595,11 +602,11 @@ async fn clear_temp_tables<C: Write>(tx: &mut C) -> Result<(), Error> {
 }
 
 #[derive(Debug)]
-struct Config {
-    drive: DriveEntity,
-    signature: Option<DriveSignatureEntity>,
-    owner: WalletAddress,
-    network_id: NetworkIdentifier,
+pub struct Config {
+    pub drive: DriveEntity,
+    pub signature: Option<DriveSignatureEntity>,
+    pub owner: WalletAddress,
+    pub network_id: NetworkIdentifier,
 }
 
 impl Config {
