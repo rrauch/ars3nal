@@ -635,7 +635,7 @@ impl Display for ArFsInner<Private, ReadWrite> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ArFs, Credentials, Scope, resolve};
+    use crate::{ArFs, Credentials, Scope, SyncStatus, resolve};
     use ario_client::Client;
     use ario_core::Gateway;
     use ario_core::jwk::Jwk;
@@ -644,6 +644,7 @@ mod tests {
     use futures_lite::stream::StreamExt;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
+    use std::time::Duration;
 
     fn init_tracing() {
         let _ = tracing_subscriber::fmt()
@@ -714,9 +715,27 @@ mod tests {
                 .drive_id(drive_id)
                 .db_dir("/tmp/foo/")
                 .scope(Scope::public(drive_owner.clone()))
+                .sync_min_initial(Duration::from_millis(0))
                 .build()
                 .await?;
+
             println!("{}", arfs);
+
+            let mut sync_status = None;
+
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if sync_status.is_none() {
+                    sync_status = Some(arfs.sync_status());
+                } else {
+                    match arfs.sync_status() {
+                        SyncStatus::Syncing { .. } => continue,
+                        _ => break,
+                    }
+                }
+            }
+
+            println!("{:?}", sync_status);
         }
         Ok(())
     }

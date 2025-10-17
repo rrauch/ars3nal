@@ -51,10 +51,21 @@ fn to_drive_id(item: &TxQueryItem) -> Result<DriveId, Error> {
     Ok(drive_header.into_inner().drive_id)
 }
 
-pub async fn find_drive_by_id_owner<'a>(
-    client: &'a Client,
-    drive_id: &'a DriveId,
-    owner: &'a WalletAddress,
+pub async fn find_drive_by_id_owner(
+    client: &Client,
+    drive_id: &DriveId,
+    owner: &WalletAddress,
+    private: Option<&Private>,
+) -> Result<DriveEntity, Error> {
+    let (drive_id, item) = _find_drive_by_id_owner(client, drive_id, owner).await?;
+    let location = client.location_by_item_id(&item.id()).await?;
+    Ok(drive_entity(client, &drive_id, &location, owner, private).await?)
+}
+
+async fn _find_drive_by_id_owner(
+    client: &Client,
+    drive_id: &DriveId,
+    owner: &WalletAddress,
 ) -> Result<(DriveId, TxQueryItem), Error> {
     client
         .query_transactions_with_fields::<TagsOnly>(
@@ -93,10 +104,10 @@ pub async fn find_drive_by_id_owner<'a>(
         )
 }
 
-pub async fn find_entity_location_by_id_drive<'a, E: Entity + HasId>(
-    client: &'a Client,
+pub async fn find_entity_location_by_id_drive<E: Entity + HasId>(
+    client: &Client,
     id: &E::Id,
-    drive_id: &'a DriveId,
+    drive_id: &DriveId,
 ) -> Result<Arl, Error>
 where
     <E as HasId>::Id: Display,
@@ -218,7 +229,7 @@ where
     Ok(Model::new(header, metadata, block_height, location.clone()))
 }
 
-pub async fn drive_entity(
+async fn drive_entity(
     client: &Client,
     drive_id: &DriveId,
     location: &Arl,

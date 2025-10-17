@@ -40,7 +40,7 @@ impl<Auth: AuthenticationState> From<DynChunkSource<TxKind, Auth>> for UntaggedC
     }
 }
 
-impl<Auth: AuthenticationState, ContainerKind, ContainerAuth, Container>
+impl<Auth: AuthenticationState, ContainerKind, ContainerAuth, Container: Send>
     DynChunkSourceBuilder<TxKind, Auth, ContainerKind, ContainerAuth, Container>
     for (TxKind, Auth, Container)
 where

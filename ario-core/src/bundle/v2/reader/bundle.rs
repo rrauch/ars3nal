@@ -19,7 +19,7 @@ pub(crate) enum BundleReader {
 
 impl Flow for BundleReader {
     type Output = Bundle;
-    type Buf<'a> = Box<dyn BufMut + 'a>;
+    type Buf<'a> = Box<dyn BufMut + 'a + Send>;
 
     fn required_bytes(&self) -> usize {
         match self {

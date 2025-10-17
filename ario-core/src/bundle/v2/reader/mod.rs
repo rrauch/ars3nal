@@ -42,7 +42,7 @@ pub enum PollResult<Next> {
 
 pub trait Flow: Sized {
     type Output;
-    type Buf<'a>: BufMut
+    type Buf<'a>: BufMut + Send
     where
         Self: 'a;
 

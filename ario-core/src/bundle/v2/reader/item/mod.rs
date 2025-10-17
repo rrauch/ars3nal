@@ -24,7 +24,7 @@ where
     Data<PROCESS_DATA>: Step<ItemReaderCtx, Next = RawBundleItem<'static>>,
 {
     type Output = RawBundleItem<'static>;
-    type Buf<'a> = Box<dyn BufMut + 'a>;
+    type Buf<'a> = Box<dyn BufMut + 'a + Send>;
 
     fn required_bytes(&self) -> usize {
         match self {

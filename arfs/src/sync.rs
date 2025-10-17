@@ -1,11 +1,12 @@
 use crate::db::Db;
 use crate::types::drive::{DriveEntity, DriveId};
-use crate::{Private, Public};
+use crate::{Private, Public, resolve};
 use ario_client::Client;
 use ario_core::BlockNumber;
+use ario_core::wallet::WalletAddress;
 use chrono::{DateTime, Utc};
 use std::cmp::max;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::watch;
@@ -79,6 +80,7 @@ impl Syncer {
 
         let task_ct = root_ct.child_token();
         let task = BackgroundTask::new(
+            client.clone(),
             db.clone(),
             privacy,
             task_ct.clone(),
@@ -86,7 +88,7 @@ impl Syncer {
             next_sync,
             sync_interval,
         );
-        let task_handle = tokio::spawn(async move { task.run().await });
+        let task_handle = tokio::task::spawn_local(async move { task.run().await });
 
         Ok(Self {
             client,
@@ -125,11 +127,17 @@ pub enum Status {
     Dead,
 }
 
+//#[async_trait::async_trait]
 trait SyncNow {
+    //async fn sync(&mut self) -> Result<Success, crate::Error>;
+    //fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<Success, crate::Error>> + Send + '_>>;
+    //fn sync(&mut self) -> impl Future<Output = Result<Success, crate::Error>> + Send;
+    //fn sync(&mut self) -> impl Future<Output = Result<Success, crate::Error>>;
     fn sync(&mut self) -> impl Future<Output = Result<Success, crate::Error>> + Send;
 }
 
 struct BackgroundTask<PRIVACY> {
+    client: Client,
     db: Db,
     privacy: Arc<PRIVACY>,
     ct: CancellationToken,
@@ -140,6 +148,7 @@ struct BackgroundTask<PRIVACY> {
 
 impl<PRIVACY> BackgroundTask<PRIVACY> {
     fn new(
+        client: Client,
         db: Db,
         privacy: Arc<PRIVACY>,
         ct: CancellationToken,
@@ -148,6 +157,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         sync_interval: Duration,
     ) -> Self {
         Self {
+            client,
             db,
             privacy,
             ct,
@@ -223,19 +233,56 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
     }
 }
 
+//#[async_trait]
 impl SyncNow for BackgroundTask<Public> {
     #[tracing::instrument(name = "background_sync_public", skip(self))]
     async fn sync(&mut self) -> Result<Success, crate::Error> {
+        //fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<Success, crate::Error>> + Send + '_>> {
+        //    Box::pin(async move {
         tracing::debug!("starting sync");
+        let current_drive_config = self.db.read().await?.config().await?;
+
+        let current_block_height = self.current_block_height().await?;
+        let latest_drive = self
+            .find_latest_drive(
+                current_drive_config.drive.id(),
+                &current_drive_config.owner,
+                None,
+            )
+            .await?;
+
         todo!()
+        //})
     }
 }
 
+//#[async_trait]
 impl SyncNow for BackgroundTask<Private> {
     #[tracing::instrument(name = "background_sync_private", skip(self))]
     async fn sync(&mut self) -> Result<Success, crate::Error> {
+        //async fn sync(&mut self) -> Result<Success, crate::Error> {
+        //fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<Success, crate::Error>> + Send + '_>> {
+        //    Box::pin(async move {
         Err(Error::UnsupportedMode(
             "private drives are not yet supported".to_string(),
         ))?
+        // })
+    }
+}
+
+impl<PRIVACY> BackgroundTask<PRIVACY> {
+    #[tracing::instrument(skip(self))]
+    async fn current_block_height(&self) -> Result<BlockNumber, crate::Error> {
+        Ok(self.client.any_gateway_info().await?.height)
+    }
+    #[tracing::instrument(skip(self))]
+    async fn find_latest_drive<'a>(
+        &self,
+        drive_id: &'a DriveId,
+        owner: &'a WalletAddress,
+        private: Option<&'a Private>,
+    ) -> Result<DriveEntity, crate::Error> {
+        tracing::debug!("finding latest drive entity");
+        resolve::find_drive_by_id_owner(&self.client, drive_id, owner, private).await
     }
 }

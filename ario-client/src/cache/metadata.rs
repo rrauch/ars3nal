@@ -14,6 +14,8 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::Deref;
+use std::pin::Pin;
+use std::sync::Arc;
 
 pub(super) type MetadataCache = InnerCache<MetaKey, MetaValue, Box<DynL2MetadataCache<'static>>>;
 
@@ -713,28 +715,28 @@ impl MetadataCache {
     {
         let key = MaybeOwnedMetaKey::from(key);
         let mut invalidate = false;
-        let res = self
-            .l1
-            .try_get_with_by_ref(&key, async {
-                let key = key.maybe_as_ref().expect("key should always match");
-                if let Some(l2) = self.l2.as_ref() {
-                    if let Some(value) = l2_get(key, l2).await.map_err(L2Error)? {
-                        return Ok(Some(value.into_meta_value()));
-                    }
-                }
-                // not in l2, retrieve
-                // Warning: without the pinned box the async closure can lead to a stack overflow if
-                // called recursively!
-                if let Some(value) = Box::pin(retrieve(key)).await? {
-                    if let Some(l2) = self.l2.as_ref() {
-                        l2_insert(key.clone(), value.clone(), l2)
-                            .await
-                            .map_err(L2Error)?;
-                    }
+        let fut = self.l1.try_get_with_by_ref(&key, async {
+            let key = key.maybe_as_ref().expect("key should always match");
+            if let Some(l2) = self.l2.as_ref() {
+                if let Some(value) = l2_get(key, l2).await.map_err(L2Error)? {
                     return Ok(Some(value.into_meta_value()));
                 }
-                Ok(None)
-            })
+            }
+            // not in l2, retrieve
+            // Warning: without the pinned box the async closure can lead to a stack overflow if
+            // called recursively!
+            if let Some(value) = Box::pin(retrieve(key)).await? {
+                if let Some(l2) = self.l2.as_ref() {
+                    l2_insert(key.clone(), value.clone(), l2)
+                        .await
+                        .map_err(L2Error)?;
+                }
+                return Ok(Some(value.into_meta_value()));
+            }
+            Ok(None)
+        });
+        let fut = unsafe { force_send(fut) };
+        let res = fut
             .await
             .map_err(Error::CachedError)?
             .map(|v| {
@@ -749,4 +751,33 @@ impl MetadataCache {
         }
         res
     }
+}
+
+/// SAFETY: This is a temporary hack because AsyncFnOnce doesn't provide a way
+/// to declare the returned future as `Send` in stable Rust (at this time).
+/// The caller MUST ensure that nothing captured or used in the underlying
+/// async closures is `!Send`. This includes any captured variables, references,
+/// or types used within the async block. Violating this will cause undefined
+/// behavior if the future is actually sent across threads.
+unsafe fn force_send<F>(f: F) -> impl Future<Output = F::Output> + Send
+where
+    F: Future,
+{
+    #[repr(transparent)]
+    struct SendWrapper<T>(T);
+    unsafe impl<T> Send for SendWrapper<T> {}
+
+    impl<F: Future> Future for SendWrapper<F> {
+        type Output = F::Output;
+
+        #[inline]
+        fn poll(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            unsafe { self.map_unchecked_mut(|s| &mut s.0).poll(cx) }
+        }
+    }
+
+    SendWrapper(f)
 }

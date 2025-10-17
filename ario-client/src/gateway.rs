@@ -79,6 +79,12 @@ impl Client {
     pub async fn gateway_peers(&self, gateway: &Gateway) -> Result<Vec<Peer>, Error> {
         self.0.api.gateway_peers(gateway).await
     }
+
+    pub async fn any_gateway_info(&self) -> Result<GatewayInfo<'static>, crate::Error> {
+        Ok(self
+            .with_gw(async |gw| self.0.api.gateway_info(gw).await)
+            .await?)
+    }
 }
 
 #[cfg(test)]

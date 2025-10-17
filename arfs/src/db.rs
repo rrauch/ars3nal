@@ -253,17 +253,9 @@ async fn bootstrap(
     scope: &Scope,
 ) -> Result<Config, super::Error> {
     let owner = scope.owner();
-    let (drive_id, item) =
-        resolve::find_drive_by_id_owner(client, drive_id, owner.as_ref()).await?;
-    let location = client.location_by_item_id(&item.id()).await?;
-    let drive_entity = resolve::drive_entity(
-        client,
-        &drive_id,
-        &location,
-        owner.as_ref(),
-        scope.as_private(),
-    )
-    .await?;
+    let drive_entity =
+        resolve::find_drive_by_id_owner(client, drive_id, owner.as_ref(), scope.as_private())
+            .await?;
 
     let root_folder_location = resolve::find_entity_location_by_id_drive::<FolderKind>(
         client,

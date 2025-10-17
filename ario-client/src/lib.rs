@@ -50,6 +50,8 @@ pub enum Error {
     DataReaderError(#[from] data_reader::Error),
     #[error(transparent)]
     LocationError(#[from] location::Error),
+    #[error(transparent)]
+    GatewayError(#[from] gateway::Error),
 }
 
 #[bon::bon]
@@ -90,7 +92,7 @@ impl Client {
 
     pub(crate) async fn with_gw<T, E: Into<crate::Error>>(
         &self,
-        f: impl AsyncFnOnce(&Gateway) -> Result<T, E>,
+        f: impl AsyncFnOnce(&Gateway) -> Result<T, E> + Send,
     ) -> Result<T, Error> {
         let gw_handle = self.0.routemaster.gateway().await?;
         self.with_existing_gw(&gw_handle, f).await
@@ -99,7 +101,7 @@ impl Client {
     pub(crate) async fn with_existing_gw<T, E: Into<crate::Error>>(
         &self,
         gw_handle: &Handle<Gateway>,
-        f: impl AsyncFnOnce(&Gateway) -> Result<T, E>,
+        f: impl AsyncFnOnce(&Gateway) -> Result<T, E> + Send,
     ) -> Result<T, Error> {
         let start = SystemTime::now();
         let res = f(&gw_handle).await;
