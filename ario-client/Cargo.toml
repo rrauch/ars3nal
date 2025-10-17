@@ -7,6 +7,7 @@ edition = "2024"
 ario-core = { workspace = true, features = ["hazmat"] }
 
 async-stream = { workspace = true }
+async-trait = "0.1"
 bon = { workspace = true }
 buf-list = "1.0"
 bytemuck = { workspace = true, features = ["derive"] }
@@ -29,6 +30,7 @@ netwatch = "0.8"
 rand = { workspace = true, features = ["thread_rng"] }
 rangemap = { workspace = true }
 reqwest = { version = "0.12", features = ["stream", "rustls-tls"] }
+send-future = "0.1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_with = { workspace = true, features = ["base64"] }

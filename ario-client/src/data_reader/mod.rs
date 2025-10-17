@@ -13,8 +13,10 @@ use ario_core::chunking::AnyChunkMap;
 use ario_core::data::{BundleItemDataAuthenticityProof, DataChunk};
 use ario_core::tx::{TxId, TxKind};
 use ario_core::{Authenticated, AuthenticationState, Item, Unauthenticated};
+use async_trait::async_trait;
 use futures_lite::{AsyncRead, AsyncSeek};
 use itertools::Itertools;
+use send_future::SendFuture as _;
 use std::iter;
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -185,6 +187,7 @@ impl Client {
                     >>::new_from_location(
                         &self, &location, intermediate_source.take()
                     )
+                    .send()
                     .await?,
                 ));
             } else {
@@ -205,6 +208,7 @@ impl Client {
                                 .take()
                                 .ok_or(Error::UnsupportedDataItem)?,
                         )
+                        .send()
                         .await?,
                     ),
                 });
@@ -303,23 +307,25 @@ impl<'a> DataChunkExt<'a, BundleItemKind, BundleItemDataAuthenticityProof<'_>, A
     }
 }
 
-#[dynosaur::dynosaur(AnyChunkSource = dyn(box) ChunkSource)]
+#[async_trait::async_trait]
 pub trait ChunkSource<T, Auth>: Send + Sync + Unpin {
     fn len(&self) -> u64;
     fn chunks(&self) -> &AnyChunkMap;
     fn item(&self) -> Item<'static, Auth>
     where
         Auth: AuthenticationState;
-    fn retrieve_chunk(
+
+    async fn retrieve_chunk(
         &self,
         range: Range<u64>,
-    ) -> impl Future<Output = Result<DataChunk<'static, T, Auth>, crate::Error>> + Send
+    ) -> Result<DataChunk<'static, T, Auth>, crate::Error>
     where
         T: ReadableDataItem,
         Auth: AuthenticationState;
 }
 
-impl<T, Auth, S: ChunkSource<T, Auth>> ChunkSource<T, Auth> for Arc<S> {
+#[async_trait]
+impl<T, Auth, S: ChunkSource<T, Auth> + ?Sized> ChunkSource<T, Auth> for Arc<S> {
     #[inline]
     fn len(&self) -> u64 {
         self.as_ref().len()
@@ -339,20 +345,53 @@ impl<T, Auth, S: ChunkSource<T, Auth>> ChunkSource<T, Auth> for Arc<S> {
     }
 
     #[inline]
-    fn retrieve_chunk(
+    async fn retrieve_chunk(
         &self,
         range: Range<u64>,
-    ) -> impl Future<Output = Result<DataChunk<'static, T, Auth>, crate::Error>> + Send
+    ) -> Result<DataChunk<'static, T, Auth>, crate::Error>
     where
         T: ReadableDataItem,
         Auth: AuthenticationState,
     {
-        self.as_ref().retrieve_chunk(range)
+        self.as_ref().retrieve_chunk(range).await
+    }
+}
+
+#[async_trait]
+impl<T, Auth, S: ChunkSource<T, Auth> + ?Sized> ChunkSource<T, Auth> for Box<S> {
+    #[inline]
+    fn len(&self) -> u64 {
+        self.as_ref().len()
+    }
+
+    #[inline]
+    fn chunks(&self) -> &AnyChunkMap {
+        self.as_ref().chunks()
+    }
+
+    #[inline]
+    fn item(&self) -> Item<'static, Auth>
+    where
+        Auth: AuthenticationState,
+    {
+        self.as_ref().item()
+    }
+
+    #[inline]
+    async fn retrieve_chunk(
+        &self,
+        range: Range<u64>,
+    ) -> Result<DataChunk<'static, T, Auth>, crate::Error>
+    where
+        T: ReadableDataItem,
+        Auth: AuthenticationState,
+    {
+        self.as_ref().retrieve_chunk(range).await
     }
 }
 
 type DynChunkSource<T: ReadableDataItem, Auth: AuthenticationState> =
-    Box<AnyChunkSource<'static, T, Auth>>;
+    Box<dyn ChunkSource<T, Auth> + 'static>;
 type UntaggedChunkSource<Auth: AuthenticationState> = DynChunkSource<(), Auth>;
 
 #[repr(transparent)]
@@ -361,7 +400,7 @@ struct ChunkSourceTagEraser<T: ReadableDataItem, Auth, CS: ChunkSource<T, Auth>>
     PhantomData<(T, Auth)>,
 );
 
-impl<T: ReadableDataItem, Auth: Send + Sync + Unpin, CS: ChunkSource<T, Auth>>
+impl<T: ReadableDataItem, Auth: AuthenticationState, CS: ChunkSource<T, Auth>>
     ChunkSourceTagEraser<T, Auth, CS>
 where
     for<'a> DataChunk<'a, (), Auth>: From<DataChunk<'a, T, Auth>>,
@@ -371,7 +410,8 @@ where
     }
 }
 
-impl<T: ReadableDataItem, Auth: Send + Sync + Unpin, CS: ChunkSource<T, Auth>> ChunkSource<(), Auth>
+#[async_trait]
+impl<T: ReadableDataItem, Auth: AuthenticationState, CS: ChunkSource<T, Auth>> ChunkSource<(), Auth>
     for ChunkSourceTagEraser<T, Auth, CS>
 where
     for<'a> DataChunk<'a, (), Auth>: From<DataChunk<'a, T, Auth>>,
@@ -406,6 +446,7 @@ where
     }
 }
 
+#[async_trait::async_trait]
 trait DynChunkSourceBuilder<
     T: ReadableDataItem + ArlType,
     Auth: AuthenticationState,

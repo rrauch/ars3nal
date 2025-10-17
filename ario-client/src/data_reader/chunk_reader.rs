@@ -1,4 +1,3 @@
-use crate::data_reader::__dynosaur_macro_anychunksource::AnyChunkSource;
 use crate::data_reader::{
     ChunkSource, DataReader, DynChunkSource, MaybeAuthenticatedDataItemReader, ReadableDataItem,
     UntaggedChunkSource,
@@ -44,7 +43,7 @@ where
         }
         let data_source = match Arc::try_unwrap(self.data_source) {
             Ok(data_source) => UntaggedChunkSource::from(data_source),
-            Err(arc) => UntaggedChunkSource::from(AnyChunkSource::new_box(arc)),
+            Err(arc) => UntaggedChunkSource::from(Box::new(arc)),
         };
 
         MaybeAuthenticatedDataItemReader {

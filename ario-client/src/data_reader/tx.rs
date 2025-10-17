@@ -9,6 +9,7 @@ use ario_core::chunking::{AnyChunkMap, ChunkMap, DefaultChunker};
 use ario_core::data::{AuthenticatedTxDataChunk, DataChunk, DataItem, DataRoot, TxDataChunk};
 use ario_core::tx::{AuthenticatedTx, Tx, TxKind};
 use ario_core::{Authenticated, AuthenticationState, Item};
+use async_trait::async_trait;
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::Arc;
@@ -30,17 +31,18 @@ where
     for<'a> TxDataChunk<'a, Authenticated>: DataChunkExt<'a, TxKind, (), Auth>,
 {
     fn from(value: TxChunkSource<Auth>) -> Self {
-        super::AnyChunkSource::new_box(ChunkSourceTagEraser::new(value))
+        Box::new(ChunkSourceTagEraser::new(value))
     }
 }
 
 impl<Auth: AuthenticationState> From<DynChunkSource<TxKind, Auth>> for UntaggedChunkSource<Auth> {
     fn from(value: DynChunkSource<TxKind, Auth>) -> Self {
-        super::AnyChunkSource::new_box(ChunkSourceTagEraser::new(value))
+        Box::new(ChunkSourceTagEraser::new(value))
     }
 }
 
-impl<Auth: AuthenticationState, ContainerKind, ContainerAuth, Container: Send>
+#[async_trait]
+impl<Auth: AuthenticationState, ContainerKind, ContainerAuth, Container: Send + 'static>
     DynChunkSourceBuilder<TxKind, Auth, ContainerKind, ContainerAuth, Container>
     for (TxKind, Auth, Container)
 where
@@ -62,9 +64,7 @@ where
             .await?
             .ok_or_else(|| Error::TxNotFound(location.tx_id().clone()))?;
 
-        Ok(super::AnyChunkSource::new_box(
-            TxChunkSource::new(client.clone(), tx).await?,
-        ))
+        Ok(Box::new(TxChunkSource::new(client.clone(), tx).await?))
     }
 }
 
@@ -107,6 +107,7 @@ impl<Auth: AuthenticationState> TxChunkSource<Auth> {
     }
 }
 
+#[async_trait]
 impl<Auth: AuthenticationState> ChunkSource<TxKind, Auth> for TxChunkSource<Auth>
 where
     for<'b> Tx<'b, Auth>: From<AuthenticatedTx<'b>>,

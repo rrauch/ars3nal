@@ -88,7 +88,7 @@ impl Syncer {
             next_sync,
             sync_interval,
         );
-        let task_handle = tokio::task::spawn_local(async move { task.run().await });
+        let task_handle = tokio::spawn(async move { task.run().await });
 
         Ok(Self {
             client,
@@ -127,12 +127,7 @@ pub enum Status {
     Dead,
 }
 
-//#[async_trait::async_trait]
 trait SyncNow {
-    //async fn sync(&mut self) -> Result<Success, crate::Error>;
-    //fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<Success, crate::Error>> + Send + '_>>;
-    //fn sync(&mut self) -> impl Future<Output = Result<Success, crate::Error>> + Send;
-    //fn sync(&mut self) -> impl Future<Output = Result<Success, crate::Error>>;
     fn sync(&mut self) -> impl Future<Output = Result<Success, crate::Error>> + Send;
 }
 
@@ -233,12 +228,9 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
     }
 }
 
-//#[async_trait]
 impl SyncNow for BackgroundTask<Public> {
     #[tracing::instrument(name = "background_sync_public", skip(self))]
     async fn sync(&mut self) -> Result<Success, crate::Error> {
-        //fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<Success, crate::Error>> + Send + '_>> {
-        //    Box::pin(async move {
         tracing::debug!("starting sync");
         let current_drive_config = self.db.read().await?.config().await?;
 
@@ -251,22 +243,17 @@ impl SyncNow for BackgroundTask<Public> {
             )
             .await?;
 
+        println!("");
         todo!()
-        //})
     }
 }
 
-//#[async_trait]
 impl SyncNow for BackgroundTask<Private> {
     #[tracing::instrument(name = "background_sync_private", skip(self))]
     async fn sync(&mut self) -> Result<Success, crate::Error> {
-        //async fn sync(&mut self) -> Result<Success, crate::Error> {
-        //fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<Success, crate::Error>> + Send + '_>> {
-        //    Box::pin(async move {
         Err(Error::UnsupportedMode(
             "private drives are not yet supported".to_string(),
         ))?
-        // })
     }
 }
 

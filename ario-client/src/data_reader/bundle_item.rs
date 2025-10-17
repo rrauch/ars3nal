@@ -15,6 +15,7 @@ use ario_core::data::{
     UnauthenticatedBundleItemDataChunk,
 };
 use ario_core::{Authenticated, AuthenticationState, Item, MaybeOwned, Unauthenticated};
+use async_trait::async_trait;
 use futures_concurrency::future::FutureGroup;
 use futures_lite::StreamExt;
 use itertools::Itertools;
@@ -46,14 +47,16 @@ pub(crate) trait Builder<
     Container: ChunkSource<ContainerKind, ContainerAuth>,
 >
 {
-    async fn new_from_location(
+    fn new_from_location(
         client: &Client,
         location: &TypedArl<BundleItemKind>,
         container: Container,
-    ) -> Result<
-        BundleItemChunkSource<'static, Auth, ContainerAuth, ContainerKind, Container>,
-        crate::Error,
-    >;
+    ) -> impl Future<
+        Output = Result<
+            BundleItemChunkSource<'static, Auth, ContainerAuth, ContainerKind, Container>,
+            crate::Error,
+        >,
+    > + Send;
 }
 
 impl<
@@ -126,7 +129,7 @@ impl<
 > BundleItemChunkSource<'a, Auth, ContainerAuth, ContainerKind, Container>
 where
     Auth: Builder<Auth, ContainerKind, ContainerAuth, Container>,
-    Self: ChunkSource<BundleItemKind, Auth>,
+    Self: ChunkSource<BundleItemKind, Auth> + 'static,
 {
     pub(super) async fn new_from_location(
         client: &Client,
@@ -137,6 +140,7 @@ where
     }
 }
 
+#[async_trait]
 impl<
     Auth: AuthenticationState,
     ContainerAuth: AuthenticationState,
@@ -146,7 +150,7 @@ impl<
     for (BundleItemKind, Auth, Container)
 where
     Auth: Builder<Auth, ContainerKind, ContainerAuth, Container>,
-    for<'a> BundleItemChunkSource<'a, Auth, ContainerAuth, ContainerKind, Container>:
+    BundleItemChunkSource<'static, Auth, ContainerAuth, ContainerKind, Container>:
         ChunkSource<BundleItemKind, Auth>,
 {
     async fn new_from_location(
@@ -155,7 +159,7 @@ where
         container: Option<Container>,
     ) -> Result<DynChunkSource<BundleItemKind, Auth>, crate::Error> {
         let container = container.ok_or(Error::UnsupportedDataItem)?;
-        Ok(super::AnyChunkSource::new_box(
+        Ok(Box::new(
             <Auth as Builder<_, _, _, _>>::new_from_location(client, location, container).await?,
         ))
     }
@@ -255,7 +259,7 @@ where
     fn from(
         value: BundleItemChunkSource<'static, Auth, ContainerAuth, ContainerKind, Container>,
     ) -> Self {
-        super::AnyChunkSource::new_box(ChunkSourceTagEraser::new(value))
+        Box::new(ChunkSourceTagEraser::new(value))
     }
 }
 
@@ -263,10 +267,11 @@ impl<Auth: AuthenticationState> From<DynChunkSource<BundleItemKind, Auth>>
     for UntaggedChunkSource<Auth>
 {
     fn from(value: DynChunkSource<BundleItemKind, Auth>) -> Self {
-        super::AnyChunkSource::new_box(ChunkSourceTagEraser::new(value))
+        Box::new(ChunkSourceTagEraser::new(value))
     }
 }
 
+#[async_trait]
 impl<
     'a,
     Auth: AuthenticationState,
