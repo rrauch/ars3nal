@@ -5,7 +5,11 @@ pub mod folder;
 pub mod snapshot;
 
 use crate::serde_tag::{BytesToStr, Chain, ToFromStr};
-use crate::types::drive::DriveId;
+use crate::types::drive::{DriveEntity, DriveId};
+use crate::types::drive_signature::DriveSignatureEntity;
+use crate::types::file::{FileEntity, FileId};
+use crate::types::folder::{FolderEntity, FolderId};
+use crate::types::snapshot::{SnapshotEntity, SnapshotId};
 use crate::{Timestamp, serde_tag};
 use ario_client::location::Arl;
 use ario_core::base64::Base64Error;
@@ -63,7 +67,7 @@ fn parse_version_part(part: Option<&str>, s: &str) -> Result<usize, ParseError> 
 pub trait Id: Debug + Display + FromStr + Clone + PartialEq + Eq + Send + Sync {}
 impl<ID: Debug + Display + FromStr + Clone + PartialEq + Eq + Send + Sync> Id for ID {}
 
-#[derive_where(Debug, Clone, PartialEq; ID)]
+#[derive_where(Debug, Clone, PartialEq, Eq, Hash; ID)]
 #[repr(transparent)]
 pub struct TaggedId<ID: Id, TAG>(ID, PhantomData<TAG>);
 
@@ -105,6 +109,7 @@ where
 pub(crate) struct Model<E: Entity> {
     header: Header<E::Header, E>,
     metadata: Metadata<E::Metadata, E>,
+    extra: E::Extra,
     block_height: BlockNumber,
     location: Arl,
     _marker: PhantomData<E>,
@@ -115,9 +120,11 @@ pub(crate) trait Entity {
 
     type Header;
     type Metadata;
+    type Extra: Default;
 }
 
 pub(crate) trait HasId {
+    const NAME: &'static str;
     type Id;
 
     fn id(entity: &Model<Self>) -> &Self::Id
@@ -176,6 +183,7 @@ impl<E: Entity> Model<E> {
         Self {
             header,
             metadata,
+            extra: <E::Extra as Default>::default(),
             block_height,
             location,
             _marker: PhantomData,
@@ -424,15 +432,21 @@ where
     }
 }
 
-/*
-enum Entity {
+pub(crate) enum ArfsEntity {
     Drive(DriveEntity),
     DriveSignature(DriveSignatureEntity),
     Folder(FolderEntity),
     File(FileEntity),
     Snapshot(SnapshotEntity),
 }
-*/
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ArfsEntityId {
+    Drive(DriveId),
+    Folder(FolderId),
+    File(FileId),
+    Snapshot(SnapshotId),
+}
 
 fn unsupported_signature_format_err(s: &str) -> ParseError {
     ParseError::UnsupportedSignatureFormat(s.to_string())

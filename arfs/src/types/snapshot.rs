@@ -1,7 +1,7 @@
 use crate::types::drive::DriveId;
 use crate::types::{
-    BytesToStr, Chain, DisplayFromStr, Entity, HasContentType, HasDriveId, HasId, HasTimestamp,
-    Model, TaggedId, TimestampSeconds, ToFromStr,
+    ArfsEntity, ArfsEntityId, BytesToStr, Chain, DisplayFromStr, Entity, HasContentType,
+    HasDriveId, HasId, HasTimestamp, Model, TaggedId, TimestampSeconds, ToFromStr,
 };
 use crate::{ContentType, Timestamp};
 use ario_core::BlockNumber;
@@ -17,9 +17,12 @@ impl Entity for SnapshotKind {
     const TYPE: &'static str = "snapshot";
     type Header = SnapshotHeader;
     type Metadata = ();
+    type Extra = ();
 }
 
 impl HasId for SnapshotKind {
+    const NAME: &'static str = "Snapshot-Id";
+
     type Id = SnapshotId;
 
     fn id(entity: &Model<Self>) -> &Self::Id
@@ -27,6 +30,12 @@ impl HasId for SnapshotKind {
         Self: Entity + Sized,
     {
         &entity.header.inner.snapshot_id
+    }
+}
+
+impl From<SnapshotId> for ArfsEntityId {
+    fn from(value: SnapshotId) -> Self {
+        Self::Snapshot(value)
     }
 }
 
@@ -77,33 +86,39 @@ impl SnapshotEntity {
     }
 }
 
+impl From<SnapshotEntity> for ArfsEntity {
+    fn from(value: SnapshotEntity) -> Self {
+        Self::Snapshot(value)
+    }
+}
+
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SnapshotHeader {
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Drive-Id")]
-    drive_id: DriveId,
+    pub drive_id: DriveId,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Snapshot-Id")]
-    snapshot_id: SnapshotId,
+    pub snapshot_id: SnapshotId,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Content-Type")]
-    content_type: ContentType,
+    pub content_type: ContentType,
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<u64>, _)>")]
     #[serde(rename = "Block-Start")]
-    block_start: BlockNumber,
+    pub block_start: BlockNumber,
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<u64>, _)>")]
     #[serde(rename = "Block-End")]
-    block_end: BlockNumber,
+    pub block_end: BlockNumber,
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<u64>, _)>")]
     #[serde(rename = "Data-Start")]
-    data_start: BlockNumber,
+    pub data_start: BlockNumber,
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<u64>, _)>")]
     #[serde(rename = "Data-End")]
-    data_end: BlockNumber,
+    pub data_end: BlockNumber,
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
     #[serde(rename = "Unix-Time")]
-    time: DateTime<Utc>,
+    pub time: DateTime<Utc>,
 }
 
 #[cfg(test)]
@@ -112,12 +127,12 @@ mod tests {
     use crate::types::snapshot::{SnapshotEntity, SnapshotHeader, SnapshotId, SnapshotKind};
     use crate::types::{Header, Metadata};
     use crate::{ArFsVersion, ContentType};
+    use ario_client::location::Arl;
     use ario_core::BlockNumber;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;
     use chrono::DateTime;
     use std::str::FromStr;
-    use ario_client::location::Arl;
 
     #[test]
     fn snapshot_entity_roundtrip() -> anyhow::Result<()> {

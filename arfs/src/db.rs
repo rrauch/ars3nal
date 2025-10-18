@@ -5,7 +5,7 @@ use crate::types::drive_signature::{DriveSignatureEntity, DriveSignatureKind};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::snapshot::{SnapshotEntity, SnapshotKind};
-use crate::types::{Entity, HasId, Header, Metadata, Model, ParseError};
+use crate::types::{ArfsEntityId, Entity, HasId, Header, Metadata, Model, ParseError};
 use crate::{Privacy, Scope, resolve};
 use ario_client::Client;
 use ario_client::location::Arl;
@@ -14,7 +14,8 @@ use ario_core::blob::OwnedBlob;
 use ario_core::network::NetworkIdentifier;
 use ario_core::tag::Tag;
 use ario_core::wallet::WalletAddress;
-use chrono::NaiveDateTime;
+use chrono::DateTime;
+use futures_lite::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_sqlite_jsonb::Error as JsonbError;
 use sqlx::Transaction as SqlxTransaction;
@@ -235,6 +236,41 @@ where
     pub async fn config(&mut self) -> Result<Config, Error> {
         get_config(self).await?.ok_or(DbStateError::NoConfig.into())
     }
+
+    pub async fn entity_ids(
+        &mut self,
+    ) -> Result<impl Stream<Item = Result<ArfsEntityId, Error>> + Unpin + use<'_, C>, Error> {
+        let x = sqlx::query!("SELECT entity_type, entity_id FROM entity")
+            .fetch(self.conn())
+            .filter_map(|r| match r {
+                Ok(r) => match r.entity_type.as_str() {
+                    <DriveKind as DbEntity>::TYPE => Some(
+                        parse_entity_id(r.entity_id.map(Cow::Owned))
+                            .map(ArfsEntityId::Drive)
+                            .map_err(|e| e.into()),
+                    ),
+                    <DriveSignatureKind as DbEntity>::TYPE => None,
+                    <FileKind as DbEntity>::TYPE => Some(
+                        parse_entity_id(r.entity_id.map(Cow::Owned))
+                            .map(ArfsEntityId::File)
+                            .map_err(|e| e.into()),
+                    ),
+                    <FolderKind as DbEntity>::TYPE => Some(
+                        parse_entity_id(r.entity_id.map(Cow::Owned))
+                            .map(ArfsEntityId::Folder)
+                            .map_err(|e| e.into()),
+                    ),
+                    <SnapshotKind as DbEntity>::TYPE => Some(
+                        parse_entity_id(r.entity_id.map(Cow::Owned))
+                            .map(ArfsEntityId::Snapshot)
+                            .map_err(|e| e.into()),
+                    ),
+                    _ => None,
+                },
+                Err(err) => Some(Err(err.into())),
+            });
+        Ok(x)
+    }
 }
 
 impl<C: TxScope> Transaction<C>
@@ -243,6 +279,52 @@ where
 {
     pub async fn sync_log_entry(&mut self, log_entry: &SyncLogEntry) -> Result<(), Error> {
         insert_sync_log_entry(log_entry, self).await
+    }
+
+    pub async fn sync_update(
+        &mut self,
+        obsolete: &Vec<ArfsEntityId>,
+        new_files: &Vec<FileEntity>,
+        new_folders: &Vec<FolderEntity>,
+    ) -> Result<(usize, usize), Error> {
+        clear_temp_tables(self).await?;
+        let mut ids = vec![];
+        let deletions = self.delete_entities(obsolete.iter()).await?;
+        for folder in new_folders {
+            ids.push(insert_entity(folder, self).await?);
+        }
+        for file in new_files {
+            ids.push(insert_entity(file, self).await?);
+        }
+
+        Ok((ids.len(), deletions))
+    }
+
+    async fn delete_entities(
+        &mut self,
+        entity_ids: impl Iterator<Item = &ArfsEntityId>,
+    ) -> Result<usize, Error> {
+        let mut deletions = 0;
+
+        for id in entity_ids {
+            let row_id = match id {
+                ArfsEntityId::Drive(drive_id) => {
+                    get_id_for_entity_id::<DriveKind, _>(drive_id, self).await?
+                }
+                ArfsEntityId::Folder(folder_id) => {
+                    get_id_for_entity_id::<FolderKind, _>(folder_id, self).await?
+                }
+                ArfsEntityId::File(file_id) => {
+                    get_id_for_entity_id::<FileKind, _>(file_id, self).await?
+                }
+                ArfsEntityId::Snapshot(snapshot_id) => {
+                    get_id_for_entity_id::<SnapshotKind, _>(snapshot_id, self).await?
+                }
+            };
+            deletions += delete_entity(row_id, self).await?;
+        }
+
+        Ok(deletions)
     }
 }
 
@@ -361,7 +443,7 @@ async fn get_latest_sync_log_entry<C: Read>(conn: &mut C) -> Result<Option<SyncL
     let row: SyncLogRow = match sqlx::query_as!(
         SyncLogRow,
         "SELECT
-             start_time, duration_ms, result, insertions, deletions, modifications, block_height, error
+             start_time as \"start_time: i64\", duration_ms, result, insertions, deletions, block_height, error
          FROM
              sync_log
          ORDER BY
@@ -369,8 +451,8 @@ async fn get_latest_sync_log_entry<C: Read>(conn: &mut C) -> Result<Option<SyncL
          DESC
          LIMIT 1"
     )
-        .fetch_optional(conn.conn())
-        .await?
+    .fetch_optional(conn.conn())
+    .await?
     {
         Some(row) => row,
         None => return Ok(None),
@@ -387,30 +469,28 @@ async fn insert_sync_log_entry<C: Write>(
 
     sqlx::query!(
         "INSERT INTO sync_log
-             (start_time, duration_ms, result, insertions, deletions, modifications, block_height, error)
+             (start_time, duration_ms, result, insertions, deletions, block_height, error)
          VALUES
-             (?, ?, ?, ?, ?, ?, ?, ?)",
+             (?, ?, ?, ?, ?, ?, ?)",
         row.start_time,
         row.duration_ms,
         row.result,
         row.insertions,
         row.deletions,
-        row.modifications,
         row.block_height,
         row.error,
     )
-        .execute(conn.conn())
-        .await?;
+    .execute(conn.conn())
+    .await?;
     Ok(())
 }
 
 struct SyncLogRow {
-    start_time: NaiveDateTime,
+    start_time: i64,
     duration_ms: i64,
     result: String,
     insertions: Option<i64>,
     deletions: Option<i64>,
-    modifications: Option<i64>,
     block_height: Option<i64>,
     error: Option<String>,
 }
@@ -419,14 +499,14 @@ impl TryFrom<SyncLogRow> for SyncLogEntry {
     type Error = DataError;
 
     fn try_from(value: SyncLogRow) -> Result<Self, Self::Error> {
-        let start_time = value.start_time.and_utc();
+        let start_time = DateTime::from_timestamp(value.start_time, 0)
+            .ok_or(DataError::ConversionError("Invalid timestamp".to_string()))?;
         let duration = Duration::from_millis(value.duration_ms as u64);
 
         let result = match value.result.as_ref() {
             "S" => SyncResult::OK(SyncSuccess {
                 insertions: value.insertions.map(|v| v as usize).unwrap_or_default(),
                 deletions: value.deletions.map(|v| v as usize).unwrap_or_default(),
-                modifications: value.modifications.map(|v| v as usize).unwrap_or_default(),
                 block: BlockNumber::from_inner(
                     value
                         .block_height
@@ -451,14 +531,13 @@ impl TryFrom<SyncLogRow> for SyncLogEntry {
 
 impl From<&SyncLogEntry> for SyncLogRow {
     fn from(value: &SyncLogEntry) -> Self {
-        let (result, block_height, insertions, deletions, modifications, error);
+        let (result, block_height, insertions, deletions, error);
 
         match &value.result {
             SyncResult::OK(success) => {
                 result = "S".into();
                 insertions = Some(success.insertions as i64);
                 deletions = Some(success.deletions as i64);
-                modifications = Some(success.modifications as i64);
                 block_height = Some(i64::try_from(*success.block.as_ref()).unwrap_or(i64::MAX));
                 error = None;
             }
@@ -466,19 +545,17 @@ impl From<&SyncLogEntry> for SyncLogRow {
                 result = "E".into();
                 insertions = None;
                 deletions = None;
-                modifications = None;
                 block_height = None;
                 error = err.as_ref().map(|d| d.into());
             }
         }
 
         Self {
-            start_time: value.start_time.naive_utc(),
+            start_time: value.start_time.timestamp(),
             duration_ms: value.duration.as_millis() as i64,
             result,
             insertions,
             deletions,
-            modifications,
             block_height,
             error,
         }
@@ -502,6 +579,13 @@ struct EntityRow<'a> {
     header: Vec<u8>,
     metadata: Option<Cow<'a, [u8]>>,
     data_location: Option<Cow<'a, str>>,
+}
+
+async fn delete_entity<C: Write>(id: i64, tx: &mut C) -> Result<usize, Error> {
+    Ok(sqlx::query!("DELETE FROM entity WHERE id = ?", id)
+        .execute(tx.conn())
+        .await?
+        .rows_affected() as usize)
 }
 
 async fn get_entity<E: DbEntity, C: Read>(id: i64, tx: &mut C) -> Result<Model<E>, Error> {
@@ -841,7 +925,7 @@ impl DbEntity for FileKind {
             entity,
             Some(entity.id().as_ref().into()),
             Some(entity.metadata()),
-            Some(entity.data().to_string().into()),
+            entity.data_location().map(|arl| arl.to_string().into()),
         )
     }
 }
@@ -858,13 +942,19 @@ impl TryFrom<EntityRow<'_>> for FileEntity {
                 entity_id
             )))?;
 
-            let file = FileEntity::new(header, metadata, block, location);
+            let mut file = FileEntity::new(header, metadata, block, location);
 
             if file.id() != &entity_id {
                 Err(DataError::IdMismatch {
                     expected: entity_id.to_string(),
                     actual: file.id().to_string(),
                 })?;
+            }
+
+            if let Some(data_location) = row.data_location {
+                let data_location = Arl::from_str(data_location.as_ref())
+                    .map_err(|e| DataError::ConversionError(e.to_string()))?;
+                file.set_data_location(data_location);
             }
 
             Ok(file)

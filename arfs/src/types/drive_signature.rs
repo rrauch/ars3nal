@@ -1,4 +1,6 @@
-use crate::types::{BytesToStr, Chain, Cipher, DisplayFromStr, Entity, Model, SignatureFormat};
+use crate::types::{
+    ArfsEntity, BytesToStr, Chain, Cipher, DisplayFromStr, Entity, Model, SignatureFormat,
+};
 use ario_core::blob::{Blob, OwnedBlob};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
@@ -10,6 +12,7 @@ impl Entity for DriveSignatureKind {
     const TYPE: &'static str = "drive-signature";
     type Header = DriveSignatureHeader;
     type Metadata = ();
+    type Extra = ();
 }
 
 pub(crate) type DriveSignatureEntity = Model<DriveSignatureKind>;
@@ -25,6 +28,12 @@ impl DriveSignatureEntity {
 
     pub fn cipher_iv(&self) -> Blob<'_> {
         self.header.inner.cipher_iv.borrow()
+    }
+}
+
+impl From<DriveSignatureEntity> for ArfsEntity {
+    fn from(value: DriveSignatureEntity) -> Self {
+        Self::DriveSignature(value)
     }
 }
 
@@ -50,11 +59,11 @@ mod tests {
         DriveSignatureEntity, DriveSignatureHeader, DriveSignatureKind,
     };
     use crate::types::{Cipher, Header, Metadata, SignatureFormat};
+    use ario_client::location::Arl;
     use ario_core::BlockNumber;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;
     use std::str::FromStr;
-    use ario_client::location::Arl;
 
     #[test]
     fn drive_signature_entity_roundtrip() -> anyhow::Result<()> {

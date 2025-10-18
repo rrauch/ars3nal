@@ -1,16 +1,19 @@
 use crate::types::drive::DriveId;
 use crate::types::folder::FolderId;
 use crate::types::{
-    BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType, HasDriveId, HasId, HasName,
-    HasTimestamp, HasVisibility, MaybeHasCipher, Model, TaggedId, TimestampMilliSeconds,
-    TimestampSeconds, ToFromStr, Visibility, bool_false,
+    ArfsEntity, ArfsEntityId, BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType,
+    HasDriveId, HasId, HasName, HasTimestamp, HasVisibility, MaybeHasCipher, Model, TaggedId,
+    TimestampMilliSeconds, TimestampSeconds, ToFromStr, Visibility, bool_false,
 };
 use crate::{ContentType, Timestamp};
+use ario_client::RawItemId;
+use ario_client::location::Arl;
 use ario_core::blob::{Blob, OwnedBlob};
-use ario_core::tx::TxId;
 use ario_core::wallet::WalletAddress;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_with::base64::{Base64, UrlSafe};
+use serde_with::formats::Unpadded;
 use serde_with::{serde_as, skip_serializing_none};
 use uuid::Uuid;
 
@@ -21,9 +24,12 @@ impl Entity for FileKind {
     const TYPE: &'static str = "file";
     type Header = FileHeader;
     type Metadata = FileMetadata;
+    type Extra = FileExtra;
 }
 
 impl HasId for FileKind {
+    const NAME: &'static str = "File-Id";
+
     type Id = FileId;
 
     fn id(entity: &Model<Self>) -> &Self::Id
@@ -31,6 +37,12 @@ impl HasId for FileKind {
         Self: Entity + Sized,
     {
         &entity.header.inner.file_id
+    }
+}
+
+impl From<FileId> for ArfsEntityId {
+    fn from(value: FileId) -> Self {
+        Self::File(value)
     }
 }
 
@@ -112,8 +124,16 @@ impl FileEntity {
         &self.header.inner.parent_folder_id
     }
 
-    pub fn data(&self) -> &TxId {
+    pub(crate) fn raw_data(&self) -> &RawItemId {
         &self.metadata.inner.data_tx_id
+    }
+
+    pub fn data_location(&self) -> Option<&Arl> {
+        self.extra.data_location.as_ref()
+    }
+
+    pub(crate) fn set_data_location(&mut self, arl: Arl) {
+        self.extra.data_location = Some(arl);
     }
 
     pub fn data_content_type(&self) -> &ContentType {
@@ -125,52 +145,70 @@ impl FileEntity {
     }
 }
 
+impl From<FileEntity> for ArfsEntity {
+    fn from(value: FileEntity) -> Self {
+        Self::File(value)
+    }
+}
+
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FileHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Cipher")]
-    cipher: Option<Cipher>,
+    pub cipher: Option<Cipher>,
     #[serde(rename = "Cipher-IV")]
-    cipher_iv: Option<OwnedBlob>,
+    pub cipher_iv: Option<OwnedBlob>,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Content-Type")]
-    content_type: ContentType,
+    pub content_type: ContentType,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Drive-Id")]
-    drive_id: DriveId,
+    pub drive_id: DriveId,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "File-Id")]
-    file_id: FileId,
+    pub file_id: FileId,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Parent-Folder-Id")]
-    parent_folder_id: FolderId,
+    pub parent_folder_id: FolderId,
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
     #[serde(rename = "Unix-Time")]
-    time: DateTime<Utc>,
+    pub time: DateTime<Utc>,
 }
 
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FileMetadata {
-    name: String,
-    size: u64,
+    pub name: String,
+    pub size: u64,
     #[serde_as(as = "TimestampMilliSeconds")]
     #[serde(rename = "lastModifiedDate")]
-    last_modified: DateTime<Utc>,
-    #[serde_as(as = "DisplayFromStr")]
+    pub last_modified: DateTime<Utc>,
+    #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
     #[serde(rename = "dataTxId")]
-    data_tx_id: TxId,
+    pub data_tx_id: RawItemId,
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "dataContentType")]
-    content_type: ContentType,
+    pub content_type: ContentType,
     #[serde(rename = "isHidden", default = "bool_false")]
-    hidden: bool,
+    pub hidden: bool,
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(rename = "pinnedDataOwner")]
-    pinned_data_owner: Option<WalletAddress>,
+    pub pinned_data_owner: Option<WalletAddress>,
+}
+
+pub(crate) struct FileExtra {
+    data_location: Option<Arl>,
+}
+
+impl Default for FileExtra {
+    fn default() -> Self {
+        Self {
+            data_location: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -180,6 +218,7 @@ mod tests {
     use crate::types::folder::FolderId;
     use crate::types::{Header, Metadata};
     use crate::{ArFsVersion, ContentType};
+    use ario_client::location::Arl;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;
     use ario_core::tx::TxId;
@@ -187,7 +226,6 @@ mod tests {
     use ario_core::{BlockNumber, JsonValue};
     use chrono::DateTime;
     use std::str::FromStr;
-    use ario_client::location::Arl;
 
     #[test]
     fn file_entity_roundtrip() -> anyhow::Result<()> {
@@ -275,8 +313,8 @@ mod tests {
             &(DateTime::from_timestamp_millis(1755685342863).unwrap())
         );
         assert_eq!(
-            &file_entity.metadata.inner.data_tx_id,
-            &TxId::from_str("0AYIaLLvU794EoxFsJzAGZ5l_24JvdHfmECvQHgKqok")?
+            file_entity.metadata.inner.data_tx_id.as_slice(),
+            TxId::from_str("0AYIaLLvU794EoxFsJzAGZ5l_24JvdHfmECvQHgKqok")?.as_slice()
         );
         assert_eq!(
             &file_entity.metadata.inner.content_type,

@@ -5,7 +5,7 @@ use ario_core::tx::{TxId, TxIdError, TxKind};
 use ario_core::{AuthenticatedItem, ItemId};
 use derive_where::derive_where;
 use futures_lite::StreamExt;
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
@@ -58,16 +58,40 @@ impl Client {
         }
     }
 
+    pub async fn location_by_raw_item_id(&self, raw_id: &RawItemId) -> Result<Arl, super::Error> {
+        self._location_by_id(Either::Right(raw_id)).await
+    }
+
     pub async fn location_by_item_id(&self, item_id: &ItemId) -> Result<Arl, super::Error> {
-        let raw_id = item_id.as_raw_id();
+        self._location_by_id(Either::Left(item_id)).await
+    }
+
+    async fn _location_by_id(
+        &self,
+        item_id: Either<&ItemId, &RawItemId>,
+    ) -> Result<Arl, super::Error> {
+        let (raw_id, item_id) = match item_id {
+            Either::Left(item_id) => (item_id.as_raw_id(), Some(item_id)),
+            Either::Right(raw_id) => (raw_id, None),
+        };
 
         if let Some(cached) = self.0.cache.get_item_location_if_cached(raw_id).await? {
             return Ok(cached);
         }
 
+        let mut item_id = match item_id {
+            Some(item_id) => item_id.clone(),
+            None => {
+                // lookup raw id first
+                match self.lookup_item(raw_id.clone()).await? {
+                    TxQueryItem::Tx(tx) => ItemId::Tx(tx.id),
+                    TxQueryItem::BundleItem(bundle_item) => ItemId::BundleItem(bundle_item.id),
+                }
+            }
+        };
+
         let mut components = vec![];
         let mut root: Arl;
-        let mut item_id = item_id.clone();
 
         loop {
             match item_id {

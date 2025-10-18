@@ -15,7 +15,6 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::Arc;
 
 pub(super) type MetadataCache = InnerCache<MetaKey, MetaValue, Box<DynL2MetadataCache<'static>>>;
 

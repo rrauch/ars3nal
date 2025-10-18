@@ -256,6 +256,18 @@ impl From<BundledInId> for TxQueryId<'static> {
     }
 }
 
+impl<'a> From<&'a RawItemId> for TxQueryId<'a> {
+    fn from(value: &'a RawItemId) -> Self {
+        Self::Unknown(value.into())
+    }
+}
+
+impl From<RawItemId> for TxQueryId<'static> {
+    fn from(value: RawItemId) -> Self {
+        Self::Unknown(value.into())
+    }
+}
+
 impl<'a> Display for TxQueryId<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {

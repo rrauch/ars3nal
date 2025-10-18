@@ -1,7 +1,8 @@
 use crate::types::folder::FolderId;
 use crate::types::{
-    AuthMode, BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType, HasId, HasName,
-    HasTimestamp, MaybeHasCipher, Model, SignatureFormat, TaggedId, TimestampSeconds, ToFromStr,
+    ArfsEntity, ArfsEntityId, AuthMode, BytesToStr, Chain, Cipher, DisplayFromStr, Entity,
+    HasContentType, HasId, HasName, HasTimestamp, MaybeHasCipher, Model, SignatureFormat, TaggedId,
+    TimestampSeconds, ToFromStr,
 };
 use crate::{ContentType, Privacy, Timestamp};
 use ario_core::blob::{Blob, OwnedBlob};
@@ -18,9 +19,12 @@ impl Entity for DriveKind {
     const TYPE: &'static str = "drive";
     type Header = DriveHeader;
     type Metadata = DriveMetadata;
+    type Extra = ();
 }
 
 impl HasId for DriveKind {
+    const NAME: &'static str = "Drive-Id";
+
     type Id = DriveId;
 
     fn id(entity: &Model<Self>) -> &Self::Id
@@ -28,6 +32,12 @@ impl HasId for DriveKind {
         Self: Entity + Sized,
     {
         &entity.header.inner.drive_id
+    }
+}
+
+impl From<DriveId> for ArfsEntityId {
+    fn from(value: DriveId) -> Self {
+        Self::Drive(value)
     }
 }
 
@@ -85,6 +95,12 @@ impl DriveEntity {
 
     pub fn root_folder(&self) -> &FolderId {
         &self.metadata().inner.root_folder_id
+    }
+}
+
+impl From<DriveEntity> for ArfsEntity {
+    fn from(value: DriveEntity) -> Self {
+        Self::Drive(value)
     }
 }
 

@@ -29,8 +29,10 @@ use ario_core::confidential::{Confidential, NewSecretExt};
 use ario_core::tx::TxId;
 use ario_core::wallet::{Wallet, WalletAddress};
 
+use crate::types::file::FileId;
 use core::fmt;
 use derive_more::Display;
+use futures_lite::Stream;
 use serde_json::Error as JsonError;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::Deref;
@@ -84,6 +86,8 @@ pub enum EntityError {
         expected: FolderId,
         actual: FolderId,
     },
+    #[error("file mismatch, expected '{expected}' but found '{actual}'")]
+    FileMismatch { expected: FileId, actual: FileId },
     #[error("drive mismatch, expected '{expected}' but found '{actual}'")]
     DriveMismatch { expected: DriveId, actual: DriveId },
 }
@@ -207,7 +211,7 @@ impl ArFs {
     }
 
     #[inline]
-    pub fn sync_status(&self) -> SyncStatus {
+    pub fn sync_status(&self) -> impl Stream<Item = SyncStatus> + Send + Unpin {
         let syncer = match self.0.as_ref() {
             ErasedArFs::PublicRO(inner) => &inner.syncer,
             ErasedArFs::PublicRW(inner) => &inner.syncer,
@@ -641,6 +645,7 @@ mod tests {
     use ario_core::jwk::Jwk;
     use ario_core::network::Network;
     use ario_core::wallet::Wallet;
+    use chrono::Utc;
     use futures_lite::stream::StreamExt;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
@@ -716,26 +721,30 @@ mod tests {
                 .db_dir("/tmp/foo/")
                 .scope(Scope::public(drive_owner.clone()))
                 .sync_min_initial(Duration::from_millis(0))
+                .sync_interval(Duration::from_secs(10))
                 .build()
                 .await?;
 
             println!("{}", arfs);
 
-            let mut sync_status = None;
+            let mut started = false;
 
-            loop {
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                if sync_status.is_none() {
-                    sync_status = Some(arfs.sync_status());
-                } else {
-                    match arfs.sync_status() {
-                        SyncStatus::Syncing { .. } => continue,
-                        _ => break,
+            let mut status = arfs.sync_status();
+            while let Some(status) = status.next().await {
+                match status {
+                    SyncStatus::Syncing { .. } => {
+                        started = true;
+                    }
+                    SyncStatus::Dead => {
+                        break;
+                    }
+                    SyncStatus::Idle { .. } => {
+                        if started {
+                            break;
+                        }
                     }
                 }
             }
-
-            println!("{:?}", sync_status);
         }
         Ok(())
     }

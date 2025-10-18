@@ -81,3 +81,17 @@ impl Hashable for Tag<'_> {
         self.value.feed(hasher);
     }
 }
+
+pub trait TagsExt {
+    fn by_name<'a, N: AsRef<[u8]> + ?Sized>(&self, name: &N) -> Option<&Tag<'a>>
+    where
+        Self: AsRef<[Tag<'a>]>,
+    {
+        self.as_ref()
+            .iter()
+            .find(|t| t.name.as_ref().bytes() == name.as_ref())
+    }
+}
+
+impl TagsExt for Vec<Tag<'_>> {}
+impl TagsExt for [Tag<'_>] {}

@@ -1,6 +1,6 @@
 use crate::types::drive::{DriveEntity, DriveHeader, DriveId, DriveKind};
-use crate::types::folder::{FolderEntity, FolderId, FolderKind};
-use crate::types::{AuthMode, Entity, HasId, Header, Metadata, Model, ParseError};
+use crate::types::folder::{FolderEntity, FolderHeader, FolderId, FolderKind};
+use crate::types::{ArfsEntityId, AuthMode, Entity, HasId, Header, Metadata, Model, ParseError};
 use crate::{EntityError, Error, MetadataError, Privacy, Private};
 
 use ario_client::Client;
@@ -11,9 +11,11 @@ use ario_client::graphql::{
 use ario_client::location::Arl;
 use ario_client::tx::Status as TxStatus;
 use ario_core::JsonValue;
-use ario_core::tag::Tag;
+use ario_core::tag::{Tag, TagsExt};
 use ario_core::wallet::WalletAddress;
 
+use crate::types::file::{FileEntity, FileHeader, FileId, FileKind};
+use crate::types::snapshot::{SnapshotHeader, SnapshotId, SnapshotKind};
 use futures_lite::{AsyncReadExt, Stream, StreamExt};
 use std::fmt::Display;
 use std::num::NonZeroUsize;
@@ -45,10 +47,78 @@ pub fn find_drive_ids_by_owner<'a>(
         })
 }
 
+fn to_id(item: &TxQueryItem) -> Result<Option<ArfsEntityId>, Error> {
+    match item
+        .tags()
+        .by_name("Entity-Type")
+        .map(|t| t.value.as_str())
+        .flatten()
+    {
+        None => Ok(None),
+        Some(<DriveKind as Entity>::TYPE) => Ok(Some(to_drive_id(item)?.into())),
+        Some(<FolderKind as Entity>::TYPE) => Ok(Some(to_folder_id(item)?.into())),
+        Some(<FileKind as Entity>::TYPE) => Ok(Some(to_file_id(item)?.into())),
+        Some(<SnapshotKind as Entity>::TYPE) => Ok(Some(to_snapshot_id(item)?.into())),
+        _ => Ok(None),
+    }
+}
+
 fn to_drive_id(item: &TxQueryItem) -> Result<DriveId, Error> {
-    let drive_header =
+    let header =
         Header::<DriveHeader, DriveKind>::try_from(item.tags()).map_err(EntityError::ParseError)?;
-    Ok(drive_header.into_inner().drive_id)
+    Ok(header.into_inner().drive_id)
+}
+
+fn to_folder_id(item: &TxQueryItem) -> Result<FolderId, Error> {
+    let header = Header::<FolderHeader, FolderKind>::try_from(item.tags())
+        .map_err(EntityError::ParseError)?;
+    Ok(header.into_inner().folder_id)
+}
+
+fn to_file_id(item: &TxQueryItem) -> Result<FileId, Error> {
+    let header =
+        Header::<FileHeader, FileKind>::try_from(item.tags()).map_err(EntityError::ParseError)?;
+    Ok(header.into_inner().file_id)
+}
+
+fn to_snapshot_id(item: &TxQueryItem) -> Result<SnapshotId, Error> {
+    let header = Header::<SnapshotHeader, SnapshotKind>::try_from(item.tags())
+        .map_err(EntityError::ParseError)?;
+    Ok(header.into_inner().snapshot_id)
+}
+
+pub fn find_entity_ids_by_parent_folder<'a>(
+    client: &'a Client,
+    drive_id: &DriveId,
+    owner: &'a WalletAddress,
+    private: Option<&'a Private>,
+    parent_folder: &FolderId,
+) -> impl Stream<Item = Result<ArfsEntityId, Error>> + Unpin + 'a {
+    client
+        .query_transactions_with_fields::<TagsOnly>(
+            TxQuery::builder()
+                .filter_criteria(
+                    TxQueryFilterCriteria::builder()
+                        .owners([owner])
+                        .tags([
+                            TagFilter::builder()
+                                .name("Drive-Id")
+                                .values([drive_id.to_string()])
+                                .build(),
+                            TagFilter::builder()
+                                .name("Parent-Folder-Id")
+                                .values([parent_folder.to_string()])
+                                .build(),
+                        ])
+                        .build(),
+                )
+                .sort_order(SortOrder::HeightDescending)
+                .build(),
+        )
+        .filter_map(|r| match r {
+            Ok(item) => to_id(&item).transpose(),
+            Err(e) => Some(Err(e.into())),
+        })
 }
 
 pub async fn find_drive_by_id_owner(
@@ -123,7 +193,7 @@ where
                                 .values([E::TYPE])
                                 .build(),
                             TagFilter::builder()
-                                .name("Folder-Id")
+                                .name(E::NAME)
                                 .values([id.to_string()])
                                 .build(),
                             TagFilter::builder()
@@ -172,6 +242,37 @@ pub async fn folder_entity(
         })?;
     }
     Ok(folder_entity)
+}
+
+pub async fn file_entity(
+    file_id: &FileId,
+    client: &Client,
+    location: &Arl,
+    drive_id: &DriveId,
+    owner: &WalletAddress,
+    private: Option<&Private>,
+) -> Result<FileEntity, Error> {
+    let mut file_entity =
+        read_entity::<FileKind, 1024>(client, location, drive_id, owner, private).await?;
+    if file_entity.id() != file_id {
+        Err(EntityError::FileMismatch {
+            expected: file_id.clone(),
+            actual: file_entity.id().clone(),
+        })?;
+    }
+    if file_entity.drive_id() != drive_id {
+        Err(EntityError::DriveMismatch {
+            expected: drive_id.clone(),
+            actual: file_entity.drive_id().clone(),
+        })?;
+    }
+
+    let data_location = client
+        .location_by_raw_item_id(file_entity.raw_data())
+        .await?;
+    file_entity.set_data_location(data_location);
+
+    Ok(file_entity)
 }
 
 async fn read_entity<E: Entity, const MAX_METADATA_LEN: usize>(

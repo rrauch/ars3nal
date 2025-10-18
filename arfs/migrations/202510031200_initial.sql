@@ -6,7 +6,7 @@ CREATE TABLE entity
     -- DR: Drive, DS: DriveSignature, FI: File, FO: Folder, SN: Snapshot
     entity_type   TEXT                NOT NULL CHECK (entity_type IN ('DR', 'DS', 'FI', 'FO', 'SN')),
 
-    location      TEXT                NOT NULL CHECK (location LIKE 'ar://%' AND LENGTH(location) >= 53),
+    location      TEXT                NOT NULL CHECK (location LIKE 'ar://%' AND LENGTH(location) >= 47),
     block         INTEGER             NOT NULL CHECK (block > 0 AND block < 1000000000),
 
     entity_id     BLOB CHECK (entity_id IS NULL OR (TYPEOF(entity_id) == 'blob' AND
@@ -15,7 +15,7 @@ CREATE TABLE entity
     header        BLOB                NOT NULL CHECK (json_valid(header, 8)),
     metadata      BLOB CHECK (metadata IS NULL OR json_valid(metadata, 8)),
 
-    data_location TEXT CHECK (data_location IS NULL OR (data_location LIKE 'ar://%' AND LENGTH(data_location) >= 53)),
+    data_location TEXT CHECK (data_location IS NULL OR (data_location LIKE 'ar://%' AND LENGTH(data_location) >= 47)),
 
     UNIQUE (entity_type, entity_id),
 
@@ -352,20 +352,18 @@ END;
 -- Sync
 CREATE TABLE sync_log
 (
-    start_time    TIMESTAMP NOT NULL PRIMARY KEY CHECK (start_time >= 1577836800 AND start_time < 4733510400), -- 2020-01-01 to 2120-01-01 UTC,
-    duration_ms   INTEGER   NOT NULL CHECK (duration_ms >= 0 AND duration_ms < 2592000000),
-    result        TEXT      NOT NULL CHECK (result IN ('S', 'E')),                                             -- Success or Error
-    insertions    INTEGER CHECK (insertions IS NULL OR insertions >= 0),
-    deletions     INTEGER CHECK (deletions IS NULL OR deletions >= 0),
-    modifications INTEGER CHECK (modifications IS NULL OR modifications >= 0),
-    block_height  INTEGER   NOT NULL CHECK (block_height IS NULL OR (block_height > 0 and block_height < 1000000000)),
-    error         TEXT CHECK (error IS NULL OR LENGTH(error) <= 255),
+    start_time   TIMESTAMP NOT NULL PRIMARY KEY CHECK (start_time >= 1577836800 AND start_time < 4733510400), -- 2020-01-01 to 2120-01-01 UTC,
+    duration_ms  INTEGER   NOT NULL CHECK (duration_ms >= 0 AND duration_ms < 2592000000),
+    result       TEXT      NOT NULL CHECK (result IN ('S', 'E')),                                             -- Success or Error
+    insertions   INTEGER CHECK (insertions IS NULL OR insertions >= 0),
+    deletions    INTEGER CHECK (deletions IS NULL OR deletions >= 0),
+    block_height INTEGER CHECK (block_height IS NULL OR (block_height > 0 and block_height < 1000000000)),
+    error        TEXT CHECK (error IS NULL OR LENGTH(error) <= 255),
 
     -- === Success constraints ===
     CHECK (result != 'S' OR (
         insertions IS NOT NULL AND
         deletions IS NOT NULL AND
-        modifications IS NOT NULL AND
         block_height IS NOT NULL AND
         error IS NULL
         )),
@@ -374,8 +372,6 @@ CREATE TABLE sync_log
     CHECK (result != 'E' OR (
         insertions IS NULL AND
         deletions IS NULL AND
-        modifications IS NULL AND
-        block_height IS NULL AND
         error IS NOT NULL
         ))
 );

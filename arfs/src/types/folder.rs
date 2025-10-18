@@ -1,8 +1,8 @@
 use crate::types::drive::DriveId;
 use crate::types::{
-    BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType, HasDriveId, HasId, HasName,
-    HasTimestamp, HasVisibility, MaybeHasCipher, Model, TaggedId, TimestampSeconds, ToFromStr,
-    Visibility, bool_false,
+    ArfsEntity, ArfsEntityId, BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType,
+    HasDriveId, HasId, HasName, HasTimestamp, HasVisibility, MaybeHasCipher, Model, TaggedId,
+    TimestampSeconds, ToFromStr, Visibility, bool_false,
 };
 use crate::{ContentType, Timestamp};
 use ario_core::blob::{Blob, OwnedBlob};
@@ -18,9 +18,11 @@ impl Entity for FolderKind {
     const TYPE: &'static str = "folder";
     type Header = FolderHeader;
     type Metadata = FolderMetadata;
+    type Extra = ();
 }
 
 impl HasId for FolderKind {
+    const NAME: &'static str = "Folder-Id";
     type Id = FolderId;
 
     fn id(entity: &Model<Self>) -> &Self::Id
@@ -28,6 +30,12 @@ impl HasId for FolderKind {
         Self: Entity + Sized,
     {
         &entity.header.inner.folder_id
+    }
+}
+
+impl From<FolderId> for ArfsEntityId {
+    fn from(value: FolderId) -> Self {
+        Self::Folder(value)
     }
 }
 
@@ -102,38 +110,44 @@ impl FolderEntity {
     }
 }
 
+impl From<FolderEntity> for ArfsEntity {
+    fn from(value: FolderEntity) -> Self {
+        Self::Folder(value)
+    }
+}
+
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FolderHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Cipher")]
-    cipher: Option<Cipher>,
+    pub cipher: Option<Cipher>,
     #[serde(rename = "Cipher-IV")]
-    cipher_iv: Option<OwnedBlob>,
+    pub cipher_iv: Option<OwnedBlob>,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Content-Type")]
-    content_type: ContentType,
+    pub content_type: ContentType,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Drive-Id")]
-    drive_id: DriveId,
+    pub drive_id: DriveId,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "Folder-Id")]
-    folder_id: FolderId,
+    pub folder_id: FolderId,
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(rename = "Parent-Folder-Id")]
-    parent_folder_id: Option<FolderId>,
+    pub parent_folder_id: Option<FolderId>,
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
     #[serde(rename = "Unix-Time")]
-    time: DateTime<Utc>,
+    pub time: DateTime<Utc>,
 }
 
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FolderMetadata {
-    name: String,
+    pub name: String,
     #[serde(rename = "isHidden", default = "bool_false")]
-    hidden: bool,
+    pub hidden: bool,
 }
 
 #[cfg(test)]
@@ -142,12 +156,12 @@ mod tests {
     use crate::types::folder::{FolderEntity, FolderHeader, FolderId, FolderKind, FolderMetadata};
     use crate::types::{Header, Metadata};
     use crate::{ArFsVersion, ContentType};
+    use ario_client::location::Arl;
     use ario_core::blob::Blob;
     use ario_core::tag::Tag;
     use ario_core::{BlockNumber, JsonValue};
     use chrono::DateTime;
     use std::str::FromStr;
-    use ario_client::location::Arl;
 
     #[test]
     fn folder_entity_roundtrip() -> anyhow::Result<()> {
