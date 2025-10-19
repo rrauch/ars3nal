@@ -139,6 +139,7 @@ CREATE TABLE vfs
 (
     id            INTEGER PRIMARY KEY AUTOINCREMENT       NOT NULL CHECK (id >= 1000 OR id == 2),
     inode_type    TEXT CHECK (inode_type IN ('FO', 'FI')) NOT NULL,
+    entity        INTEGER                                 NOT NULL,
     name          TEXT                                    NOT NULL CHECK (LENGTH(name) > 0
         AND LENGTH(name) <= 255
         AND LENGTH(TRIM(name)) = LENGTH(name)
@@ -147,10 +148,12 @@ CREATE TABLE vfs
     last_modified TIMESTAMP                               NOT NULL,
     parent        INTEGER CHECK (parent IS NULL OR parent >= 1),
     path          TEXT                                    NOT NULL DEFAULT '__INVALID__',
+    FOREIGN KEY (entity) REFERENCES entity (id) ON DELETE CASCADE,
     FOREIGN KEY (parent) REFERENCES vfs (id) ON DELETE CASCADE,
     UNIQUE (parent, name)
 );
 
+CREATE INDEX idx_vfs_entity ON vfs (entity);
 CREATE INDEX idx_vfs_parent ON vfs (parent);
 
 -- Ensure the vfs id sequence starts at 1000
@@ -183,6 +186,32 @@ BEGIN
                   WHERE parent IS NULL
                     AND name = NEW.name
                     AND id != NEW.id);
+END;
+
+-- Ensure VFS inode type matches entity type on INSERT
+CREATE TRIGGER vfs_validate_entity_type_on_insert
+    BEFORE INSERT
+    ON vfs
+    FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'VFS inode_type must match entity type')
+    WHERE NOT EXISTS (SELECT 1
+                      FROM entity
+                      WHERE id = NEW.entity
+                        AND entity_type = NEW.inode_type);
+END;
+
+-- Ensure VFS inode type matches entity type on UPDATE
+CREATE TRIGGER vfs_validate_entity_type_on_update
+    BEFORE UPDATE OF entity, inode_type
+    ON vfs
+    FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'VFS inode_type must match entity type')
+    WHERE NOT EXISTS (SELECT 1
+                      FROM entity
+                      WHERE id = NEW.entity
+                        AND entity_type = NEW.inode_type);
 END;
 
 -- Prevent changing the inode_type of inodes

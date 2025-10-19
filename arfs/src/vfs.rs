@@ -10,6 +10,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use typed_path::{Utf8UnixEncoding, Utf8UnixPath, Utf8UnixPathBuf};
 use uuid::Uuid;
+use ario_client::location::Arl;
 
 const ROOT_INODE_ID: InodeId = InodeId(2);
 const MIN_INODE_ID: u64 = 1000;
@@ -195,7 +196,7 @@ struct FileData {
     size: u64,
     last_modified: Timestamp,
     content_type: ContentType,
-    data_item_id: ItemId,
+    data_location: Arl,
 }
 
 pub type Directory = VfsNode<DirData>;

@@ -5,7 +5,8 @@ use crate::types::drive_signature::{DriveSignatureEntity, DriveSignatureKind};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::snapshot::{SnapshotEntity, SnapshotKind};
-use crate::types::{ArfsEntityId, Entity, HasId, Header, Metadata, Model, ParseError};
+use crate::types::{ArfsEntityId, Entity, HasId, HasName, Header, Metadata, Model, ParseError};
+use crate::vfs::InodeId;
 use crate::{Privacy, Scope, resolve};
 use ario_client::Client;
 use ario_client::location::Arl;
@@ -18,11 +19,11 @@ use chrono::DateTime;
 use futures_lite::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_sqlite_jsonb::Error as JsonbError;
-use sqlx::Transaction as SqlxTransaction;
 use sqlx::migrate::MigrateError;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{ConnectOptions, Error as SqlxError, Pool, Sqlite, SqliteConnection};
+use sqlx::{Transaction as SqlxTransaction, query};
 use std::borrow::Cow;
 use std::fmt::Display;
 use std::ops::Deref;
@@ -286,18 +287,44 @@ where
         obsolete: &Vec<ArfsEntityId>,
         new_files: &Vec<FileEntity>,
         new_folders: &Vec<FolderEntity>,
-    ) -> Result<(usize, usize), Error> {
+    ) -> Result<(usize, usize, Vec<InodeId>), Error> {
         clear_temp_tables(self).await?;
+        let config = self.config().await?;
+        let root_folder_id =
+            get_id_for_entity_id::<FolderKind, _>(config.drive.root_folder(), self).await?;
+
         let mut ids = vec![];
         let deletions = self.delete_entities(obsolete.iter()).await?;
         for folder in new_folders {
-            ids.push(insert_entity(folder, self).await?);
+            let folder_id = insert_entity(folder, self).await?;
+            let parent_entity_id = if let Some(parent_folder) = folder.parent_folder() {
+                Some(get_id_for_entity_id::<FolderKind, _>(&parent_folder, self).await?)
+            } else {
+                None
+            }
+            .map(|id| if id == root_folder_id { None } else { Some(id) })
+            .flatten();
+            let (inode_id, path) = insert_inode(folder, folder_id, parent_entity_id, self).await?;
+            ids.push(folder_id);
         }
         for file in new_files {
-            ids.push(insert_entity(file, self).await?);
+            let file_id = insert_entity(file, self).await?;
+            let parent_entity_id =
+                Some(get_id_for_entity_id::<FolderKind, _>(file.parent_folder(), self).await?)
+                    .map(|id| if id == root_folder_id { None } else { Some(id) })
+                    .flatten();
+            let (inode_id, path) = insert_inode(file, file_id, parent_entity_id, self).await?;
+            ids.push(file_id);
         }
 
-        Ok((ids.len(), deletions))
+        let affected_inode_ids = collect_affected_inode_ids(self)
+            .await?
+            .map(|id| {
+                InodeId::try_from(id).map_err(|e| DataError::ConversionError(e.to_string()).into())
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        clear_temp_tables(self).await?;
+        Ok((ids.len(), deletions, affected_inode_ids))
     }
 
     async fn delete_entities(
@@ -451,8 +478,8 @@ async fn get_latest_sync_log_entry<C: Read>(conn: &mut C) -> Result<Option<SyncL
          DESC
          LIMIT 1"
     )
-    .fetch_optional(conn.conn())
-    .await?
+        .fetch_optional(conn.conn())
+        .await?
     {
         Some(row) => row,
         None => return Ok(None),
@@ -570,6 +597,54 @@ struct ConfigRow {
     network_id: String,
 }
 
+struct VfsRow<'a> {
+    id: i64,
+    inode_type: Cow<'a, str>,
+    entity: i64,
+    name: Cow<'a, str>,
+    size: i64,
+    last_modified: i64,
+    parent: Option<i64>,
+    path: Option<Cow<'a, str>>,
+}
+
+impl<'a> From<(&'a FolderEntity, i64, Option<i64>)> for VfsRow<'a> {
+    fn from((entity, entity_id, parent_id): (&'a FolderEntity, i64, Option<i64>)) -> Self {
+        let last_modified = entity.timestamp().timestamp();
+        to_vfs_row(entity, entity_id, 0, last_modified, parent_id)
+    }
+}
+
+impl<'a> From<(&'a FileEntity, i64, Option<i64>)> for VfsRow<'a> {
+    fn from((entity, entity_id, parent_id): (&'a FileEntity, i64, Option<i64>)) -> Self {
+        let last_modified = entity.timestamp().timestamp();
+        let size = entity.size();
+        to_vfs_row(entity, entity_id, size as i64, last_modified, parent_id)
+    }
+}
+
+fn to_vfs_row<E: DbEntity>(
+    entity: &Model<E>,
+    entity_id: i64,
+    size: i64,
+    last_modified: i64,
+    parent: Option<i64>,
+) -> VfsRow<'_>
+where
+    E: HasName,
+{
+    VfsRow {
+        id: 0,
+        inode_type: <E as DbEntity>::TYPE.into(),
+        entity: entity_id,
+        name: entity.name().into(),
+        size,
+        last_modified,
+        parent,
+        path: None,
+    }
+}
+
 struct EntityRow<'a> {
     id: i64,
     entity_type: Cow<'a, str>,
@@ -612,6 +687,54 @@ async fn get_entity<E: DbEntity, C: Read>(id: i64, tx: &mut C) -> Result<Model<E
     })?;
 
     Ok(E::try_from_row(row)?)
+}
+
+async fn insert_inode<'a, E: DbEntity, C: Write>(
+    entity: &'a Model<E>,
+    entity_id: i64,
+    parent_entity_id: Option<i64>,
+    tx: &mut C,
+) -> Result<(u64, String), Error>
+where
+    VfsRow<'a>: From<(&'a Model<E>, i64, Option<i64>)>,
+{
+    let parent_id = if let Some(parent_entity_id) = parent_entity_id {
+        Some(
+            sqlx::query!("SELECT id FROM vfs where entity = ?", parent_entity_id)
+                .fetch_one(tx.conn())
+                .await?
+                .id,
+        )
+    } else {
+        None
+    };
+
+    let row = VfsRow::from((entity, entity_id, parent_id));
+    let inode_type = row.inode_type.deref();
+    let name = row.name.deref();
+
+    let id = sqlx::query!(
+        "
+        INSERT INTO vfs
+            (inode_type, entity, name, size, last_modified, parent) VALUES
+            (?, ?, ?, ?, ?, ?)
+        ",
+        inode_type,
+        row.entity,
+        name,
+        row.size,
+        row.last_modified,
+        row.parent,
+    )
+    .execute(tx.conn())
+    .await?
+    .last_insert_rowid();
+
+    let path = sqlx::query!("SELECT path FROM vfs WHERE id = ?", id)
+        .fetch_one(tx.conn())
+        .await?
+        .path;
+    Ok((id as u64, path))
 }
 
 async fn insert_entity<E: DbEntity, C: Write>(entity: &Model<E>, tx: &mut C) -> Result<i64, Error> {
@@ -675,6 +798,16 @@ async fn clear_temp_tables<C: Write>(tx: &mut C) -> Result<(), Error> {
         .execute(tx.conn())
         .await?;
     Ok(())
+}
+
+async fn collect_affected_inode_ids<C: Write>(
+    tx: &mut C,
+) -> Result<impl Iterator<Item = u64>, Error> {
+    Ok(sqlx::query!("SELECT DISTINCT(id) FROM vfs_affected_inodes")
+        .fetch_all(tx.as_mut())
+        .await?
+        .into_iter()
+        .map(|r| r.id as u64))
 }
 
 #[derive(Debug)]

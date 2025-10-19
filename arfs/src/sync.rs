@@ -417,7 +417,8 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         new_folders: Vec<FolderEntity>,
     ) -> Result<(usize, usize), crate::Error> {
         let mut tx = self.db.write().await?;
-        let (insertions, deletions) = tx.sync_update(&obsolete, &new_files, &new_folders).await?;
+        let (insertions, deletions, affected_inode_ids) =
+            tx.sync_update(&obsolete, &new_files, &new_folders).await?;
         tx.commit().await?;
         Ok((insertions, deletions))
     }
