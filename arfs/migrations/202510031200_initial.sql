@@ -339,16 +339,8 @@ CREATE TRIGGER vfs_update_inode_path_on_update_recursive
 BEGIN
     UPDATE vfs
     SET path = (SELECT CASE
-                           WHEN NEW.parent IS NULL THEN '/' ||
-                                                        CASE
-                                                            WHEN NEW.inode_type = 'FO' THEN NEW.name || '/'
-                                                            ELSE NEW.name
-                                                            END
-                           ELSE (SELECT path FROM vfs WHERE id = NEW.parent) ||
-                                CASE
-                                    WHEN NEW.inode_type = 'FO' THEN NEW.name || '/'
-                                    ELSE NEW.name
-                                    END
+                           WHEN NEW.parent IS NULL THEN '/' || NEW.name
+                           ELSE (SELECT path FROM vfs WHERE id = NEW.parent) || '/' || NEW.name
                            END)
     WHERE id = NEW.id;
 
