@@ -5,7 +5,9 @@ use crate::types::drive_signature::{DriveSignatureEntity, DriveSignatureKind};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::snapshot::{SnapshotEntity, SnapshotKind};
-use crate::types::{ArfsEntityId, Entity, HasId, HasName, Header, Metadata, Model, ParseError};
+use crate::types::{
+    ArfsEntityId, Entity, HasId, HasName, HasVisibility, Header, Metadata, Model, ParseError,
+};
 use crate::vfs::InodeId;
 use crate::{Privacy, Scope, resolve};
 use ario_client::Client;
@@ -604,6 +606,7 @@ struct VfsRow<'a> {
     name: Cow<'a, str>,
     size: i64,
     last_modified: i64,
+    visibility: Cow<'a, str>,
     parent: Option<i64>,
     path: Option<Cow<'a, str>>,
 }
@@ -632,6 +635,7 @@ fn to_vfs_row<E: DbEntity>(
 ) -> VfsRow<'_>
 where
     E: HasName,
+    E: HasVisibility,
 {
     VfsRow {
         id: 0,
@@ -640,6 +644,7 @@ where
         name: entity.name().into(),
         size,
         last_modified,
+        visibility: { if entity.is_hidden() { "H" } else { "V" } }.into(),
         parent,
         path: None,
     }
@@ -712,18 +717,20 @@ where
     let row = VfsRow::from((entity, entity_id, parent_id));
     let inode_type = row.inode_type.deref();
     let name = row.name.deref();
+    let visibility = row.visibility.deref();
 
     let id = sqlx::query!(
         "
         INSERT INTO vfs
-            (inode_type, entity, name, size, last_modified, parent) VALUES
-            (?, ?, ?, ?, ?, ?)
+            (inode_type, entity, name, size, last_modified, visibility, parent) VALUES
+            (?, ?, ?, ?, ?, ?, ?)
         ",
         inode_type,
         row.entity,
         name,
         row.size,
         row.last_modified,
+        visibility,
         row.parent,
     )
     .execute(tx.conn())

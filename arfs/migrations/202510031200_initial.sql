@@ -146,6 +146,7 @@ CREATE TABLE vfs
         AND name NOT LIKE '%/%'),
     size          INTEGER                                 NOT NULL CHECK (size >= 0),
     last_modified TIMESTAMP                               NOT NULL,
+    visibility    TEXT CHECK (visibility IN ('V', 'H'))   NOT NULL DEFAULT 'V',
     parent        INTEGER CHECK (parent IS NULL OR parent >= 1),
     path          TEXT                                    NOT NULL DEFAULT '__INVALID__',
     FOREIGN KEY (entity) REFERENCES entity (id) ON DELETE CASCADE,
