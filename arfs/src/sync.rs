@@ -3,7 +3,7 @@ use crate::types::drive::{DriveEntity, DriveId};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderId, FolderKind};
 use crate::types::{ArfsEntity, ArfsEntityId};
-use crate::{Private, Public, resolve};
+use crate::{Private, Public, Vfs, resolve};
 use ario_client::Client;
 use ario_core::BlockNumber;
 use ario_core::wallet::WalletAddress;
@@ -12,10 +12,12 @@ use chrono::{DateTime, Utc};
 use futures_lite::{Stream, StreamExt};
 use std::cmp::max;
 use std::collections::{HashSet, VecDeque};
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::watch;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -23,6 +25,12 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 pub enum Error {
     #[error("mode is unsupported: {0}")]
     UnsupportedMode(String),
+    #[error("syncer is dead or shutting down")]
+    SyncerDead,
+    #[error("syncer state is invalid")]
+    InvalidState,
+    #[error("syncer not starting")]
+    StartFailure,
 }
 
 #[derive(Clone, Debug)]
@@ -47,9 +55,8 @@ pub struct Success {
 
 #[derive(Debug)]
 pub struct Syncer {
-    client: Client,
-    db: Db,
     status_rx: watch::Receiver<Status>,
+    sync_trigger: mpsc::Sender<oneshot::Sender<()>>,
     task_handle: JoinHandle<Result<(), Error>>,
     task_ct: CancellationToken,
     _drop_guard: DropGuard,
@@ -59,6 +66,7 @@ impl Syncer {
     pub(crate) async fn new<PRIVACY: Send + Sync + 'static>(
         client: Client,
         db: Db,
+        vfs: Vfs,
         privacy: Arc<PRIVACY>,
         sync_interval: Duration,
         min_initial_wait: Duration,
@@ -83,22 +91,25 @@ impl Syncer {
             next_sync: next_sync.clone(),
         });
 
+        let (sync_trigger, sync_trigger_rx) = mpsc::channel(1);
+
         let task_ct = root_ct.child_token();
         let task = BackgroundTask::new(
-            client.clone(),
-            db.clone(),
+            client,
+            db,
+            vfs,
             privacy,
             task_ct.clone(),
             status_tx,
+            sync_trigger_rx,
             next_sync,
             sync_interval,
         );
         let task_handle = tokio::spawn(async move { task.run().await });
 
         Ok(Self {
-            client,
-            db,
             status_rx,
+            sync_trigger,
             task_handle,
             task_ct,
             _drop_guard: root_ct.drop_guard(),
@@ -130,6 +141,65 @@ impl Syncer {
             yield Status::Dead;
         })
     }
+
+    pub async fn sync_now(&self) -> Result<SyncResult, crate::Error> {
+        enum State {
+            Default,
+            ExpectSyncing,
+            Syncing,
+        }
+
+        if self.task_ct.is_cancelled() {
+            Err(Error::SyncerDead)?;
+        }
+
+        let mut status_rx = self.status_rx.clone();
+        let mut sync_state = State::Default;
+        let mut status = status_rx.borrow_and_update().clone();
+        loop {
+            match status {
+                Status::Dead => {
+                    return Err(Error::SyncerDead)?;
+                }
+                Status::Syncing { .. } => sync_state = State::Syncing,
+                Status::Idle { last_sync, .. } => {
+                    match sync_state {
+                        State::ExpectSyncing => {
+                            return Err(Error::StartFailure)?;
+                        }
+                        State::Syncing => {
+                            // completed
+                            return Ok(last_sync.ok_or_else(|| Error::InvalidState)?.result);
+                        }
+                        State::Default => {
+                            // initiate sync
+                            let (ack_tx, ack_rx) = oneshot::channel();
+                            match self.sync_trigger.try_send(ack_tx) {
+                                Ok(()) => {
+                                    // waiting for ack
+                                    if let Err(_) = ack_rx.await {
+                                        // syncer is gone
+                                        return Err(Error::SyncerDead)?;
+                                    }
+                                }
+                                Err(TrySendError::Closed(_)) => {
+                                    // syncer is gone
+                                    return Err(Error::SyncerDead)?;
+                                }
+                                Err(TrySendError::Full(_)) => {
+                                    // syncer already triggered
+                                }
+                            }
+                            sync_state = State::ExpectSyncing;
+                        }
+                    }
+                }
+            }
+
+            status_rx.changed().await.map_err(|_| Error::SyncerDead)?;
+            status = status_rx.borrow_and_update().clone();
+        }
+    }
 }
 
 impl Drop for Syncer {
@@ -157,9 +227,11 @@ trait SyncNow {
 struct BackgroundTask<PRIVACY> {
     client: Client,
     db: Db,
+    vfs: Vfs,
     privacy: Arc<PRIVACY>,
     ct: CancellationToken,
     status_tx: watch::Sender<Status>,
+    sync_trigger: mpsc::Receiver<oneshot::Sender<()>>,
     next_sync: DateTime<Utc>,
     sync_interval: Duration,
 }
@@ -168,18 +240,22 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
     fn new(
         client: Client,
         db: Db,
+        vfs: Vfs,
         privacy: Arc<PRIVACY>,
         ct: CancellationToken,
         status_tx: watch::Sender<Status>,
+        sync_trigger: mpsc::Receiver<oneshot::Sender<()>>,
         next_sync: DateTime<Utc>,
         sync_interval: Duration,
     ) -> Self {
         Self {
             client,
             db,
+            vfs,
             privacy,
             ct,
             status_tx,
+            sync_trigger,
             next_sync,
             sync_interval,
         }
@@ -201,6 +277,15 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
                 "sleeping until next sync"
             );
             tokio::select! {
+                ack = self.sync_trigger.recv() => {
+                    if let Some(mut ack) = ack {
+                        if let Ok(_) = ack.send(()) {
+                            // still active, starting sync now
+                            self.next_sync = Utc::now();
+                            continue;
+                        }
+                    }
+                }
                 _ = tokio::time::sleep(next_sync_in) => {
                     let start_time = Utc::now();
                     let _ = self.status_tx.send(Status::Syncing {
@@ -420,6 +505,11 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         let (insertions, deletions, affected_inode_ids) =
             tx.sync_update(&obsolete, &new_files, &new_folders).await?;
         tx.commit().await?;
+
+        if !affected_inode_ids.is_empty() {
+            self.vfs.invalidate_cache(affected_inode_ids).await;
+        }
+
         Ok((insertions, deletions))
     }
 

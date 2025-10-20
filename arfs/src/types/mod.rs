@@ -10,7 +10,7 @@ use crate::types::drive_signature::DriveSignatureEntity;
 use crate::types::file::{FileEntity, FileId};
 use crate::types::folder::{FolderEntity, FolderId};
 use crate::types::snapshot::{SnapshotEntity, SnapshotId};
-use crate::{Timestamp, serde_tag};
+use crate::{Timestamp, Visibility, serde_tag};
 use ario_client::location::Arl;
 use ario_core::base64::Base64Error;
 use ario_core::blob::{Blob, OwnedBlob};
@@ -105,7 +105,7 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Model<E: Entity> {
     header: Header<E::Header, E>,
     metadata: Metadata<E::Metadata, E>,
@@ -118,9 +118,9 @@ pub(crate) struct Model<E: Entity> {
 pub(crate) trait Entity {
     const TYPE: &'static str;
 
-    type Header;
-    type Metadata;
-    type Extra: Default;
+    type Header: Debug + Clone + PartialEq;
+    type Metadata: Debug + Clone + PartialEq;
+    type Extra: Default + Debug + Clone + PartialEq;
 }
 
 pub(crate) trait HasId {
@@ -142,11 +142,6 @@ pub(crate) trait HasContentType {
     fn content_type(entity: &Model<Self>) -> &ContentType
     where
         Self: Entity + Sized;
-}
-
-pub(crate) enum Visibility {
-    Visible,
-    Hidden,
 }
 
 pub(crate) trait HasVisibility {

@@ -154,10 +154,10 @@ impl Client {
             .get();
         let mut variables = TxQueryVariables::from(&tx_query);
 
+        let mut batch_result = VecDeque::with_capacity(per_page);
+        let mut cursor = None;
+        let mut eof = false;
         Box::pin(try_stream! {
-            let mut batch_result = VecDeque::with_capacity(per_page);
-            let mut cursor = None;
-            let mut eof = false;
             loop {
                 while let Some(entry) = batch_result.pop_front() {
                     yield entry;
@@ -527,7 +527,7 @@ struct GraphQlTxQuery<T: QueryFragment<VariablesFields = ()> + Debug>
 where
     <T as QueryFragment>::SchemaType: IsFieldType<schema::Transaction>,
 {
-    #[arguments(ids: $ids, owners: $owners, recipients: $recipients, tags: $tags, bundledIn: $bundled_in, block: $block_range, first: $first, sort: $sort_order
+    #[arguments(ids: $ids, owners: $owners, recipients: $recipients, tags: $tags, bundledIn: $bundled_in, block: $block_range, first: $first, sort: $sort_order, after: $after
     )]
     transactions: Option<TransactionConnection<T>>,
 }

@@ -17,6 +17,7 @@ use serde_with::formats::Unpadded;
 use serde_with::{serde_as, skip_serializing_none};
 use uuid::Uuid;
 
+#[derive(Debug, PartialEq, Clone)]
 pub struct FileKind;
 pub type FileId = TaggedId<Uuid, FileKind>;
 
@@ -199,6 +200,7 @@ pub(crate) struct FileMetadata {
     pub pinned_data_owner: Option<WalletAddress>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FileExtra {
     data_location: Option<Arl>,
 }

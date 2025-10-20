@@ -11,12 +11,12 @@ pub use ario_core::bundle::Owner as BundleOwner;
 pub use ario_core::tx::Owner as TxOwner;
 pub use sync::Status as SyncStatus;
 pub use types::{ArFsVersion, ContentType, Privacy};
-pub use vfs::{Directory, File, Inode, Timestamp, Vfs};
+pub use vfs::{Directory, File, Inode, Name, Timestamp, Vfs, VfsPath};
 
 use crate::db::Config as DriveConfig;
 use crate::db::Db;
 use crate::db::Error as DbError;
-use crate::sync::Syncer;
+use crate::sync::{SyncResult, Syncer};
 use crate::types::AuthMode;
 use crate::types::drive::DriveId;
 use crate::types::folder::FolderId;
@@ -139,8 +139,10 @@ impl ArFs {
             sync_min_initial,
         };
 
+        let vfs = Vfs::new(client.clone(), db.clone()).await?;
+
         Ok(Self(Arc::new(
-            ErasedArFs::new(client, db, sync_settings, drive_config, scope).await?,
+            ErasedArFs::new(client, db, vfs, sync_settings, drive_config, scope).await?,
         )))
     }
 
@@ -212,14 +214,32 @@ impl ArFs {
 
     #[inline]
     pub fn sync_status(&self) -> impl Stream<Item = SyncStatus> + Send + Unpin {
-        let syncer = match self.0.as_ref() {
+        self.syncer().status()
+    }
+
+    #[inline]
+    fn syncer(&self) -> &Syncer {
+        match self.0.as_ref() {
             ErasedArFs::PublicRO(inner) => &inner.syncer,
             ErasedArFs::PublicRW(inner) => &inner.syncer,
             ErasedArFs::PrivateRO(inner) => &inner.syncer,
             ErasedArFs::PrivateRW(inner) => &inner.syncer,
-        };
+        }
+    }
 
-        syncer.status()
+    #[inline]
+    pub async fn sync_now(&self) -> Result<SyncResult, Error> {
+        self.syncer().sync_now().await
+    }
+
+    #[inline]
+    pub fn vfs(&self) -> &Vfs {
+        match self.0.as_ref() {
+            ErasedArFs::PublicRO(inner) => &inner.vfs,
+            ErasedArFs::PublicRW(inner) => &inner.vfs,
+            ErasedArFs::PrivateRO(inner) => &inner.vfs,
+            ErasedArFs::PrivateRW(inner) => &inner.vfs,
+        }
     }
 }
 
@@ -227,6 +247,12 @@ impl ArFs {
 pub enum AccessMode {
     ReadOnly,
     ReadWrite,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, strum::Display)]
+pub enum Visibility {
+    Visible,
+    Hidden,
 }
 
 #[derive(Debug)]
@@ -315,6 +341,7 @@ impl ErasedArFs {
     async fn new(
         client: Client,
         db: Db,
+        vfs: Vfs,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
         scope: Scope,
@@ -322,21 +349,21 @@ impl ErasedArFs {
         Ok(match scope {
             Scope::Public(public) => match public {
                 Access::ReadOnly(owner) => Self::PublicRO(
-                    ArFsInner::new_public_ro(client, db, sync_settings, drive_config, owner)
+                    ArFsInner::new_public_ro(client, db, vfs, sync_settings, drive_config, owner)
                         .await?,
                 ),
                 Access::ReadWrite(wallet) => Self::PublicRW(
-                    ArFsInner::new_public_rw(client, db, sync_settings, drive_config, wallet)
+                    ArFsInner::new_public_rw(client, db, vfs, sync_settings, drive_config, wallet)
                         .await?,
                 ),
             },
             Scope::Private(private) => match private {
                 Access::ReadOnly(creds) => Self::PrivateRO(
-                    ArFsInner::new_private_ro(client, db, sync_settings, drive_config, creds)
+                    ArFsInner::new_private_ro(client, db, vfs, sync_settings, drive_config, creds)
                         .await?,
                 ),
                 Access::ReadWrite(creds) => Self::PrivateRW(
-                    ArFsInner::new_private_rw(client, db, sync_settings, drive_config, creds)
+                    ArFsInner::new_private_rw(client, db, vfs, sync_settings, drive_config, creds)
                         .await?,
                 ),
             },
@@ -348,6 +375,7 @@ impl ArFsInner<Public, ReadOnly> {
     async fn new_public_ro(
         client: Client,
         db: Db,
+        vfs: Vfs,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
         owner: WalletAddress,
@@ -356,6 +384,7 @@ impl ArFsInner<Public, ReadOnly> {
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
+            vfs.clone(),
             privacy.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
@@ -364,6 +393,7 @@ impl ArFsInner<Public, ReadOnly> {
         Ok(ArFsInner {
             client,
             db,
+            vfs,
             syncer,
             drive_config,
             privacy,
@@ -376,6 +406,7 @@ impl ArFsInner<Public, ReadWrite<Wallet>> {
     async fn new_public_rw(
         client: Client,
         db: Db,
+        vfs: Vfs,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
         wallet: Wallet,
@@ -386,6 +417,7 @@ impl ArFsInner<Public, ReadWrite<Wallet>> {
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
+            vfs.clone(),
             privacy.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
@@ -394,6 +426,7 @@ impl ArFsInner<Public, ReadWrite<Wallet>> {
         Ok(ArFsInner {
             client,
             db,
+            vfs,
             syncer,
             drive_config,
             privacy,
@@ -406,6 +439,7 @@ impl ArFsInner<Private, ReadOnly> {
     async fn new_private_ro(
         client: Client,
         db: Db,
+        vfs: Vfs,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
         credentials: Credentials,
@@ -414,6 +448,7 @@ impl ArFsInner<Private, ReadOnly> {
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
+            vfs.clone(),
             privacy.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
@@ -422,6 +457,7 @@ impl ArFsInner<Private, ReadOnly> {
         Ok(ArFsInner {
             client,
             db,
+            vfs,
             syncer,
             drive_config,
             privacy,
@@ -434,6 +470,7 @@ impl ArFsInner<Private, ReadWrite> {
     async fn new_private_rw(
         client: Client,
         db: Db,
+        vfs: Vfs,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
         credentials: Credentials,
@@ -442,6 +479,7 @@ impl ArFsInner<Private, ReadWrite> {
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
+            vfs.clone(),
             privacy.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
@@ -450,6 +488,7 @@ impl ArFsInner<Private, ReadWrite> {
         Ok(ArFsInner {
             client,
             db,
+            vfs,
             syncer,
             drive_config,
             privacy,
@@ -511,6 +550,7 @@ struct ReadOnly;
 struct ArFsInner<PRIVACY, MODE> {
     client: Client,
     db: Db,
+    vfs: Vfs,
     syncer: Syncer,
     drive_config: DriveConfig,
     privacy: Arc<PRIVACY>,
@@ -639,14 +679,16 @@ impl Display for ArFsInner<Private, ReadWrite> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ArFs, Credentials, Scope, SyncStatus, resolve};
+    use crate::types::drive::DriveId;
+    use crate::{ArFs, Credentials, Inode, Scope, SyncStatus, VfsPath, resolve};
     use ario_client::Client;
     use ario_core::Gateway;
     use ario_core::jwk::Jwk;
     use ario_core::network::Network;
-    use ario_core::wallet::Wallet;
-    use chrono::Utc;
+    use ario_core::wallet::{Wallet, WalletAddress};
+    use futures_lite::AsyncReadExt;
     use futures_lite::stream::StreamExt;
+    use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use std::time::Duration;
@@ -745,6 +787,86 @@ mod tests {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn list_public_drive() -> anyhow::Result<()> {
+        dotenv::dotenv().ok();
+        init_tracing();
+
+        let client = Client::builder()
+            .gateways([Gateway::default()])
+            .enable_netwatch(false)
+            .build()
+            .await?;
+
+        //let drive_owner = WalletAddress::from_str("hT7N1hMVlm168EmTFJR2mr4Qula9rkUZ_6S4JnSLQOc")?;
+        //let drive_id = DriveId::from_str("1145e1c7-23a3-4ec3-9f8c-570b1e9a1bc7")?;
+
+        //let drive_owner = WalletAddress::from_str("nP93US2zQ9M8woZM3dptHm-IQYIJLZhvoS3xL7sqUdk")?;
+        //let drive_id = DriveId::from_str("094436c7-9d73-4942-97f2-467477d62a81")?;
+
+        //let drive_owner = WalletAddress::from_str("m6eeNI_nADsDdGnpJmy3acX_VurlU_nMLTi05789cl0")?;
+        //let drive_id = DriveId::from_str("680630e3-64b0-4c11-8150-d7929619db48")?;
+
+        //let drive_owner = WalletAddress::from_str("2v22SB6hwA_QuXDlXyYRr9nkhwxop1iPXT_ViGLwOwA")?;
+        //let drive_id = DriveId::from_str("2e7952b2-6246-41dc-9ee9-fcc138723001")?;
+
+        let drive_owner = WalletAddress::from_str("HGoC7PVku6TzOh0SsITsWMJW8iUcOcdGmPaKm3IhvJQ")?;
+        let drive_id = DriveId::from_str("d669b973-d9d2-430d-b2cc-96072054dc1a")?;
+
+        let arfs = ArFs::builder()
+            .client(client.clone())
+            .drive_id(drive_id)
+            .db_dir("/tmp/foo/")
+            .scope(Scope::public(drive_owner.clone()))
+            .build()
+            .await?;
+
+        //arfs.sync_now().await?;
+
+        let vfs = arfs.vfs();
+        let root = vfs.root();
+
+        let mut dirs = VecDeque::new();
+        dirs.push_back((Inode::Root(root), 0));
+
+        while let Some((dir, depth)) = dirs.pop_front() {
+            println!(
+                "{indent} {path}",
+                indent = " ".repeat(depth),
+                path = dir.path()
+            );
+            let mut stream = vfs.list(&dir).await?;
+            while let Some(inode) = stream.try_next().await? {
+                match inode {
+                    Inode::Directory(dir) => {
+                        dirs.push_back((Inode::Directory(dir), depth + 1));
+                    }
+                    Inode::File(file) => {
+                        println!(
+                            "{indent} {name}:{size}",
+                            indent = " ".repeat(depth),
+                            name = file.name(),
+                            size = file.size(),
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        let path = VfsPath::try_from("/1studiooffice166a/Screenshot_2025-09-15_15-45-56.jpg")?;
+        if let Some(Inode::File(file)) = vfs.inode_by_path(&path).await? {
+            let mut reader = vfs.read_file(&file).await?;
+            let mut buf = vec![];
+            reader.read_to_end(&mut buf).await?;
+            assert_eq!(buf.len(), file.size().as_u64() as usize);
+        } else {
+            panic!("expected file to exist")
         }
         Ok(())
     }

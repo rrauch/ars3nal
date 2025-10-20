@@ -8,16 +8,16 @@ use crate::types::snapshot::{SnapshotEntity, SnapshotKind};
 use crate::types::{
     ArfsEntityId, Entity, HasId, HasName, HasVisibility, Header, Metadata, Model, ParseError,
 };
-use crate::vfs::InodeId;
-use crate::{Privacy, Scope, resolve};
-use ario_client::Client;
+use crate::vfs::{Directory as VfsDirectory, File as VfsFile, InodeId, Name as VfsName, Stats};
+use crate::{Inode, Privacy, Scope, Timestamp, VfsPath, Visibility, resolve};
 use ario_client::location::Arl;
+use ario_client::{ByteSize, Client};
 use ario_core::BlockNumber;
 use ario_core::blob::OwnedBlob;
 use ario_core::network::NetworkIdentifier;
 use ario_core::tag::Tag;
 use ario_core::wallet::WalletAddress;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use futures_lite::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_sqlite_jsonb::Error as JsonbError;
@@ -91,6 +91,8 @@ pub enum DataError {
     },
     #[error("id mismatch, expected '{expected}' but got '{actual}'")]
     IdMismatch { expected: String, actual: String },
+    #[error("entity type '{0}' is not a valid inode type")]
+    NotInodeEntityType(String),
 }
 
 #[derive(Debug, Clone)]
@@ -221,7 +223,7 @@ impl<C: TxScope> Transaction<C>
 where
     Self: Read,
 {
-    pub async fn entity_by_id<E: Entity + HasId<Id: AsRef<[u8]>>>(
+    /*pub async fn entity_by_id<E: Entity + HasId<Id: AsRef<[u8]>>>(
         &mut self,
         id: &<E as HasId>::Id,
     ) -> Result<Model<E>, Error>
@@ -230,7 +232,7 @@ where
     {
         let id = get_id_for_entity_id::<E, _>(id, self).await?;
         get_entity(id, self).await
-    }
+    }*/
 
     pub async fn latest_sync_log_entry(&mut self) -> Result<Option<SyncLogEntry>, Error> {
         get_latest_sync_log_entry(self).await
@@ -273,6 +275,64 @@ where
                 Err(err) => Some(Err(err.into())),
             });
         Ok(x)
+    }
+
+    pub async fn stats(&mut self) -> Result<Stats, Error> {
+        Ok(sqlx::query!(
+            "
+            SELECT
+                COUNT(CASE WHEN inode_type = 'FI' THEN 1 END) as num_files,
+                COUNT(CASE WHEN inode_type = 'FO' THEN 1 END) as num_dirs,
+                COALESCE(SUM(size), 0) as total_size,
+                MAX(last_modified) as \"last_modified: i64\"
+            FROM vfs;
+        "
+        )
+        .fetch_one(self.conn())
+        .await
+        .map(|r| Stats {
+            num_files: r.num_files as usize,
+            num_dirs: r.num_dirs as usize,
+            total_size: ByteSize::b(r.total_size as u64),
+            last_modified: Timestamp::from_timestamp(
+                r.last_modified.unwrap_or_else(|| Utc::now().timestamp()),
+                0,
+            )
+            .unwrap_or_else(|| Utc::now()),
+        })?)
+    }
+
+    pub async fn inode_id_by_path(&mut self, path: &str) -> Result<Option<InodeId>, Error> {
+        sqlx::query!("SELECT id FROM vfs where path = ?", path)
+            .fetch_optional(self.conn())
+            .await?
+            .map(|r| InodeId::try_from(r.id as u64))
+            .transpose()
+            .map_err(|e| DataError::ConversionError(e.to_string()).into())
+    }
+
+    pub async fn inode_by_id(&mut self, id: InodeId) -> Result<Option<Inode>, Error> {
+        get_inode(*id.deref() as i64, self).await
+    }
+
+    pub async fn list_dir(&mut self, dir_id: InodeId) -> Result<Vec<InodeId>, Error> {
+        Ok(inode_ids_by_parent(*dir_id.deref() as i64, self)
+            .await?
+            .map(|id| {
+                InodeId::try_from(id as u64)
+                    .map_err(|e| DataError::ConversionError(e.to_string()).into())
+            })
+            .collect::<Result<Vec<_>, Error>>()?)
+    }
+
+    pub async fn list_root(&mut self) -> Result<Vec<InodeId>, Error> {
+        Ok(inode_ids_without_parent(self)
+            .await?
+            .map(|id| {
+                InodeId::try_from(id as u64)
+                    .map_err(|e| DataError::ConversionError(e.to_string()).into())
+            })
+            .collect::<Result<Vec<_>, Error>>()?)
     }
 }
 
@@ -322,7 +382,8 @@ where
         let affected_inode_ids = collect_affected_inode_ids(self)
             .await?
             .map(|id| {
-                InodeId::try_from(id).map_err(|e| DataError::ConversionError(e.to_string()).into())
+                InodeId::try_from(id as u64)
+                    .map_err(|e| DataError::ConversionError(e.to_string()).into())
             })
             .collect::<Result<Vec<_>, Error>>()?;
         clear_temp_tables(self).await?;
@@ -694,6 +755,83 @@ async fn get_entity<E: DbEntity, C: Read>(id: i64, tx: &mut C) -> Result<Model<E
     Ok(E::try_from_row(row)?)
 }
 
+async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, Error> {
+    let vfs_row: VfsRow = match sqlx::query!(
+        "SELECT
+             id, inode_type, entity, name, size, last_modified as \"last_modified: i64\", visibility, parent, path
+         FROM
+             vfs
+         WHERE
+             id = ?",
+        inode_id
+    )
+        .fetch_optional(tx.conn())
+        .await?.map(|r| {
+        VfsRow {
+            id: r.id,
+            inode_type: r.inode_type.into(),
+            entity: r.entity,
+            name: r.name.into(),
+            size: r.size,
+            last_modified: r.last_modified,
+            visibility: r.visibility.into(),
+            parent: r.parent,
+            path: Some(r.path.into()),
+        }
+    })
+    {
+        Some(vfs_row) => vfs_row,
+        None => return Ok(None),
+    };
+
+    let id = InodeId::try_from(vfs_row.id as u64)
+        .map_err(|e| DataError::ConversionError(e.to_string()))?;
+    let name = VfsName::from_str(vfs_row.name.as_ref())
+        .map_err(|e| DataError::ConversionError(e.to_string()))?;
+    let last_modified = Timestamp::from_timestamp(vfs_row.last_modified, 0)
+        .ok_or_else(|| DataError::ConversionError("timestamp is invalid".to_string()))?;
+    let visibility = match vfs_row.visibility.as_ref() {
+        "H" => Visibility::Hidden,
+        "V" => Visibility::Visible,
+        other => Err(DataError::ConversionError(format!(
+            "invalid visibility value: '{}'",
+            other
+        )))?,
+    };
+    let path = vfs_row
+        .path
+        .ok_or_else(|| DataError::MissingData("path not set".to_string()))?;
+    let path = VfsPath::try_from::<str>(path.as_ref())
+        .map_err(|e| DataError::ConversionError(e.to_string()))?;
+
+    match vfs_row.inode_type.as_ref() {
+        <FileKind as DbEntity>::TYPE => {
+            let entity = get_entity::<FileKind, _>(vfs_row.entity, tx).await?;
+            Ok(Some(Inode::File(VfsFile::new(
+                id,
+                name,
+                ByteSize::b(vfs_row.size as u64),
+                last_modified,
+                visibility,
+                path,
+                entity,
+            ))))
+        }
+        <FolderKind as DbEntity>::TYPE => {
+            let entity = get_entity::<FolderKind, _>(vfs_row.entity, tx).await?;
+            Ok(Some(Inode::Directory(VfsDirectory::new(
+                id,
+                name,
+                last_modified,
+                visibility,
+                path,
+                entity,
+            ))))
+        }
+        other => Err(DataError::NotInodeEntityType(other.to_string()))?,
+    }
+}
+
 async fn insert_inode<'a, E: DbEntity, C: Write>(
     entity: &'a Model<E>,
     entity_id: i64,
@@ -809,12 +947,36 @@ async fn clear_temp_tables<C: Write>(tx: &mut C) -> Result<(), Error> {
 
 async fn collect_affected_inode_ids<C: Write>(
     tx: &mut C,
-) -> Result<impl Iterator<Item = u64>, Error> {
+) -> Result<impl Iterator<Item = i64>, Error> {
     Ok(sqlx::query!("SELECT DISTINCT(id) FROM vfs_affected_inodes")
         .fetch_all(tx.as_mut())
         .await?
         .into_iter()
-        .map(|r| r.id as u64))
+        .map(|r| r.id))
+}
+
+async fn inode_ids_without_parent<C: Read>(tx: &mut C) -> Result<impl Iterator<Item = i64>, Error> {
+    Ok(
+        sqlx::query!("SELECT id FROM vfs WHERE parent IS NULL ORDER BY name",)
+            .fetch_all(tx.as_mut())
+            .await?
+            .into_iter()
+            .map(|r| r.id),
+    )
+}
+
+async fn inode_ids_by_parent<C: Read>(
+    parent_id: i64,
+    tx: &mut C,
+) -> Result<impl Iterator<Item = i64>, Error> {
+    Ok(sqlx::query!(
+        "SELECT id FROM vfs WHERE parent = ? ORDER BY name",
+        parent_id
+    )
+    .fetch_all(tx.as_mut())
+    .await?
+    .into_iter()
+    .map(|r| r.id))
 }
 
 #[derive(Debug)]

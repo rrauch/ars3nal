@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use uuid::Uuid;
 
+#[derive(Debug, PartialEq, Clone)]
 pub struct FolderKind;
 pub type FolderId = TaggedId<Uuid, FolderKind>;
 

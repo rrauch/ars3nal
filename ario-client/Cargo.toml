@@ -24,7 +24,7 @@ futures-concurrency = "7.6"
 futures-lite = { workspace = true }
 hybrid-array = { workspace = true }
 itertools = "0.14"
-moka = { version = "0.12", features = ["future"] }
+moka = { workspace = true, features = ["future"] }
 n0-watcher = "0.3"
 netwatch = "0.8"
 rand = { workspace = true, features = ["thread_rng"] }

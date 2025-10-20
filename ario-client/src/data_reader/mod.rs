@@ -80,7 +80,7 @@ impl Client {
     pub async fn read_any<'a, L: Into<Arl>>(
         &self,
         location: L,
-    ) -> Result<impl DataReader, super::Error> {
+    ) -> Result<impl DataReader + 'static, super::Error> {
         let location = location.into();
 
         match location {
@@ -159,9 +159,8 @@ impl Client {
             })?;
         }
 
-        let locations = iter::successors(arl.parent(), |p| p.parent())
-            .chain(iter::once(arl))
-            .collect_vec();
+        let mut locations = iter::successors(Some(arl.clone()), |p| p.parent()).collect_vec();
+        locations.reverse();
 
         if locations.len() > 16 {
             Err(Error::MaxNestingDepthExceeded {
@@ -566,6 +565,38 @@ mod tests {
             hash.as_slice(),
             hex!("4f76ec77b3476bcb2b37fbdf9f91ea52b407ee7d3c298d18439a1e53ff37aaf8")
         );
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn read_nested_bundle_item() -> anyhow::Result<()> {
+        init_tracing();
+        let client = Client::builder()
+            .enable_netwatch(false)
+            .gateways(vec![Gateway::from_str("https://arweave.net")?].into_iter())
+            .build()
+            .await?;
+
+        let arl = Arl::from_str(
+            "ar://xczOqUZQb-vjzD21PSJC7qRGZkX4-3KvFu1-DEGFJO4/nYeYq2C89p7soY7R5jusF_OgZbtDXwNGNT9k0L1mPb4/BF0SmGfQPOhH3oKVzifUOoyJlf2nrCroiNTfnEXvy9M",
+        )?;
+        assert_eq!(
+            arl.tx_id(),
+            &TxId::from_str("xczOqUZQb-vjzD21PSJC7qRGZkX4-3KvFu1-DEGFJO4")?
+        );
+        assert_eq!(
+            arl.as_bundle_item_arl().unwrap().bundle_item_id(),
+            &BundleItemId::from_str("BF0SmGfQPOhH3oKVzifUOoyJlf2nrCroiNTfnEXvy9M")?
+        );
+        assert_eq!(arl.depth(), 2);
+
+        let mut reader = client.read_any(arl).await?;
+
+        let len = reader.len();
+        let mut buf = vec![];
+        reader.read_to_end(&mut buf).await?;
+        assert_eq!(buf.len(), len as usize);
         Ok(())
     }
 
