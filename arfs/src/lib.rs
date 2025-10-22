@@ -10,7 +10,7 @@ mod vfs;
 pub use ario_core::bundle::Owner as BundleOwner;
 pub use ario_core::tx::Owner as TxOwner;
 pub use sync::Status as SyncStatus;
-pub use types::{ArFsVersion, ContentType, Privacy};
+pub use types::{ArFsVersion, ContentType, Privacy, drive::DriveId, folder::FolderId};
 pub use vfs::{Directory, File, Inode, Name, Timestamp, Vfs, VfsPath};
 
 use crate::db::Config as DriveConfig;
@@ -18,8 +18,6 @@ use crate::db::Db;
 use crate::db::Error as DbError;
 use crate::sync::{SyncResult, Syncer};
 use crate::types::AuthMode;
-use crate::types::drive::DriveId;
-use crate::types::folder::FolderId;
 use crate::vfs::Error as VfsError;
 
 use ario_client::Client;

@@ -1,7 +1,4 @@
-use ario_core::tx::TxId;
-use std::str::FromStr;
+mod s3;
+mod server;
 
-pub fn foo() {
-    let tx_id = TxId::from_str("Kx7IKKdBzaYiZpYLgtL5tWoOseFt0vjXQMyirrTPc-E").unwrap();
-    println!("{:?}", tx_id);
-}
+pub use server::{Server, ServerBuilder};

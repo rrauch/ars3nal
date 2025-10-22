@@ -12,6 +12,7 @@ foyer-cache = { path = "foyer-cache" }
 aes = "0.9.0-rc.1"
 anyhow = "1"
 async-stream = "0.3"
+async-trait = "0.1"
 bon = "3.7"
 bytes = "1"
 bytemuck = "1.24"
@@ -35,6 +36,7 @@ moka = "0.12"
 rand = "0.9"
 rangemap = "1.6"
 rsa = "0.10.0-rc.6"
+s3s = "0.12.0-rc.3"
 serde = "1.0"
 serde_json = "1.0"
 serde_with = "3.14"
@@ -50,10 +52,5 @@ url = "2.5"
 uuid = "1"
 zeroize = "1.8"
 
-
-#[patch.crates-io]
-#block-buffer = { git = "https://github.com/RustCrypto/utils.git", rev = "303c9e8e8fd5e08de4719bd6614935bc68c63a55" }
-#cipher = { git = "https://github.com/RustCrypto/traits.git", rev = "b93df4aabac35b714fbcdf3ea951803ee8b00e56" }
-#crypto-bigint = { git = "https://github.com/RustCrypto/crypto-bigint.git", rev = "732300c947ac92a03368afb74a4f699931f55cd5" }
-#ed25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek.git", rev = "44433757a07c68a2b4f453c25d69469ae2f62986" }
-#elliptic-curve = { git = "https://github.com/RustCrypto/traits.git", rev = "b93df4aabac35b714fbcdf3ea951803ee8b00e56" }
+[patch.crates-io]
+s3s = { git = "https://github.com/rrauch/s3s", branch = "upgrade-sha-hmac-deps" }
