@@ -1,5 +1,6 @@
 use anyhow::bail;
 use arfs::ArFs;
+use s3s::auth::Credentials;
 use s3s::dto::{
     Bucket, BucketName, HeadBucketInput, HeadBucketOutput, ListBucketsInput, ListBucketsOutput,
     ListObjectsInput, ListObjectsOutput, ListObjectsV2Input, ListObjectsV2Output,
@@ -27,6 +28,14 @@ impl ArS3 {
         }
         self.buckets.insert(bucket_name, arfs);
         Ok(())
+    }
+
+    fn arfs(
+        &self,
+        bucket_name: &BucketName,
+        _credentials: Option<&Credentials>,
+    ) -> Result<&ArFs, S3Error> {
+        self.buckets.get(bucket_name).ok_or(s3_error!(NoSuchBucket))
     }
 }
 
@@ -57,8 +66,7 @@ impl S3 for ArS3 {
         &self,
         req: S3Request<ListObjectsInput>,
     ) -> S3Result<S3Response<ListObjectsOutput>> {
-        let input = req.input;
-        let x = input.bucket;
+        let v2_resp = self.list_objects_v2(req.map_input(Into::into)).await?;
         Err(s3_error!(NotImplemented))
     }
 
@@ -67,6 +75,9 @@ impl S3 for ArS3 {
         req: S3Request<ListObjectsV2Input>,
     ) -> S3Result<S3Response<ListObjectsV2Output>> {
         let input = req.input;
+
+        let arfs = self.arfs(&input.bucket, req.credentials.as_ref())?;
+
         Err(s3_error!(NotImplemented))
     }
 

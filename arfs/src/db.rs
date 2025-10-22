@@ -303,12 +303,16 @@ where
     }
 
     pub async fn inode_id_by_path(&mut self, path: &str) -> Result<Option<InodeId>, Error> {
-        sqlx::query!("SELECT id FROM vfs where path = ?", path)
-            .fetch_optional(self.conn())
-            .await?
-            .map(|r| InodeId::try_from(r.id as u64))
-            .transpose()
-            .map_err(|e| DataError::ConversionError(e.to_string()).into())
+        sqlx::query!(
+            "SELECT id FROM vfs WHERE path = ? OR (path = ? || '/' AND inode_type = 'FO')",
+            path,
+            path
+        )
+        .fetch_optional(self.conn())
+        .await?
+        .map(|r| InodeId::try_from(r.id as u64))
+        .transpose()
+        .map_err(|e| DataError::ConversionError(e.to_string()).into())
     }
 
     pub async fn inode_by_id(&mut self, id: InodeId) -> Result<Option<Inode>, Error> {

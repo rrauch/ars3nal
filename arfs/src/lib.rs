@@ -824,7 +824,7 @@ mod tests {
             .build()
             .await?;
 
-        //arfs.sync_now().await?;
+        arfs.sync_now().await?;
 
         let vfs = arfs.vfs();
         let root = vfs.root();

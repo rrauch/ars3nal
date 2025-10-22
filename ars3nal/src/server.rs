@@ -1,20 +1,70 @@
 use crate::s3::ArS3;
-
 use arfs::ArFs;
+use async_stream::stream;
+use futures_lite::Stream;
 use http::{Extensions, HeaderMap, Method, Uri};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use s3s::route::S3Route;
 use s3s::service::S3ServiceBuilder;
 use s3s::{Body, S3Request, S3Response, S3Result};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpListener;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tower::Service;
 
 pub struct Server {
-    ct: CancellationToken,
     listener: TcpListener,
     ars3s: ArS3,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Status {
+    Serving,
+    ShuttingDown,
+    Finished,
+}
+
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct Handle(Arc<Inner>);
+
+impl Handle {
+    pub fn status(&self) -> impl Stream<Item = Status> + Send + Unpin {
+        let mut rx = self.0.status.clone();
+
+        Box::pin(stream! {
+            let mut status = rx.borrow_and_update().clone();
+            loop {
+                match status {
+                    Status::Finished => {
+                        yield Status::Finished;
+                        break;
+                    }
+                    other => yield other,
+                }
+
+                if let Err(_) = rx.changed().await {
+                    yield Status::Finished;
+                    break;
+                }
+                status = rx.borrow_and_update().clone();
+            }
+        })
+    }
+
+    pub fn shutdown(&self) {
+        self.0.ct.cancel();
+    }
+}
+
+#[derive(Debug)]
+struct Inner {
+    ct: CancellationToken,
+    status: watch::Receiver<Status>,
     _drop_guard: DropGuard,
 }
 
@@ -25,26 +75,54 @@ impl Server {
         #[builder(default = "localhost")] host: &str,
         #[builder(default = 3000)] port: u16,
     ) -> anyhow::Result<Self> {
-        let ct = CancellationToken::new();
         let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
-        let _drop_guard = ct.clone().drop_guard();
         Ok(Self {
-            ct,
             listener,
             ars3s: ArS3::new(),
-            _drop_guard,
         })
-    }
-
-    pub fn ct(&self) -> CancellationToken {
-        self.ct.clone()
     }
 
     pub fn insert_bucket(&mut self, name: impl AsRef<str>, arfs: ArFs) -> anyhow::Result<()> {
         self.ars3s.insert(name, arfs)
     }
 
-    pub async fn run(mut self) -> anyhow::Result<()> {
+    pub fn serve(self) -> Handle {
+        let ct = CancellationToken::new();
+        let _drop_guard = ct.clone().drop_guard();
+        let mut jh = {
+            let ct = ct.clone();
+            tokio::spawn(async move { self.run(ct).await })
+        };
+
+        let (mut tx, rx) = watch::channel(Status::Serving);
+        {
+            let ct = ct.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = &mut jh => {
+                            let _ = tx.send(Status::Finished);
+                            break;
+                        }
+                        _ = ct.cancelled() => {
+                            let _ = tx.send(Status::ShuttingDown);
+                            break;
+                        }
+                    }
+                }
+                let _ = jh.await;
+                let _ = tx.send(Status::Finished);
+            });
+        }
+
+        Handle(Arc::new(Inner {
+            ct,
+            status: rx,
+            _drop_guard,
+        }))
+    }
+
+    async fn run(mut self, ct: CancellationToken) -> anyhow::Result<()> {
         let mut builder = S3ServiceBuilder::new(self.ars3s);
         builder.set_route(CustomRoute::build());
         let service = builder.build();
@@ -52,7 +130,6 @@ impl Server {
         let http_server = ConnBuilder::new(TokioExecutor::new());
         let graceful = hyper_util::server::graceful::GracefulShutdown::new();
 
-        let ct = self.ct.clone();
         loop {
             let (socket, _) = tokio::select! {
                 res =  self.listener.accept() => {
