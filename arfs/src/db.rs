@@ -366,7 +366,7 @@ where
             }
             .map(|id| if id == root_folder_id { None } else { Some(id) })
             .flatten();
-            let _ = insert_inode(folder, folder_id, parent_entity_id, self).await?;
+            let (inode_id, path) = insert_inode(folder, folder_id, parent_entity_id, self).await?;
             ids.push(folder_id);
         }
         for file in new_files {
@@ -375,7 +375,7 @@ where
                 Some(get_id_for_entity_id::<FolderKind, _>(file.parent_folder(), self).await?)
                     .map(|id| if id == root_folder_id { None } else { Some(id) })
                     .flatten();
-            let _ = insert_inode(file, file_id, parent_entity_id, self).await?;
+            let (inode_id, path) = insert_inode(file, file_id, parent_entity_id, self).await?;
             ids.push(file_id);
         }
 
