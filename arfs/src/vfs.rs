@@ -1,10 +1,12 @@
-use crate::db::{DataError, Db, Transaction};
+use crate::db::{DataError, Db, Transaction, TxScope};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{Entity, Model};
 use crate::{ContentType, Visibility, db};
 use ario_client::data_reader::DataReader;
+use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
+use ario_core::wallet::WalletAddress;
 use chrono::{DateTime, Utc};
 use derive_more::Display;
 use futures_lite::{AsyncRead, AsyncSeek, Stream, stream};
@@ -206,6 +208,17 @@ impl Vfs {
     }
 
     pub async fn inode_by_id(&self, id: InodeId) -> Result<Option<Inode>, Error> {
+        self._inode_by_id::<db::ReadOnly>(id, None).await
+    }
+
+    async fn _inode_by_id<C: TxScope>(
+        &self,
+        id: InodeId,
+        conn: Option<&mut Transaction<C>>,
+    ) -> Result<Option<Inode>, Error>
+    where
+        Transaction<C>: db::Read,
+    {
         if id == ROOT_INODE_ID {
             return Ok(Some(Inode::Root(self.root())));
         }
@@ -216,7 +229,12 @@ impl Vfs {
             .0
             .inode_cache
             .try_get_with(id, async {
-                match db.read().await?.inode_by_id(id).await? {
+                let res = match conn {
+                    Some(conn) => conn.inode_by_id(id).await,
+                    None => db.read().await?.inode_by_id(id).await,
+                };
+
+                match res? {
                     Some(inode) => {
                         path_cache
                             .insert(inode.path().clone(), Some(inode.id()))
@@ -281,6 +299,28 @@ impl Vfs {
         })?;
         let reader = self.0.client.read_any(data_location).await?;
         Ok(FileHandle(ReadOnly(Box::new(reader))))
+    }
+
+    pub async fn find(
+        &self,
+        prefix: Option<&str>,
+        delimiter: Option<&str>,
+        start_after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<(Vec<Inode>, bool), crate::Error> {
+        let mut conn = self.0.db.read().await?;
+        let (ids, has_more) = conn
+            .find_inodes(prefix, delimiter, start_after, max_keys)
+            .await?;
+        let mut matches = Vec::with_capacity(ids.len());
+        for id in ids {
+            let inode = self
+                ._inode_by_id(id, Some(&mut conn))
+                .await?
+                .ok_or(crate::Error::VfsError(InodeError::NotFound(id).into()))?;
+            matches.push(inode);
+        }
+        Ok((matches, has_more))
     }
 }
 
@@ -423,10 +463,7 @@ fn check_valid_filename(name: &str) -> Result<(), NameError> {
     }
 
     if name.chars().any(|c| {
-        matches!(
-            c,
-            '/' | '\0' | '\\' | '*' | '?' | '"' | '<' | '>' | '|' | ':'
-        ) || c.is_control()
+        matches!(c, '/' | '\0' | '\\' | '*' | '"' | '<' | '>' | '|' | ':') || c.is_control()
     }) {
         return Err(NameError::InvalidCharacter);
     }
@@ -519,6 +556,14 @@ impl File {
 
     pub fn size(&self) -> ByteSize {
         self.0.size
+    }
+
+    pub fn pinned_owner(&self) -> Option<&WalletAddress> {
+        self.0.inner.pinned_data_owner()
+    }
+
+    pub fn data_location(&self) -> Option<&Arl> {
+        self.0.inner.data_location()
     }
 }
 

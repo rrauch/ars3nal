@@ -1,8 +1,9 @@
 use arfs::{ArFs, DriveId, Scope};
-use ario_client::Client;
+use ario_client::{Cache, Client};
 use ario_core::Gateway;
 use ario_core::wallet::WalletAddress;
 use ars3nal::{Server, ServerStatus};
+use foyer_cache::{FoyerChunkCache, FoyerMetadataCache};
 use futures_lite::StreamExt;
 use std::str::FromStr;
 
@@ -22,8 +23,30 @@ fn main() -> anyhow::Result<()> {
 
 async fn run() -> anyhow::Result<()> {
     let client = Client::builder()
-        .gateways([Gateway::default()])
+        .gateways([
+            Gateway::from_str("https://permagate.io")?,
+            Gateway::default(),
+            Gateway::from_str("https://ar-io-gateway.svc.blacksand.xyz")?,
+        ])
         .enable_netwatch(false)
+        .cache(
+            Cache::builder()
+                .chunk_l2_cache(
+                    FoyerChunkCache::builder()
+                        .disk_path(std::env::var("ARTEST_L2_CHUNK_CACHE_PATH")?)
+                        .max_disk_space(1024 * 1024 * 100)
+                        .build()
+                        .await?,
+                )
+                .metadata_l2_cache(
+                    FoyerMetadataCache::builder()
+                        .disk_path(std::env::var("ARTEST_L2_METADATA_CACHE_PATH")?)
+                        .max_disk_space(1024 * 1024 * 25)
+                        .build()
+                        .await?,
+                )
+                .build(),
+        )
         .build()
         .await?;
 

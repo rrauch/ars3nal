@@ -182,7 +182,7 @@ impl AsMut<SqliteConnection> for ReadWrite {
     }
 }
 
-trait Read: AsMut<SqliteConnection> {
+pub(crate) trait Read: AsMut<SqliteConnection> {
     #[inline]
     fn conn(&mut self) -> &mut SqliteConnection {
         self.as_mut()
@@ -194,7 +194,7 @@ trait Write: Read {}
 impl Read for Transaction<ReadWrite> {}
 impl Write for Transaction<ReadWrite> {}
 
-trait TxScope: AsMut<SqliteConnection> + Send + Sync + Unpin + 'static {}
+pub(crate) trait TxScope: AsMut<SqliteConnection> + Send + Sync + Unpin + 'static {}
 impl<T: AsMut<SqliteConnection> + Send + Sync + Unpin + 'static> TxScope for T {}
 
 #[repr(transparent)]
@@ -337,6 +337,101 @@ where
                     .map_err(|e| DataError::ConversionError(e.to_string()).into())
             })
             .collect::<Result<Vec<_>, Error>>()?)
+    }
+
+    pub async fn find_inodes(
+        &mut self,
+        prefix: Option<&str>,
+        delimiter: Option<&str>,
+        start_after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<(Vec<InodeId>, bool), Error> {
+        let prefix = match prefix {
+            Some(prefix) if prefix.starts_with("/") => Cow::Borrowed(prefix),
+            Some(prefix) => Cow::Owned(format!("/{}", prefix)),
+            None => Cow::Borrowed("/"),
+        };
+
+        let start_after = match start_after {
+            Some(start_after) if start_after.starts_with("/") => Cow::Borrowed(start_after),
+            Some(start_after) => Cow::Owned(format!("/{}", start_after)),
+            None => Cow::Borrowed("/"),
+        };
+
+        let max_keys = max_keys as i64;
+        let mut truncated = false;
+
+        let ids = sqlx::query!(
+            "
+WITH params AS (SELECT ? AS prefix,
+                       ? AS delimiter,
+                       ? AS start_after,
+                       ? AS max_keys)
+SELECT vfs.id
+FROM vfs,
+     params
+WHERE
+  -- Base filters
+    vfs.visibility = 'V'
+  AND vfs.path LIKE params.prefix || '%'
+  AND vfs.path > params.start_after
+
+  -- S3 Logic Gate: Handles both flat and delimited listing modes
+  AND (
+    -- Condition for returning a file ('Contents')
+    (
+        vfs.inode_type = 'FI'
+            AND (
+            -- True for flat lists (no delimiter)
+            params.delimiter IS NULL
+                -- True for delimited lists if the file is at the current level
+                OR INSTR(SUBSTR(vfs.path, LENGTH(params.prefix) + 1), params.delimiter) = 0
+            )
+        )
+        OR
+        -- Condition for returning a folder ('CommonPrefix')
+    (
+        -- This block is only active when a delimiter is used
+        params.delimiter IS NOT NULL
+            AND vfs.inode_type = 'FO'
+            -- The folder's path must be a \"common prefix\" for deeper items
+            AND vfs.path IN (SELECT DISTINCT SUBSTR(vfs_inner.path, 1, LENGTH(bp.prefix) + INSTR(
+                SUBSTR(vfs_inner.path, LENGTH(bp.prefix) + 1), bp.delimiter))
+                             FROM vfs AS vfs_inner,
+                                  params AS bp
+                             WHERE vfs_inner.path LIKE bp.prefix || '%' || bp.delimiter || '%'
+                               AND vfs_inner.visibility = 'V')
+        )
+    )
+ORDER BY vfs.path
+LIMIT (SELECT max_keys FROM params) + 1;
+",
+            prefix,
+            delimiter,
+            start_after,
+            max_keys,
+        )
+        .fetch(self.conn())
+        .enumerate()
+        .filter_map(|(i, r)| {
+            if i >= max_keys as usize {
+                truncated = true;
+                None
+            } else {
+                Some(
+                    r.map(|r| {
+                        InodeId::try_from(r.id as u64)
+                            .map_err(|e| DataError::ConversionError(e.to_string()).into())
+                    })
+                    .map_err(Error::SqlxError)
+                    .flatten(),
+                )
+            }
+        })
+        .try_collect::<InodeId, Error, Vec<_>>()
+        .await?;
+
+        Ok((ids, truncated))
     }
 }
 

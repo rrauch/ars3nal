@@ -156,6 +156,7 @@ CREATE TABLE vfs
 
 CREATE INDEX idx_vfs_entity ON vfs (entity);
 CREATE INDEX idx_vfs_parent ON vfs (parent);
+CREATE INDEX idx_vfs_path_cover ON vfs (path, visibility, inode_type);
 
 -- Ensure the vfs id sequence starts at 1000
 INSERT INTO sqlite_sequence (name, seq)

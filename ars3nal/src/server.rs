@@ -73,7 +73,7 @@ impl Server {
     #[builder(derive(Debug))]
     pub async fn new(
         #[builder(default = "localhost")] host: &str,
-        #[builder(default = 3000)] port: u16,
+        #[builder(default = 6767)] port: u16,
     ) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
         Ok(Self {
