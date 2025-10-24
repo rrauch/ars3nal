@@ -5,6 +5,7 @@ use futures_lite::Stream;
 use http::{Extensions, HeaderMap, Method, Uri};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
+use s3s::auth::SimpleAuth;
 use s3s::route::S3Route;
 use s3s::service::S3ServiceBuilder;
 use s3s::{Body, S3Request, S3Response, S3Result};
@@ -125,6 +126,7 @@ impl Server {
     async fn run(mut self, ct: CancellationToken) -> anyhow::Result<()> {
         let mut builder = S3ServiceBuilder::new(self.ars3s);
         builder.set_route(CustomRoute::build());
+        //builder.set_auth(SimpleAuth::from_single("dummy", "dummy"));
         let service = builder.build();
 
         let http_server = ConnBuilder::new(TokioExecutor::new());

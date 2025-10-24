@@ -76,7 +76,7 @@ impl HasContentType for FileKind {
     where
         Self: Entity + Sized,
     {
-        &entity.header.inner.content_type
+        &entity.metadata.inner.content_type
     }
 }
 
