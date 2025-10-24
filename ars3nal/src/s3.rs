@@ -6,11 +6,11 @@ use futures_lite::{AsyncReadExt, AsyncSeekExt};
 use itertools::{Either, Itertools};
 use s3s::auth::Credentials;
 use s3s::dto::{
-    Bucket, BucketName, CommonPrefix, ContentType, ETag, GetObjectInput, GetObjectOutput,
-    HeadBucketInput, HeadBucketOutput, HeadObjectInput, HeadObjectOutput, KeyCount, LastModified,
-    ListBucketsInput, ListBucketsOutput, ListObjectsInput, ListObjectsOutput, ListObjectsV2Input,
-    ListObjectsV2Output, MaxKeys, Object, ObjectKey, ObjectStorageClass, Owner, Size,
-    StreamingBlob,
+    Bucket, BucketName, CommonPrefix, ContentType, ETag, GetBucketLocationInput,
+    GetBucketLocationOutput, GetObjectInput, GetObjectOutput, HeadBucketInput, HeadBucketOutput,
+    HeadObjectInput, HeadObjectOutput, KeyCount, LastModified, ListBucketsInput, ListBucketsOutput,
+    ListObjectsInput, ListObjectsOutput, ListObjectsV2Input, ListObjectsV2Output, MaxKeys, Object,
+    ObjectKey, ObjectStorageClass, Owner, Size, StreamingBlob,
 };
 use s3s::{S3, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, s3_error};
 use std::collections::HashMap;
@@ -132,6 +132,17 @@ fn fmt_content_range(start: u64, end_inclusive: u64, size: u64) -> String {
 
 #[async_trait::async_trait]
 impl S3 for ArS3 {
+    async fn get_bucket_location(
+        &self,
+        req: S3Request<GetBucketLocationInput>,
+    ) -> S3Result<S3Response<GetBucketLocationOutput>> {
+        let input = req.input;
+        let _ = self.arfs(&input.bucket, req.credentials.as_ref())?;
+        Ok(S3Response::new(GetBucketLocationOutput {
+            location_constraint: None,
+        }))
+    }
+
     async fn get_object(
         &self,
         req: S3Request<GetObjectInput>,
@@ -186,6 +197,53 @@ impl S3 for ArS3 {
             body: Some(StreamingBlob::wrap(body)),
             content_length: Some(content_length as i64),
             content_range,
+            content_type: Some(
+                ContentType::from_str(file.content_type().as_ref())
+                    .map_err(|e| S3Error::internal_error(e))?,
+            ),
+            e_tag: object.e_tag,
+            last_modified: object.last_modified,
+            ..Default::default()
+        };
+
+        Ok(S3Response::new(output))
+    }
+
+    async fn head_bucket(
+        &self,
+        req: S3Request<HeadBucketInput>,
+    ) -> S3Result<S3Response<HeadBucketOutput>> {
+        if !self.buckets.contains_key(&req.input.bucket) {
+            return Err(S3Error::new(S3ErrorCode::NoSuchBucket));
+        }
+        Ok(S3Response::new(HeadBucketOutput::default()))
+    }
+
+    async fn head_object(
+        &self,
+        req: S3Request<HeadObjectInput>,
+    ) -> S3Result<S3Response<HeadObjectOutput>> {
+        let input = req.input;
+
+        let arfs = self.arfs(&input.bucket, req.credentials.as_ref())?;
+
+        let (object, file) = self
+            .get_object(
+                arfs,
+                &input.key,
+                input
+                    .if_none_match
+                    .as_ref()
+                    .map(|s| ETag::parse_http_header(s.as_bytes()).ok())
+                    .flatten()
+                    .as_ref(),
+                input.if_modified_since.as_ref(),
+            )
+            .await?;
+
+        let output = HeadObjectOutput {
+            accept_ranges: Some("bytes".to_string()),
+            content_length: object.size,
             content_type: Some(
                 ContentType::from_str(file.content_type().as_ref())
                     .map_err(|e| S3Error::internal_error(e))?,
@@ -323,53 +381,6 @@ impl S3 for ArS3 {
             name: Some(input.bucket),
             continuation_token: input.continuation_token,
             next_continuation_token,
-            ..Default::default()
-        };
-
-        Ok(S3Response::new(output))
-    }
-
-    async fn head_bucket(
-        &self,
-        req: S3Request<HeadBucketInput>,
-    ) -> S3Result<S3Response<HeadBucketOutput>> {
-        if !self.buckets.contains_key(&req.input.bucket) {
-            return Err(S3Error::new(S3ErrorCode::NoSuchBucket));
-        }
-        Ok(S3Response::new(HeadBucketOutput::default()))
-    }
-
-    async fn head_object(
-        &self,
-        req: S3Request<HeadObjectInput>,
-    ) -> S3Result<S3Response<HeadObjectOutput>> {
-        let input = req.input;
-
-        let arfs = self.arfs(&input.bucket, req.credentials.as_ref())?;
-
-        let (object, file) = self
-            .get_object(
-                arfs,
-                &input.key,
-                input
-                    .if_none_match
-                    .as_ref()
-                    .map(|s| ETag::parse_http_header(s.as_bytes()).ok())
-                    .flatten()
-                    .as_ref(),
-                input.if_modified_since.as_ref(),
-            )
-            .await?;
-
-        let output = HeadObjectOutput {
-            accept_ranges: Some("bytes".to_string()),
-            content_length: object.size,
-            content_type: Some(
-                ContentType::from_str(file.content_type().as_ref())
-                    .map_err(|e| S3Error::internal_error(e))?,
-            ),
-            e_tag: object.e_tag,
-            last_modified: object.last_modified,
             ..Default::default()
         };
 
