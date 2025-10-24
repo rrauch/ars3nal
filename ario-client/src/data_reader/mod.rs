@@ -43,7 +43,7 @@ pub enum Error {
     ChunkNotFound,
 }
 
-pub trait DataReader: AsyncRead + AsyncSeek + Send + Unpin {
+pub trait DataReader: AsyncRead + AsyncSeek + Send + Sync + Unpin {
     fn len(&self) -> u64;
 
     fn item(&self) -> Item<'static, Authenticated>;

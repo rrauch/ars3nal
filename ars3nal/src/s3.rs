@@ -2,7 +2,7 @@ use anyhow::bail;
 use arfs::{ArFs, File, Inode, VfsPath};
 use ario_core::base64::{FromBase64, ToBase64};
 use ario_core::crypto::hash::Blake3;
-use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeekExt, Stream, ready};
+use futures_lite::{AsyncReadExt, AsyncSeekExt};
 use itertools::{Either, Itertools};
 use s3s::auth::Credentials;
 use s3s::dto::{
@@ -14,14 +14,11 @@ use s3s::dto::{
 };
 use s3s::{S3, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, s3_error};
 use std::collections::HashMap;
-use std::io;
 use std::io::SeekFrom;
-use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use std::time::SystemTime;
-use tokio_util::bytes::Bytes;
+use tokio_util::compat::FuturesAsyncReadCompatExt;
+use tokio_util::io::ReaderStream;
 
 #[repr(transparent)]
 pub struct ArS3 {
@@ -182,7 +179,7 @@ impl S3 for ArS3 {
 
         let reader = reader.take(content_length);
 
-        let body = AsyncReadStream::with_capacity(reader, 32 * 1024);
+        let body = ReaderStream::with_capacity(reader.compat(), 32 * 1024);
 
         let output = GetObjectOutput {
             accept_ranges: Some("bytes".to_string()),
@@ -377,41 +374,5 @@ impl S3 for ArS3 {
         };
 
         Ok(S3Response::new(output))
-    }
-}
-
-struct AsyncReadStream<R> {
-    reader: Arc<Mutex<R>>,
-    buffer: Vec<u8>,
-}
-
-impl<R: AsyncRead + Unpin + Send> AsyncReadStream<R> {
-    pub fn new(reader: R) -> Self {
-        Self::with_capacity(reader, 8192)
-    }
-
-    pub fn with_capacity(reader: R, capacity: usize) -> Self {
-        Self {
-            reader: Arc::new(Mutex::new(reader)),
-            buffer: vec![0u8; capacity],
-        }
-    }
-}
-
-impl<R: AsyncRead + Unpin + Send> Stream for AsyncReadStream<R> {
-    type Item = Result<Bytes, io::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        let mut reader = this.reader.lock().unwrap();
-
-        match ready!(Pin::new(&mut *reader).poll_read(cx, &mut this.buffer)) {
-            Ok(0) => Poll::Ready(None),
-            Ok(n) => {
-                let bytes = Bytes::copy_from_slice(&this.buffer[..n]);
-                Poll::Ready(Some(Ok(bytes)))
-            }
-            Err(e) => Poll::Ready(Some(Err(e))),
-        }
     }
 }

@@ -13,7 +13,7 @@ use std::cmp::min;
 use std::io::{ErrorKind, Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 pub(crate) struct ChunkReader<
@@ -95,7 +95,7 @@ enum State<T: ReadableDataItem, Auth: AuthenticationState> {
         data: Option<OwnedTypedByteBufferCursor<(T, Auth)>>,
     },
     Retrieving {
-        fut: RetrieveFut<T, Auth>,
+        fut: Mutex<RetrieveFut<T, Auth>>,
     },
 }
 
@@ -170,19 +170,24 @@ where
         let data_source = self.data_source.clone();
         let fut = Box::pin(async move { data_source.retrieve_chunk(chunk).await });
 
-        self.state = State::Retrieving { fut };
+        self.state = State::Retrieving {
+            fut: Mutex::new(fut),
+        };
         self.pos = pos;
         Ok(())
     }
 
     fn on_chunk(
         &mut self,
-        mut fut: RetrieveFut<T, Auth>,
+        mutex: Mutex<RetrieveFut<T, Auth>>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
+        let mut fut = mutex.lock().unwrap();
+
         match fut.poll(cx) {
             Poll::Pending => {
-                self.state = State::Retrieving { fut };
+                drop(fut);
+                self.state = State::Retrieving { fut: mutex };
                 Poll::Pending
             }
             Poll::Ready(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
