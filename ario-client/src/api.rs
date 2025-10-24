@@ -1,5 +1,7 @@
 use ario_core::JsonValue;
 use ario_core::MaybeOwned;
+use ario_core::blob::{Blob, OwnedBlob, TypedBlob};
+use ario_core::buffer::ByteBuffer;
 use ario_core::network::Network;
 use bon::Builder;
 use buf_list::{BufList, Cursor};
@@ -331,6 +333,21 @@ impl TryFromResponseStream for () {
     }
 }
 
+impl TryFromResponseStream for ByteBuffer<'static> {
+    fn try_from<R: ResponseStream>(mut stream: R) -> impl Future<Output = Result<Self, Error>>
+    where
+        Self: Sized,
+    {
+        let mut chunks = vec![];
+        async move {
+            while let Some(chunk) = stream.next().await {
+                chunks.push(TypedBlob::try_from(OwnedBlob::from(chunk?)).unwrap());
+            }
+            Ok(ByteBuffer::from_iter(chunks.into_iter()))
+        }
+    }
+}
+
 pub(crate) trait ResponseStream:
     Stream<Item = Result<Bytes, ResponseStreamError>> + Unpin + Send
 {
@@ -488,6 +505,8 @@ impl<'a> Debug for Payload<'a> {
 pub(crate) enum PayloadError {
     #[error(transparent)]
     JsonError(#[from] serde_json::Error),
+    #[error("deserialization error: '{0}'")]
+    DeserializationError(String),
 }
 
 impl<'a> TryInto<reqwest::Body> for Payload<'a> {

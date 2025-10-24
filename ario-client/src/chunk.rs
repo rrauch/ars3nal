@@ -1,6 +1,7 @@
 use crate::api::RequestMethod::{Get, Post};
 use crate::api::{
-    Api, ApiRequest, ApiRequestBody, ContentType, Payload, TryFromResponseStream, ViaJson,
+    Api, ApiRequest, ApiRequestBody, ContentType, Payload, PayloadError, TryFromResponseStream,
+    ViaJson,
 };
 use crate::routemaster::Handle;
 use crate::{Client, api};
@@ -20,6 +21,7 @@ use serde_with::base64::Base64;
 use serde_with::base64::UrlSafe;
 use serde_with::formats::Unpadded;
 use serde_with::serde_as;
+use std::io::{Read, Seek};
 use std::ops::Range;
 use thiserror::Error;
 
@@ -68,6 +70,33 @@ impl Api {
                     .await?
                     .0,
             )),
+            None => Ok(None),
+        }
+    }
+
+    async fn download_chunk2(
+        &self,
+        gateway: &Gateway,
+        offset: u128,
+    ) -> Result<Option<RawTxDownloadChunk<'static>>, api::Error> {
+        let req = ApiRequest::builder()
+            .endpoint(
+                gateway
+                    .join(format!("./chunk2/{}", offset).as_str())
+                    .map_err(api::Error::InvalidUrl)?,
+            )
+            .request_method(Get)
+            .max_response_len(ByteSize::mib(1))
+            .idempotent(true)
+            .build();
+
+        match self.send_optional_api_request(req).await? {
+            Some(stream) => {
+                let buf = <ByteBuffer<'_> as TryFromResponseStream>::try_from(stream).await?;
+                Ok(Some(buf.try_into().map_err(|e| {
+                    PayloadError::DeserializationError(format!("error deserializing chunk: {}", e))
+                })?))
+            }
             None => Ok(None),
         }
     }
@@ -159,7 +188,15 @@ impl Client {
         data_root: &DataRoot,
     ) -> Result<Option<AuthenticatedTxDownloadChunk<'static>>, super::Error> {
         let chunk: UnauthenticatedTxDownloadChunk<'static> = match self
-            .with_gw(async |gw| self.0.api.download_chunk(gw, offset).await)
+            .with_gw(async |gw| {
+                // try chunk2 first
+                if let Ok(Some(chunk)) = self.0.api.download_chunk2(gw, offset).await {
+                    Ok(Some(chunk))
+                } else {
+                    // fall back to chunk
+                    self.0.api.download_chunk(gw, offset).await
+                }
+            })
             .await?
         {
             Some(chunk) => (chunk, relative_offset).into(),
@@ -231,6 +268,7 @@ impl<'a> UnauthenticatedTxDownloadChunk<'a> {
             chunk: validated,
             data_path: self.data_path,
             tx_path: self.tx_path,
+            packing: self.packing,
         })
     }
 }
@@ -242,6 +280,7 @@ pub(crate) struct TxDownloadChunk<'a, Auth: AuthenticationState> {
     pub(crate) chunk: TxDataChunk<'a, Auth>,
     data_path: Blob<'a>,
     tx_path: Option<Blob<'a>>,
+    packing: Option<Blob<'a>>,
 }
 
 impl<'a> From<(RawTxDownloadChunk<'a>, u64)> for UnauthenticatedTxDownloadChunk<'a> {
@@ -250,6 +289,7 @@ impl<'a> From<(RawTxDownloadChunk<'a>, u64)> for UnauthenticatedTxDownloadChunk<
             chunk: TxDataChunk::from_byte_buffer(raw.chunk.into(), offset),
             data_path: raw.data_path,
             tx_path: raw.tx_path,
+            packing: raw.packing,
         }
     }
 }
@@ -260,6 +300,7 @@ impl<'a> From<AuthenticatedTxDownloadChunk<'a>> for RawTxDownloadChunk<'a> {
             chunk: value.chunk.into_inner().into_untyped(),
             data_path: value.data_path,
             tx_path: value.tx_path,
+            packing: value.packing,
         }
     }
 }
@@ -274,15 +315,83 @@ pub struct RawTxDownloadChunk<'a> {
     #[serde_as(as = "OptionalBase64As")]
     #[serde(default)]
     pub tx_path: Option<Blob<'a>>,
+    #[serde(default)]
+    pub packing: Option<Blob<'a>>,
+}
+
+impl<'a> TryFrom<ByteBuffer<'a>> for RawTxDownloadChunk<'a> {
+    type Error = std::io::Error;
+
+    fn try_from(value: ByteBuffer<'a>) -> Result<Self, Self::Error> {
+        fn read_u24_be(reader: &mut impl Read) -> std::io::Result<u32> {
+            let mut buf = [0x00, 0x00, 0x00];
+            reader.read_exact(&mut buf)?;
+            Ok(((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32))
+        }
+
+        fn read_u8(reader: &mut impl Read) -> std::io::Result<u8> {
+            let mut buf = [0x00];
+            reader.read_exact(&mut buf)?;
+            Ok(buf[0])
+        }
+
+        let mut reader = value.cursor();
+
+        let chunk_size = read_u24_be(&mut reader)?;
+
+        reader.seek_relative(chunk_size as i64)?;
+        let tx_path_size = read_u24_be(&mut reader)?;
+
+        reader.seek_relative(tx_path_size as i64)?;
+        let data_path_size = read_u24_be(&mut reader)?;
+
+        reader.seek_relative(data_path_size as i64)?;
+        let packing_size = read_u8(&mut reader)?;
+
+        let (_, value) = value.split_at(3); // Skip chunk_size bytes
+        let (chunk, value) = value.split_at(chunk_size as u64);
+
+        let (_, value) = value.split_at(3); // Skip tx_path_size bytes
+        let (tx_path, value) = value.split_at(tx_path_size as u64);
+        let tx_path = if !tx_path.is_empty() {
+            Some(tx_path.make_contiguous())
+        } else {
+            None
+        };
+
+        let (_, value) = value.split_at(3); // Skip data_path_size bytes
+        let (data_path, value) = value.split_at(data_path_size as u64);
+        let data_path = data_path.make_contiguous();
+
+        let (_, value) = value.split_at(1); // Skip packing_size byte
+        let (packing, _) = value.split_at(packing_size as u64);
+        let packing = if !packing.is_empty() {
+            Some(packing.make_contiguous())
+        } else {
+            None
+        };
+
+        Ok(Self {
+            chunk,
+            data_path,
+            tx_path,
+            packing,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::Client;
+    use crate::chunk::RawTxDownloadChunk;
     use ario_core::Gateway;
+    use ario_core::blob::{OwnedBlob, TypedBlob};
+    use ario_core::buffer::ByteBuffer;
     use ario_core::network::Network;
     use ario_core::tx::TxId;
     use std::str::FromStr;
+
+    static CHUNK_PATH: &'static str = "./testdata/366659587055863.chunk2";
 
     fn init_tracing() {
         let _ = tracing_subscriber::fmt()
@@ -383,6 +492,20 @@ mod tests {
 
         assert_eq!(total, data_item.size());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_chunk2() -> anyhow::Result<()> {
+        let chunk = ByteBuffer::from(TypedBlob::try_from(OwnedBlob::from(
+            tokio::fs::read(&CHUNK_PATH).await?,
+        ))?);
+
+        let raw_chunk = RawTxDownloadChunk::try_from(chunk)?;
+        assert_eq!(raw_chunk.chunk.len(), 256 * 1024);
+        assert_eq!(raw_chunk.data_path.len(), 928);
+        assert_eq!(raw_chunk.tx_path.unwrap().len(), 352);
+        assert_eq!(raw_chunk.packing.unwrap().as_ref(), "unpacked".as_bytes());
         Ok(())
     }
 }

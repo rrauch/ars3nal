@@ -16,7 +16,7 @@ struct Chunk(RawTxDownloadChunk<'static>);
 pub struct FoyerChunkCache(DiskCache<u128, Chunk>);
 
 const CTX_FILE_CONTENT_TYPE: &'static str = "chunk";
-const CTX_FILE_COMP_VERSION: usize = 1;
+const CTX_FILE_COMP_VERSION: usize = 2;
 
 #[bon]
 impl FoyerChunkCache {
@@ -86,6 +86,12 @@ impl Code for Chunk {
         } else {
             0usize.encode(writer)?;
         }
+        if let Some(packing) = self.0.packing.as_ref() {
+            packing.len().encode(writer)?;
+            writer.write_all(packing.bytes()).map_err(CodeError::from)?;
+        } else {
+            0usize.encode(writer)?;
+        }
         Ok(())
     }
 
@@ -101,11 +107,18 @@ impl Code for Chunk {
         } else {
             Some(tx_path)
         };
+        let packing = OwnedBlob::from(Vec::<u8>::decode(reader)?);
+        let packing = if packing.is_empty() {
+            None
+        } else {
+            Some(packing)
+        };
 
         Ok(Chunk(RawTxDownloadChunk {
             chunk: chunk.into(),
             data_path,
             tx_path,
+            packing,
         }))
     }
 
@@ -116,5 +129,6 @@ impl Code for Chunk {
             + self.0.data_path.len()
             + size_of::<usize>()
             + self.0.tx_path.as_ref().map(|b| b.len()).unwrap_or(0)
+            + self.0.packing.as_ref().map(|b| b.len()).unwrap_or(0)
     }
 }
