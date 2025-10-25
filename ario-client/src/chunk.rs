@@ -281,119 +281,120 @@ impl Client {
     ) -> Result<Option<AuthenticatedTxDownloadChunk<'static>>, super::Error> {
         let chunk: UnauthenticatedTxDownloadChunk<'static> = match self
             .with_gw(async |gw| {
-                // At the time of writing this, downloading chunks from Arweave gateways is highly unreliable.
-                // There is approximately a 10-20% chance for any given chunk to return a 404, even if it is known to exist.
-                // Retrying after some time often succeeds. This flakiness severely impacts Arweave's usefulness.
-                //
-                // This multi-step, retry-heavy approach, while seemingly complex, seems to increase chances of success.
-                // Hopefully this will be fixed at one point on the gateway level and the code below can be removed / cleaned up.
+                Ok::<Option<RawTxDownloadChunk>, super::Error>({
+                    // At the time of writing this, downloading chunks from Arweave gateways is highly unreliable.
+                    // There is approximately a 10-20% chance for any given chunk to return a 404, even if it is known to exist.
+                    // Retrying after some time often succeeds. This flakiness severely impacts Arweave's usefulness.
+                    //
+                    // This multi-step, retry-heavy approach, while seemingly complex, seems to increase chances of success.
+                    // Hopefully this will be fixed at one point on the gateway level and the code below can be removed / cleaned up.
 
-                // Step 1: chunk proofs
-                // Separately requesting the chunk_proof first seems to help with chunk availability
-                // Sometimes the gateway returns a 570 status code, which seems to indicate that the chunk is currently unavailable
-                // but will be available shortly and retrying a little while later often works.
-                let proof = {
-                    let mut retry_delay = Duration::from_millis(250);
+                    // Step 1: chunk proofs
+                    // Separately requesting the chunk_proof first seems to help with chunk availability and also gives us more options.
+                    // Sometimes the gateway returns a 570 status code, which seems to indicate that the chunk is currently unavailable
+                    // but will be available shortly and retrying a little while later often works.
+                    let proof = {
+                        let mut retry_delay = Duration::from_millis(150);
 
-                    let mut proof2_attempts: u8 = 5;
-                    let mut proof_attempts: u8 = 5;
-                    loop {
-                        if proof2_attempts > 0 {
-                            proof2_attempts = proof2_attempts.saturating_sub(1);
-                            match self.0.api.download_chunk_proof2(gw, offset).await {
-                                Ok(Some(proof)) => break Some(proof),
-                                Err(api::Error::HttpResponseError(status_code, _))
-                                    if status_code == 570 =>
-                                {
-                                    // Temporarily unavailable, retry
+                        let mut proof2_attempts: u8 = 5;
+                        let mut proof_attempts: u8 = 5;
+                        loop {
+                            if proof2_attempts > 0 {
+                                proof2_attempts = proof2_attempts.saturating_sub(1);
+                                match self.0.api.download_chunk_proof2(gw, offset).await {
+                                    Ok(Some(proof)) => break Some(proof),
+                                    Err(api::Error::HttpResponseError(status_code, _))
+                                        if status_code == 570 =>
+                                    {
+                                        // Temporarily unavailable, retry
+                                    }
+                                    _ => break None,
                                 }
-                                _ => break None,
                             }
-                        }
 
-                        if proof_attempts > 0 {
-                            proof_attempts = proof_attempts.saturating_sub(1);
-                            proof2_attempts = proof2_attempts.saturating_sub(1);
-                            match self.0.api.download_chunk_proof(gw, offset).await {
-                                Ok(Some(proof)) => break Some(proof),
-                                Err(api::Error::HttpResponseError(status_code, _))
-                                    if status_code == 570 =>
-                                {
-                                    // Temporarily unavailable, retry
+                            if proof_attempts > 0 {
+                                proof_attempts = proof_attempts.saturating_sub(1);
+                                proof2_attempts = proof2_attempts.saturating_sub(1);
+                                match self.0.api.download_chunk_proof(gw, offset).await {
+                                    Ok(Some(proof)) => break Some(proof),
+                                    Err(api::Error::HttpResponseError(status_code, _))
+                                        if status_code == 570 =>
+                                    {
+                                        // Temporarily unavailable, retry
+                                    }
+                                    _ => break None,
                                 }
-                                _ => break None,
                             }
-                        }
 
-                        if proof_attempts == 0 && proof2_attempts == 0 {
-                            break None;
-                        }
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                    }
-                };
-
-                // Step 2: Attempt to download the actual chunk data.
-                // If a proof was successfully obtained, it significantly increases the likelihood of the chunk data also being available.
-                // Therefore, we allow more download attempts if a proof was found, accounting for potential delays in chunk propagation.
-                match {
-                    let mut attempts: u8 = if proof.is_some() { 10 } else { 3 };
-                    let mut retry_delay = Duration::from_millis(250);
-
-                    loop {
-                        // try chunk2 first
-                        if let Ok(Some(chunk)) = self.0.api.download_chunk2(gw, offset).await {
-                            break Some(chunk);
-                        } else {
-                            // fall back to chunk endpoint
-                            if let Ok(Some(chunk)) = self.0.api.download_chunk(gw, offset).await {
-                                break Some(chunk);
+                            if proof_attempts == 0 && proof2_attempts == 0 {
+                                break None;
                             }
+                            tokio::time::sleep(retry_delay).await;
+                            retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
                         }
-                        attempts = attempts.saturating_sub(1);
-                        if attempts == 0 {
-                            break None;
-                        }
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                    }
-                } {
-                    Some(chunk) => Ok(Some(chunk)),
-                    None if proof.is_some() && tx_id.is_some() => {
-                        // Step 3: Try to download the raw tx data directly using a range request.
-                        // At this point the `chunk` endpoints were unable to provide the payload, however
-                        // we **did** get a proof and we have a TxId, so we can attempt to build a chunk ourselves.
-                        match self
+                    };
+
+                    let proof_obtained = proof.is_some();
+
+                    if let Some(chunk) = if let Some(proof) = proof
+                        && let Some(tx_id) = tx_id
+                    {
+                        // Step 2: Try to download the raw tx data directly using a range request.
+                        // As we have both, the proof and the TxId, we can directly download the raw payload
+                        // and attempt to build a chunk ourselves. This endpoint seems much more reliable than
+                        // the chunk-related ones.
+                        if let Ok(Some(chunk)) = self
                             .0
                             .api
-                            .download_raw_tx_data(gw, tx_id.unwrap(), relative_range)
+                            .download_raw_tx_data(gw, tx_id, relative_range)
                             .await
                         {
-                            Ok(Some(chunk)) => {
-                                // looks promising
-                                let proof = proof.unwrap();
-                                Ok(Some(RawTxDownloadChunk {
-                                    chunk,
-                                    data_path: proof.data_path,
-                                    tx_path: proof.tx_path,
-                                    packing: None,
-                                }))
+                            Some(RawTxDownloadChunk {
+                                chunk,
+                                data_path: proof.data_path,
+                                tx_path: proof.tx_path,
+                                packing: None,
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    } {
+                        Some(chunk)
+                    } else {
+                        // Step 3: Try the chunk-endpoints in a loop.
+                        // If a proof was successfully obtained, it significantly increases the likelihood of the chunk data also being available.
+                        // Therefore, we allow more download attempts if a proof was found, accounting for potential delays in chunk propagation.
+                        let mut attempts: u8 = if proof_obtained { 10 } else { 3 };
+                        let mut retry_delay = Duration::from_millis(250);
+
+                        loop {
+                            // try chunk2 first
+                            if let Ok(Some(chunk)) = self.0.api.download_chunk2(gw, offset).await {
+                                break Some(chunk);
+                            } else {
+                                // fall back to chunk endpoint
+                                if let Ok(Some(chunk)) = self.0.api.download_chunk(gw, offset).await
+                                {
+                                    break Some(chunk);
+                                }
                             }
-                            _ => Err(DownloadError::ChunkUnobtainable(offset)),
+                            attempts = attempts.saturating_sub(1);
+                            if attempts == 0 {
+                                break None;
+                            }
+                            tokio::time::sleep(retry_delay).await;
+                            retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
                         }
                     }
-                    _ => {
-                        // unable to download chunk at this time
-                        // nothing left to try
-                        Err(DownloadError::ChunkUnobtainable(offset))
-                    }
-                }
+                })
             })
             .await?
         {
             Some(chunk) => (chunk, relative_range.start).into(),
             None => {
-                return Ok(None);
+                return Err(DownloadError::ChunkUnobtainable(offset))?;
             }
         };
 
