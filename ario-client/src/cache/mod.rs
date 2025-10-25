@@ -63,12 +63,12 @@ impl Cache {
     pub fn new(
         #[builder(default = ByteSize::mib(8))] metadata_max_mem: ByteSize,
         #[builder(default = Duration::from_secs(3600 * 24))] metadata_max_ttl: Duration,
-        #[builder(default = Duration::from_secs(60))] metadata_max_negative_ttl: Duration,
+        #[builder(default = Duration::from_secs(10))] metadata_max_negative_ttl: Duration,
         #[builder(with = |l2: impl L2MetadataCache + 'static| DynL2MetadataCache::new_box(l2))]
         metadata_l2_cache: Option<Box<DynL2MetadataCache<'static>>>,
         #[builder(default = ByteSize::mib(16))] chunk_max_mem: ByteSize,
         #[builder(default = Duration::from_secs(3600 * 24))] chunk_max_ttl: Duration,
-        #[builder(default = Duration::from_secs(60))] chunk_max_negative_ttl: Duration,
+        #[builder(default = Duration::from_secs(10))] chunk_max_negative_ttl: Duration,
         #[builder(with = |l2: impl L2ChunkCache + 'static| DynL2ChunkCache::new_box(l2))]
         chunk_l2_cache: Option<Box<DynL2ChunkCache<'static>>>,
     ) -> Self {

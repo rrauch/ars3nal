@@ -1,6 +1,6 @@
 use crate::blob::{AsBlob, Blob};
 use crate::chunking::{
-    Chunk, ChunkInfo, Chunker, DefaultChunker, IntoMaybeOwnedChunk, MaybeOwnedChunk,
+    Chunk, ChunkInfo, ChunkMap, Chunker, DefaultChunker, IntoMaybeOwnedChunk, MaybeOwnedChunk,
 };
 use crate::crypto::hash::{Digest, Hashable, HashableExt, Hasher, Sha256};
 use crate::crypto::{Output, OutputLen};
@@ -182,6 +182,36 @@ pub enum ProofError {
     },
     #[error("authentication failed")]
     AuthenticationFailed,
+}
+
+impl<H: Hasher, C: Chunker, const NOTE_SIZE: usize> ChunkMap for MerkleTree<'_, H, C, NOTE_SIZE>
+where
+    <H as Hasher>::Output: Unpin,
+    <C as Chunker>::Output: Unpin,
+    C: Send + Sync + Unpin,
+{
+    fn len(&self) -> usize {
+        self.num_chunks()
+    }
+
+    fn size(&self) -> u64 {
+        self.root.chunks().map(|r| r.end - r.start).sum()
+    }
+
+    fn max_chunk_size() -> usize
+    where
+        Self: Sized,
+    {
+        C::max_chunk_size()
+    }
+
+    fn chunk_at(&self, pos: u64) -> Option<Range<u64>> {
+        self.proof(pos).map(|p| p.offset.clone())
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = Range<u64>> + '_> {
+        Box::new(self.root.chunks().into_iter().map(|r| r.clone()))
+    }
 }
 
 #[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]

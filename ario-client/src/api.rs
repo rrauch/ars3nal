@@ -9,9 +9,12 @@ use bytes::{Bytes, BytesMut};
 use bytesize::ByteSize;
 use futures_lite::{Stream, StreamExt};
 use reqwest::Client as ReqwestClient;
+use reqwest::header::RANGE;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
+use std::ops::Range;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::string::{FromUtf8Error, FromUtf16Error};
@@ -57,6 +60,8 @@ pub enum Error {
     UnsupportedCharset(Charset),
     #[error(transparent)]
     GraphQlError(#[from] crate::graphql::GraphQlError),
+    #[error("range request not supported: {0}")]
+    RangeRequestNotSupported(Cow<'static, str>),
 }
 
 impl Api {
@@ -107,6 +112,15 @@ impl Api {
                 )
                 .header("Accept", api_request.accept.as_str())
                 .header::<&str, &str>("x-network", self.network().id());
+
+            if let Some(range) = api_request.range.take() {
+                if api_request.request_method != RequestMethod::Get {
+                    Err(Error::RangeRequestNotSupported("not a GET request".into()))?;
+                }
+
+                let range_value = format!("bytes={}-{}", range.start, range.end - 1);
+                builder = builder.header(RANGE, range_value);
+            }
 
             if let Some(body) = api_request.body.take() {
                 if let Some(content_type) = body.content_type {
@@ -463,6 +477,7 @@ pub(crate) struct ApiRequest<'a> {
     accept: ContentType,
     body: Option<ApiRequestBody<'a>>,
     max_response_len: Option<ByteSize>,
+    range: Option<Range<u64>>,
     #[builder(name = "idempotent", default = false)]
     is_idempotent: bool,
 }
@@ -507,6 +522,8 @@ pub(crate) enum PayloadError {
     JsonError(#[from] serde_json::Error),
     #[error("deserialization error: '{0}'")]
     DeserializationError(String),
+    #[error("unexpected payload length: expected '{expected}' but got '{actual}'")]
+    IncorrectLength { expected: u64, actual: u64 },
 }
 
 impl<'a> TryInto<reqwest::Body> for Payload<'a> {

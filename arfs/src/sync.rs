@@ -1,9 +1,9 @@
 use crate::db::Db;
+use crate::types::ArfsEntityId;
 use crate::types::drive::{DriveEntity, DriveId};
 use crate::types::file::{FileEntity, FileKind};
-use crate::types::folder::{FolderEntity, FolderId, FolderKind};
-use crate::types::{ArfsEntity, ArfsEntityId};
-use crate::{Private, Public, Vfs, resolve};
+use crate::types::folder::{FolderEntity, FolderKind};
+use crate::{FolderId, Private, Public, Vfs, resolve};
 use ario_client::Client;
 use ario_core::BlockNumber;
 use ario_core::wallet::WalletAddress;
@@ -11,8 +11,7 @@ use async_stream::stream;
 use chrono::{DateTime, Utc};
 use futures_lite::{Stream, StreamExt};
 use std::cmp::max;
-use std::collections::{HashSet, VecDeque};
-use std::ops::Deref;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -118,7 +117,7 @@ impl Syncer {
 
     pub fn status(&self) -> impl Stream<Item = Status> + Send + Unpin {
         let mut rx = self.status_rx.clone();
-        let mut ct = self.task_ct.clone();
+        let ct = self.task_ct.clone();
 
         Box::pin(stream! {
             yield if ct.is_cancelled() {
@@ -278,7 +277,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
             );
             tokio::select! {
                 ack = self.sync_trigger.recv() => {
-                    if let Some(mut ack) = ack {
+                    if let Some(ack) = ack {
                         if let Ok(_) = ack.send(()) {
                             // still active, starting sync now
                             self.next_sync = Utc::now();
@@ -423,7 +422,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
 
         {
             let mut conn = self.db.read().await?;
-            let mut stream = &mut conn.entity_ids().await?;
+            let stream = &mut conn.entity_ids().await?;
             while let Some(id) = stream.try_next().await? {
                 if !active.contains(&id) {
                     obsolete.push(id);
@@ -501,6 +500,9 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         new_files: Vec<FileEntity>,
         new_folders: Vec<FolderEntity>,
     ) -> Result<(usize, usize), crate::Error> {
+        // sort new folders to make sure they are inserted in the correct order
+        let new_folders = sort_folders_by_dependency(new_folders);
+
         let mut tx = self.db.write().await?;
         let (insertions, deletions, affected_inode_ids) =
             tx.sync_update(&obsolete, &new_files, &new_folders).await?;
@@ -523,4 +525,38 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         tracing::debug!("finding latest drive entity");
         resolve::find_drive_by_id_owner(&self.client, drive_id, owner, private).await
     }
+}
+
+fn sort_folders_by_dependency(folders: Vec<FolderEntity>) -> Vec<FolderEntity> {
+    let mut remaining = folders.into_iter().collect::<VecDeque<_>>();
+    let known = remaining.iter().map(|f| f.id().clone()).collect::<HashSet<_>>();
+    let mut processed = HashSet::with_capacity(remaining.len());
+    let mut result = Vec::with_capacity(remaining.len());
+
+    loop {
+        match remaining.pop_front() {
+            Some(folder) => {
+                let process = match folder.parent_folder() {
+                    None => true,
+                    Some(parent) => {
+                        if !known.contains(parent) {
+                            true
+                        } else {
+                            processed.contains(parent)
+                        }
+                    }
+                };
+
+                if process {
+                    processed.insert(folder.id().clone());
+                    result.push(folder);
+                } else {
+                    remaining.push_back(folder);
+                }
+            }
+            None => break,
+        }
+    }
+
+    result
 }

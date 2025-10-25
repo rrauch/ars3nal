@@ -6,6 +6,7 @@ use crate::chunk::{
 use ario_core::AuthenticationState;
 use ario_core::data::{AuthenticatedTxDataChunk, DataRoot, TxDataChunk};
 use std::iter;
+use std::ops::Range;
 
 pub(super) type ChunkCache =
     InnerCache<u128, AuthenticatedTxDataChunk<'static>, Box<DynL2ChunkCache<'static>>>;

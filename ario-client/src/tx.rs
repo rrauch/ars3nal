@@ -578,7 +578,7 @@ mod tests {
     use crate::tx::{Status, Submission};
     use anyhow::bail;
     use ario_core::Gateway;
-    use ario_core::chunking::DefaultChunker;
+    use ario_core::chunking::{ChunkMap, DefaultChunker};
     use ario_core::crypto::hash::{Hasher, HasherExt, Sha256};
     use ario_core::data::ExternalDataItemAuthenticator;
     use ario_core::jwk::Jwk;
@@ -798,14 +798,20 @@ mod tests {
         let tx_offset = client.tx_offset(tx_sub.tx_id()).await?;
         let data_root = authenticator.data_item().data_root();
         let mut total = 0;
-        while let Some(chunk) = client
-            .retrieve_chunk(tx_offset.absolute(total), total, data_root)
-            .await?
-        {
-            total += chunk.len();
-            hasher.update_buf(chunk.authenticated_data().cursor());
-            if total >= file_len {
-                break;
+
+        for range in ChunkMap::iter(&authenticator) {
+            match client
+                .retrieve_chunk(tx_offset.absolute(total), &range, data_root, tx.id())
+                .await?
+            {
+                Some(chunk) => {
+                    total += chunk.len();
+                    hasher.update_buf(chunk.authenticated_data().cursor());
+                    if total >= file_len {
+                        break;
+                    }
+                }
+                None => break,
             }
         }
 

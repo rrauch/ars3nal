@@ -78,6 +78,19 @@ async fn run() -> anyhow::Result<()> {
 
     server.insert_bucket("test2", arfs2)?;
 
+    let drive_3_owner = WalletAddress::from_str("m6eeNI_nADsDdGnpJmy3acX_VurlU_nMLTi05789cl0")?;
+    let drive_3_id = DriveId::from_str("680630e3-64b0-4c11-8150-d7929619db48")?;
+
+    let arfs3 = ArFs::builder()
+        .client(client.clone())
+        .drive_id(drive_3_id)
+        .db_dir("/tmp/foo/")
+        .scope(Scope::public(drive_3_owner.clone()))
+        .build()
+        .await?;
+
+    server.insert_bucket("test3", arfs3)?;
+
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
     let handle = server.serve();
     let mut status = handle.status();

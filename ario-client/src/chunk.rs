@@ -13,6 +13,7 @@ use ario_core::data::{
     AuthenticatedTxDataChunk, Authenticator, DataRoot, ExternalDataItemAuthenticator,
     TxDataAuthenticityProof, TxDataChunk, UnauthenticatedTxDataChunk,
 };
+use ario_core::tx::TxId;
 use ario_core::{Authenticated, AuthenticationState, Gateway, Unauthenticated};
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,7 @@ use serde_with::formats::Unpadded;
 use serde_with::serde_as;
 use std::io::{Read, Seek};
 use std::ops::Range;
+use std::time::Duration;
 use thiserror::Error;
 
 impl Api {
@@ -74,6 +76,32 @@ impl Api {
         }
     }
 
+    async fn download_chunk_proof(
+        &self,
+        gateway: &Gateway,
+        offset: u128,
+    ) -> Result<Option<RawTxChunkProof<'static>>, api::Error> {
+        let req = ApiRequest::builder()
+            .endpoint(
+                gateway
+                    .join(format!("./chunk_proof/{}", offset).as_str())
+                    .map_err(api::Error::InvalidUrl)?,
+            )
+            .request_method(Get)
+            .max_response_len(ByteSize::kib(64))
+            .idempotent(true)
+            .build();
+
+        match self.send_optional_api_request(req).await? {
+            Some(stream) => Ok(Some(
+                <ViaJson<_> as TryFromResponseStream>::try_from(stream)
+                    .await?
+                    .0,
+            )),
+            None => Ok(None),
+        }
+    }
+
     async fn download_chunk2(
         &self,
         gateway: &Gateway,
@@ -96,6 +124,68 @@ impl Api {
                 Ok(Some(buf.try_into().map_err(|e| {
                     PayloadError::DeserializationError(format!("error deserializing chunk: {}", e))
                 })?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn download_chunk_proof2(
+        &self,
+        gateway: &Gateway,
+        offset: u128,
+    ) -> Result<Option<RawTxChunkProof<'static>>, api::Error> {
+        let req = ApiRequest::builder()
+            .endpoint(
+                gateway
+                    .join(format!("./chunk_proof2/{}", offset).as_str())
+                    .map_err(api::Error::InvalidUrl)?,
+            )
+            .request_method(Get)
+            .max_response_len(ByteSize::mib(64))
+            .idempotent(true)
+            .build();
+
+        match self.send_optional_api_request(req).await? {
+            Some(stream) => {
+                let buf = <ByteBuffer<'_> as TryFromResponseStream>::try_from(stream).await?;
+                Ok(Some(buf.try_into().map_err(|e| {
+                    PayloadError::DeserializationError(format!("error deserializing chunk: {}", e))
+                })?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn download_raw_tx_data(
+        &self,
+        gateway: &Gateway,
+        tx_id: &TxId,
+        range: &Range<u64>,
+    ) -> Result<Option<ByteBuffer<'static>>, api::Error> {
+        let expected_len = range.end - range.start;
+
+        let req = ApiRequest::builder()
+            .endpoint(
+                gateway
+                    .join(format!("./{}", tx_id).as_str())
+                    .map_err(api::Error::InvalidUrl)?,
+            )
+            .request_method(Get)
+            .max_response_len(ByteSize::b(expected_len + 1024))
+            .range(range.clone())
+            .idempotent(true)
+            .build();
+
+        match self.send_optional_api_request(req).await? {
+            Some(stream) => {
+                let buf = <ByteBuffer<'_> as TryFromResponseStream>::try_from(stream).await?;
+                if buf.len() != expected_len {
+                    Err(PayloadError::IncorrectLength {
+                        expected: expected_len,
+                        actual: buf.len(),
+                    })?;
+                }
+                Ok(Some(buf))
             }
             None => Ok(None),
         }
@@ -169,13 +259,14 @@ impl Client {
     pub async fn retrieve_chunk(
         &self,
         offset: u128,
-        relative_offset: u64,
+        relative_range: &Range<u64>,
         data_root: &DataRoot,
+        tx_id: impl Into<Option<&TxId>>,
     ) -> Result<Option<AuthenticatedTxDataChunk<'static>>, super::Error> {
         self.0
             .cache
-            .get_chunk(offset, data_root, relative_offset, async |offset| {
-                self._retrieve_chunk_live(offset, relative_offset, data_root)
+            .get_chunk(offset, data_root, relative_range.start, async |offset| {
+                self._retrieve_chunk_live(offset, relative_range, data_root, tx_id.into())
                     .await
             })
             .await
@@ -184,22 +275,123 @@ impl Client {
     async fn _retrieve_chunk_live(
         &self,
         offset: u128,
-        relative_offset: u64,
+        relative_range: &Range<u64>,
         data_root: &DataRoot,
+        tx_id: Option<&TxId>,
     ) -> Result<Option<AuthenticatedTxDownloadChunk<'static>>, super::Error> {
         let chunk: UnauthenticatedTxDownloadChunk<'static> = match self
             .with_gw(async |gw| {
-                // try chunk2 first
-                if let Ok(Some(chunk)) = self.0.api.download_chunk2(gw, offset).await {
-                    Ok(Some(chunk))
-                } else {
-                    // fall back to chunk
-                    self.0.api.download_chunk(gw, offset).await
+                // At the time of writing this, downloading chunks from Arweave gateways is highly unreliable.
+                // There is approximately a 10-20% chance for any given chunk to return a 404, even if it is known to exist.
+                // Retrying after some time often succeeds. This flakiness severely impacts Arweave's usefulness.
+                //
+                // This multi-step, retry-heavy approach, while seemingly complex, seems to increase chances of success.
+                // Hopefully this will be fixed at one point on the gateway level and the code below can be removed / cleaned up.
+
+                // Step 1: chunk proofs
+                // Separately requesting the chunk_proof first seems to help with chunk availability
+                // Sometimes the gateway returns a 570 status code, which seems to indicate that the chunk is currently unavailable
+                // but will be available shortly and retrying a little while later often works.
+                let proof = {
+                    let mut retry_delay = Duration::from_millis(250);
+
+                    let mut proof2_attempts: u8 = 5;
+                    let mut proof_attempts: u8 = 5;
+                    loop {
+                        if proof2_attempts > 0 {
+                            proof2_attempts = proof2_attempts.saturating_sub(1);
+                            match self.0.api.download_chunk_proof2(gw, offset).await {
+                                Ok(Some(proof)) => break Some(proof),
+                                Err(api::Error::HttpResponseError(status_code, _))
+                                    if status_code == 570 =>
+                                {
+                                    // Temporarily unavailable, retry
+                                }
+                                _ => break None,
+                            }
+                        }
+
+                        if proof_attempts > 0 {
+                            proof_attempts = proof_attempts.saturating_sub(1);
+                            proof2_attempts = proof2_attempts.saturating_sub(1);
+                            match self.0.api.download_chunk_proof(gw, offset).await {
+                                Ok(Some(proof)) => break Some(proof),
+                                Err(api::Error::HttpResponseError(status_code, _))
+                                    if status_code == 570 =>
+                                {
+                                    // Temporarily unavailable, retry
+                                }
+                                _ => break None,
+                            }
+                        }
+
+                        if proof_attempts == 0 && proof2_attempts == 0 {
+                            break None;
+                        }
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
+                    }
+                };
+
+                // Step 2: Attempt to download the actual chunk data.
+                // If a proof was successfully obtained, it significantly increases the likelihood of the chunk data also being available.
+                // Therefore, we allow more download attempts if a proof was found, accounting for potential delays in chunk propagation.
+                match {
+                    let mut attempts: u8 = if proof.is_some() { 10 } else { 3 };
+                    let mut retry_delay = Duration::from_millis(250);
+
+                    loop {
+                        // try chunk2 first
+                        if let Ok(Some(chunk)) = self.0.api.download_chunk2(gw, offset).await {
+                            break Some(chunk);
+                        } else {
+                            // fall back to chunk endpoint
+                            if let Ok(Some(chunk)) = self.0.api.download_chunk(gw, offset).await {
+                                break Some(chunk);
+                            }
+                        }
+                        attempts = attempts.saturating_sub(1);
+                        if attempts == 0 {
+                            break None;
+                        }
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
+                    }
+                } {
+                    Some(chunk) => Ok(Some(chunk)),
+                    None if proof.is_some() && tx_id.is_some() => {
+                        // Step 3: Try to download the raw tx data directly using a range request.
+                        // At this point the `chunk` endpoints were unable to provide the payload, however
+                        // we **did** get a proof and we have a TxId, so we can attempt to build a chunk ourselves.
+                        match self
+                            .0
+                            .api
+                            .download_raw_tx_data(gw, tx_id.unwrap(), relative_range)
+                            .await
+                        {
+                            Ok(Some(chunk)) => {
+                                // looks promising
+                                let proof = proof.unwrap();
+                                Ok(Some(RawTxDownloadChunk {
+                                    chunk,
+                                    data_path: proof.data_path,
+                                    tx_path: proof.tx_path,
+                                    packing: None,
+                                }))
+                            }
+                            _ => Err(DownloadError::ChunkUnobtainable(offset)),
+                        }
+                    }
+                    _ => {
+                        // unable to download chunk at this time
+                        // nothing left to try
+                        Err(DownloadError::ChunkUnobtainable(offset))
+                    }
                 }
             })
             .await?
         {
-            Some(chunk) => (chunk, relative_offset).into(),
+            Some(chunk) => (chunk, relative_range.start).into(),
             None => {
                 return Ok(None);
             }
@@ -207,7 +399,7 @@ impl Client {
 
         Ok(Some(
             chunk
-                .authenticate(data_root, relative_offset)
+                .authenticate(data_root, relative_range.start)
                 .map_err(DownloadError::ProofError)?,
         ))
     }
@@ -229,6 +421,10 @@ pub enum UploadError {
 pub enum DownloadError {
     #[error(transparent)]
     ProofError(#[from] ProofError),
+    #[error(
+        "failed to download chunk at offset {0}. this usually indicates a temporary problem with the gateway"
+    )]
+    ChunkUnobtainable(u128),
 }
 
 #[serde_as]
@@ -323,18 +519,6 @@ impl<'a> TryFrom<ByteBuffer<'a>> for RawTxDownloadChunk<'a> {
     type Error = std::io::Error;
 
     fn try_from(value: ByteBuffer<'a>) -> Result<Self, Self::Error> {
-        fn read_u24_be(reader: &mut impl Read) -> std::io::Result<u32> {
-            let mut buf = [0x00, 0x00, 0x00];
-            reader.read_exact(&mut buf)?;
-            Ok(((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32))
-        }
-
-        fn read_u8(reader: &mut impl Read) -> std::io::Result<u8> {
-            let mut buf = [0x00];
-            reader.read_exact(&mut buf)?;
-            Ok(buf[0])
-        }
-
         let mut reader = value.cursor();
 
         let chunk_size = read_u24_be(&mut reader)?;
@@ -377,6 +561,55 @@ impl<'a> TryFrom<ByteBuffer<'a>> for RawTxDownloadChunk<'a> {
             tx_path,
             packing,
         })
+    }
+}
+
+fn read_u24_be(reader: &mut impl Read) -> std::io::Result<u32> {
+    let mut buf = [0x00, 0x00, 0x00];
+    reader.read_exact(&mut buf)?;
+    Ok(((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32))
+}
+
+fn read_u8(reader: &mut impl Read) -> std::io::Result<u8> {
+    let mut buf = [0x00];
+    reader.read_exact(&mut buf)?;
+    Ok(buf[0])
+}
+
+#[serde_as]
+#[derive(Clone, Deserialize, Debug, PartialEq)]
+pub struct RawTxChunkProof<'a> {
+    #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
+    pub data_path: Blob<'a>,
+    #[serde_as(as = "OptionalBase64As")]
+    #[serde(default)]
+    pub tx_path: Option<Blob<'a>>,
+}
+
+impl<'a> TryFrom<ByteBuffer<'a>> for RawTxChunkProof<'a> {
+    type Error = std::io::Error;
+
+    fn try_from(value: ByteBuffer<'a>) -> Result<Self, Self::Error> {
+        let mut reader = value.cursor();
+
+        let tx_path_size = read_u24_be(&mut reader)?;
+
+        reader.seek_relative(tx_path_size as i64)?;
+        let data_path_size = read_u24_be(&mut reader)?;
+
+        let (_, value) = value.split_at(3); // Skip tx_path_size bytes
+        let (tx_path, value) = value.split_at(tx_path_size as u64);
+        let tx_path = if !tx_path.is_empty() {
+            Some(tx_path.make_contiguous())
+        } else {
+            None
+        };
+
+        let (_, value) = value.split_at(3); // Skip data_path_size bytes
+        let (data_path, _) = value.split_at(data_path_size as u64);
+        let data_path = data_path.make_contiguous();
+
+        Ok(Self { tx_path, data_path })
     }
 }
 
@@ -426,19 +659,21 @@ mod tests {
 
         let mut total = 0;
 
-        while let Some(chunk) = client
-            .retrieve_chunk(tx_offset.absolute(total), total, data_root)
-            .await?
-        {
+        for range in data_item.chunk_map().unwrap().iter() {
+            let chunk = client
+                .retrieve_chunk(tx_offset.absolute(total), &range, data_root, tx.id())
+                .await?
+                .unwrap();
+
             // test cache
             let chunk_2 = client
-                .retrieve_chunk(tx_offset.absolute(total), total, data_root)
+                .retrieve_chunk(tx_offset.absolute(total), &range, data_root, tx.id())
                 .await?
                 .unwrap();
 
             assert_eq!(chunk, chunk_2);
 
-            total += chunk.len() as u64;
+            total += chunk.len();
             if total >= data_item.size() {
                 break;
             }
@@ -479,12 +714,15 @@ mod tests {
         let tx_offset = client.tx_offset(tx.id()).await?;
 
         let mut total = 0;
+        let range = total..data_item.size();
 
-        while let Some(chunk) = client
-            .retrieve_chunk(tx_offset.absolute(total), total, data_root)
-            .await?
-        {
-            total += chunk.len() as u64;
+        for range in data_item.chunk_map().unwrap().iter() {
+            let chunk = client
+                .retrieve_chunk(tx_offset.absolute(total), &range, data_root, tx.id())
+                .await?
+                .unwrap();
+
+            total += chunk.len();
             if total >= data_item.size() {
                 break;
             }

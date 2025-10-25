@@ -3,7 +3,7 @@ use crate::buffer::{ByteBuffer, TypedByteBuffer};
 use crate::bundle::{
     BundleItemAuthenticator, BundleItemDataProof, BundleItemKind, MaybeOwnedBundledDataItem,
 };
-use crate::chunking::{Chunker, ChunkerExt, DefaultChunker, MaybeOwnedChunk, TypedChunk};
+use crate::chunking::{ChunkMap, Chunker, ChunkerExt, DefaultChunker, MaybeOwnedChunk, TypedChunk};
 use crate::crypto::hash::{Hasher, Sha256};
 use crate::crypto::merkle;
 use crate::crypto::merkle::{DefaultMerkleRoot, DefaultProof, MerkleRoot, MerkleTree, Proof};
@@ -243,6 +243,37 @@ pub trait Authenticator<DataItem>: Sized {
 pub type ExternalDataItemAuthenticator<'a> =
     MerkleDataItemAuthenticator<'a, Sha256, DefaultChunker, 32>;
 
+impl<'a, H: Hasher + 'a, C: Chunker, const NOTE_SIZE: usize> ChunkMap
+    for MerkleDataItemAuthenticator<'a, H, C, NOTE_SIZE>
+where
+    MerkleTree<'a, H, C, NOTE_SIZE>: ChunkMap,
+    <H as Hasher>::Output: Unpin,
+    C: Unpin,
+{
+    fn len(&self) -> usize {
+        self.merkle_tree.len()
+    }
+
+    fn size(&self) -> u64 {
+        self.merkle_tree.size()
+    }
+
+    fn max_chunk_size() -> usize
+    where
+        Self: Sized,
+    {
+        <MerkleTree<'a, H, C, NOTE_SIZE> as ChunkMap>::max_chunk_size()
+    }
+
+    fn chunk_at(&self, pos: u64) -> Option<Range<u64>> {
+        self.merkle_tree.chunk_at(pos)
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = Range<u64>> + '_> {
+        self.merkle_tree.iter()
+    }
+}
+
 #[derive_where(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MerkleDataItemAuthenticator<'a, H: Hasher + 'a, C: Chunker, const NOTE_SIZE: usize> {
     data_item: MerkleAuthenticatableDataItem<'a, H, C, NOTE_SIZE>,
@@ -408,6 +439,14 @@ impl<'a> DataItem<'a> {
                 DataInner::BundleItemDataRoot(Some(MaybeOwned::Borrowed(d.data_root().borrow())))
                     .into()
             }
+        }
+    }
+
+    #[inline]
+    pub fn chunk_map(&self) -> Option<Box<dyn ChunkMap + Send + Sync + Unpin>> {
+        match self {
+            Self::External(_) => Some(Box::new(DefaultChunker::chunk_map(self.size()))),
+            _ => None,
         }
     }
 }

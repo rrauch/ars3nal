@@ -134,14 +134,15 @@ where
         TxKind: ReadableDataItem,
         Auth: AuthenticationState,
     {
-        self.chunk_map
+        let range = self
+            .chunk_map
             .chunk_at(range.start)
             .ok_or(Error::ChunkNotFound)?;
 
         let chunk_abs_pos = self.tx_offset.absolute(range.start);
         let chunk = self
             .client
-            .retrieve_chunk(chunk_abs_pos, range.start, &self.data_root)
+            .retrieve_chunk(chunk_abs_pos, &range, &self.data_root, self.tx.id())
             .await?
             .ok_or(Error::ChunkNotFound)?;
         Ok(chunk.into_state(None::<&()>)?)
