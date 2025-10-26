@@ -1,5 +1,6 @@
 use crate::cache::Error::L2Error;
 use crate::cache::{Context, Error, HasWeight, InnerCache, L2MetadataCache};
+use crate::chunk::TxChunkProof;
 use crate::location::{Arl, BundleItemArl};
 use crate::tx::Offset as TxOffset;
 use crate::{Cache, RawItemId};
@@ -72,6 +73,22 @@ pub trait L2Cache: Send + Sync {
     fn invalidate_tx_offset(
         &self,
         id: &TxId,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn get_tx_chunk_proof(
+        &self,
+        offset: u128,
+    ) -> impl Future<Output = Result<Option<TxChunkProof<'static>>, std::io::Error>> + Send;
+
+    fn insert_tx_chunk_proof(
+        &self,
+        offset: u128,
+        tx_chunk_proof: TxChunkProof<'static>,
+    ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
+    fn invalidate_tx_chunk_proof(
+        &self,
+        offset: u128,
     ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
 
     fn get_bundle(
@@ -180,6 +197,27 @@ impl Cache {
                 async |key, l2| l2.get_tx_offset(key).await,
                 async |key, offset, l2| {
                     l2.insert_tx_offset(key.0.clone().into_owned(), offset.into())
+                        .await
+                },
+            )
+            .await?
+            .map(|o| o.into()))
+    }
+
+    pub(crate) async fn get_tx_chunk_proof(
+        &self,
+        offset: u128,
+        f: impl AsyncFnOnce(u128) -> Result<Option<TxChunkProof<'static>>, crate::Error> + Send,
+    ) -> Result<Option<TxChunkProof<'static>>, crate::Error> {
+        let key = TxChunkProofKey::from(offset);
+        Ok(self
+            .metadata_cache
+            .try_get_value(
+                key,
+                async |key| f(*key.deref()).await.map(|v| v.map(|o| o.into())),
+                async |key, l2| l2.get_tx_chunk_proof(**key).await,
+                async |key, tx_chunk_proof, l2| {
+                    l2.insert_tx_chunk_proof(key.0.clone().into_owned(), tx_chunk_proof.into())
                         .await
                 },
             )
@@ -368,6 +406,7 @@ impl<'a> ToOwned for MaybeOwnedMetaKey<'a> {
         match self {
             Self::TxById(o) => MetaKey(MaybeOwnedMetaKey::TxById(o.to_owned())),
             Self::TxOffset(o) => MetaKey(MaybeOwnedMetaKey::TxOffset(o.to_owned())),
+            Self::TxChunkProof(o) => MetaKey(MaybeOwnedMetaKey::TxChunkProof(o.to_owned())),
             Self::BundleByLocation(o) => MetaKey(MaybeOwnedMetaKey::BundleByLocation(o.to_owned())),
             Self::BundleItemByLocation(o) => {
                 MetaKey(MaybeOwnedMetaKey::BundleItemByLocation(o.to_owned()))
@@ -392,6 +431,7 @@ impl<'a> Borrow<MaybeOwnedMetaKey<'a>> for MetaKey {
 pub(super) enum MetaValue {
     Tx(AuthenticatedTx<'static>),
     TxOffset(Offset),
+    TxChunkProof(TxChunkProof<'static>),
     Bundle(Bundle),
     BundleItem(
         (
@@ -515,6 +555,42 @@ impl Value for Offset {
     fn try_from_meta_value(value: MetaValue) -> Option<Self> {
         match value {
             MetaValue::TxOffset(offset) => Some(offset),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct TxChunkProofVariant;
+
+type TxChunkProofKey<'a> = KeyWrapper<'a, u128, TxChunkProofVariant>;
+impl<'a> Key for TxChunkProofKey<'a> {
+    type Value = TxChunkProof<'static>;
+}
+
+impl<'a> From<TxChunkProofKey<'a>> for MaybeOwnedMetaKey<'a> {
+    fn from(value: TxChunkProofKey<'a>) -> Self {
+        Self::TxChunkProof(value)
+    }
+}
+
+impl<'a> MaybeAsRef<TxChunkProofKey<'a>> for MaybeOwnedMetaKey<'a> {
+    fn maybe_as_ref(&self) -> Option<&TxChunkProofKey<'a>> {
+        match self {
+            MaybeOwnedMetaKey::TxChunkProof(tx_chunk_proof) => Some(tx_chunk_proof),
+            _ => None,
+        }
+    }
+}
+
+impl Value for TxChunkProof<'static> {
+    fn into_meta_value(self) -> MetaValue {
+        MetaValue::TxChunkProof(self)
+    }
+
+    fn try_from_meta_value(value: MetaValue) -> Option<Self> {
+        match value {
+            MetaValue::TxChunkProof(tx_chunk_proof) => Some(tx_chunk_proof),
             _ => None,
         }
     }
@@ -681,6 +757,7 @@ impl Value for Arl {
 enum MaybeOwnedMetaKey<'a> {
     TxById(TxByIdKey<'a>),
     TxOffset(TxOffsetKey<'a>),
+    TxChunkProof(TxChunkProofKey<'a>),
     BundleByLocation(BundleByLocationKey<'a>),
     BundleItemByLocation(BundleItemByLocationKey<'a>),
     UnauthenticatedBundleItemByLocation(UnauthenticatedBundleItemByLocationKey<'a>),

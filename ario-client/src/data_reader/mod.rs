@@ -174,6 +174,7 @@ impl Client {
         let mut intermediate_source: Option<UntaggedChunkSource<Unauthenticated>> = None;
 
         while let Some(arl) = iter.next() {
+            let x = arl.to_string();
             if iter.peek().is_none() {
                 // final item
                 return Ok(ChunkReader::new(

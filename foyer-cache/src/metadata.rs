@@ -2,6 +2,7 @@ use crate::disk_cache::DiskCache;
 use crate::{DEFAULT_MEM_BUF_SIZE, Error};
 use ario_client::RawItemId;
 use ario_client::cache::{Context, L2MetadataCache, Offset};
+use ario_client::chunk::TxChunkProof;
 use ario_client::location::{Arl, BundleItemArl};
 use ario_core::bundle::{Bundle, BundleItemAuthenticator, UnauthenticatedBundleItem};
 use ario_core::tx::{TxId, UnauthenticatedTx};
@@ -13,7 +14,7 @@ use std::io::Error as IoError;
 use std::path::Path;
 
 const CTX_FILE_CONTENT_TYPE: &'static str = "metadata";
-const CTX_FILE_COMP_VERSION: usize = 1;
+const CTX_FILE_COMP_VERSION: usize = 2;
 
 // foyer seems to have problems with types with lifetimes
 // so we are using owned types only here
@@ -21,6 +22,7 @@ const CTX_FILE_COMP_VERSION: usize = 1;
 enum CacheKey {
     TxId(TxId),
     TxOffset(TxId),
+    TxChunkProof(u128),
     BundleLocation(Arl),
     BundleItem(BundleItemArl),
     ItemLocationByAnyId(RawItemId),
@@ -30,6 +32,7 @@ enum CacheKey {
 enum BorrowedCacheKey<'a> {
     TxId(&'a TxId),
     TxOffset(&'a TxId),
+    TxChunkProof(&'a u128),
     BundleLocation(&'a Arl),
     BundleItem(&'a BundleItemArl),
     ItemLocationByAnyId(&'a RawItemId),
@@ -47,6 +50,13 @@ impl Equivalent<CacheKey> for BorrowedCacheKey<'_> {
             }
             CacheKey::TxOffset(other) => {
                 if let Self::TxOffset(this) = self {
+                    *this == other
+                } else {
+                    false
+                }
+            }
+            CacheKey::TxChunkProof(other) => {
+                if let Self::TxChunkProof(this) = self {
                     *this == other
                 } else {
                     false
@@ -87,6 +97,7 @@ impl From<BundleItemArl> for CacheKey {
 enum CacheValue {
     Tx(UnauthenticatedTx<'static>),
     TxOffset(Offset),
+    TxChunkProof(TxChunkProof<'static>),
     Bundle(Bundle),
     BundleItem(
         UnauthenticatedBundleItem<'static>,
@@ -126,6 +137,23 @@ impl TryFrom<CacheValue> for Offset {
 impl From<Offset> for CacheValue {
     fn from(value: Offset) -> Self {
         Self::TxOffset(value)
+    }
+}
+
+impl TryFrom<CacheValue> for TxChunkProof<'static> {
+    type Error = ();
+
+    fn try_from(value: CacheValue) -> Result<Self, Self::Error> {
+        match value {
+            CacheValue::TxChunkProof(value) => Ok(value),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<TxChunkProof<'static>> for CacheValue {
+    fn from(value: TxChunkProof<'static>) -> Self {
+        Self::TxChunkProof(value)
     }
 }
 
@@ -261,6 +289,27 @@ impl L2MetadataCache for FoyerMetadataCache {
 
     async fn invalidate_tx_offset(&self, id: &TxId) -> Result<(), std::io::Error> {
         self.0.invalidate(BorrowedCacheKey::TxOffset(id)).await
+    }
+
+    async fn get_tx_chunk_proof(
+        &self,
+        offset: u128,
+    ) -> Result<Option<TxChunkProof<'static>>, IoError> {
+        self.get(CacheKey::TxChunkProof(offset)).await
+    }
+
+    async fn insert_tx_chunk_proof(
+        &self,
+        offset: u128,
+        tx_chunk_proof: TxChunkProof<'static>,
+    ) -> Result<(), IoError> {
+        self.0
+            .insert(CacheKey::TxChunkProof(offset), tx_chunk_proof)
+            .await
+    }
+
+    async fn invalidate_tx_chunk_proof(&self, offset: u128) -> Result<(), IoError> {
+        self.0.invalidate(CacheKey::TxChunkProof(offset)).await
     }
 
     async fn get_bundle(&self, location: &Arl) -> Result<Option<Bundle>, std::io::Error> {

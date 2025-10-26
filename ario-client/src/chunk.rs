@@ -4,17 +4,17 @@ use crate::api::{
     ViaJson,
 };
 use crate::routemaster::Handle;
-use crate::{Client, api};
+use crate::{Client, Error, api};
 use ario_core::base64::OptionalBase64As;
 use ario_core::blob::{AsBlob, Blob};
 use ario_core::buffer::ByteBuffer;
-use ario_core::crypto::merkle::{DefaultProof, ProofError};
+use ario_core::crypto::merkle::ProofError;
 use ario_core::data::{
     AuthenticatedTxDataChunk, Authenticator, DataRoot, ExternalDataItemAuthenticator,
-    TxDataAuthenticityProof, TxDataChunk, UnauthenticatedTxDataChunk,
+    TxDataAuthenticityProof, UnauthenticatedTxDataChunk,
 };
 use ario_core::tx::TxId;
-use ario_core::{Authenticated, AuthenticationState, Gateway, Unauthenticated};
+use ario_core::{AuthenticationState, Gateway};
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
@@ -25,7 +25,6 @@ use serde_with::serde_as;
 use std::io::{Read, Seek};
 use std::ops::Range;
 use std::time::Duration;
-use thiserror::Error;
 
 impl Api {
     async fn upload_chunk(
@@ -50,37 +49,11 @@ impl Api {
         Ok(self.send_api_request(req).await?)
     }
 
-    async fn download_chunk(
-        &self,
-        gateway: &Gateway,
-        offset: u128,
-    ) -> Result<Option<RawTxDownloadChunk<'static>>, api::Error> {
-        let req = ApiRequest::builder()
-            .endpoint(
-                gateway
-                    .join(format!("./chunk/{}", offset).as_str())
-                    .map_err(api::Error::InvalidUrl)?,
-            )
-            .request_method(Get)
-            .max_response_len(ByteSize::mib(1))
-            .idempotent(true)
-            .build();
-
-        match self.send_optional_api_request(req).await? {
-            Some(stream) => Ok(Some(
-                <ViaJson<_> as TryFromResponseStream>::try_from(stream)
-                    .await?
-                    .0,
-            )),
-            None => Ok(None),
-        }
-    }
-
     async fn download_chunk_proof(
         &self,
         gateway: &Gateway,
         offset: u128,
-    ) -> Result<Option<RawTxChunkProof<'static>>, api::Error> {
+    ) -> Result<Option<TxChunkProof<'static>>, api::Error> {
         let req = ApiRequest::builder()
             .endpoint(
                 gateway
@@ -102,38 +75,11 @@ impl Api {
         }
     }
 
-    async fn download_chunk2(
-        &self,
-        gateway: &Gateway,
-        offset: u128,
-    ) -> Result<Option<RawTxDownloadChunk<'static>>, api::Error> {
-        let req = ApiRequest::builder()
-            .endpoint(
-                gateway
-                    .join(format!("./chunk2/{}", offset).as_str())
-                    .map_err(api::Error::InvalidUrl)?,
-            )
-            .request_method(Get)
-            .max_response_len(ByteSize::mib(1))
-            .idempotent(true)
-            .build();
-
-        match self.send_optional_api_request(req).await? {
-            Some(stream) => {
-                let buf = <ByteBuffer<'_> as TryFromResponseStream>::try_from(stream).await?;
-                Ok(Some(buf.try_into().map_err(|e| {
-                    PayloadError::DeserializationError(format!("error deserializing chunk: {}", e))
-                })?))
-            }
-            None => Ok(None),
-        }
-    }
-
     async fn download_chunk_proof2(
         &self,
         gateway: &Gateway,
         offset: u128,
-    ) -> Result<Option<RawTxChunkProof<'static>>, api::Error> {
+    ) -> Result<Option<TxChunkProof<'static>>, api::Error> {
         let req = ApiRequest::builder()
             .endpoint(
                 gateway
@@ -256,153 +202,133 @@ impl Client {
         Ok(())
     }
 
-    pub async fn retrieve_chunk(
+    pub async fn retrieve_chunk_proof(
         &self,
         offset: u128,
-        relative_range: &Range<u64>,
-        data_root: &DataRoot,
-        tx_id: impl Into<Option<&TxId>>,
-    ) -> Result<Option<AuthenticatedTxDataChunk<'static>>, super::Error> {
+    ) -> Result<Option<TxChunkProof<'static>>, super::Error> {
         self.0
             .cache
-            .get_chunk(offset, data_root, relative_range.start, async |offset| {
-                self._retrieve_chunk_live(offset, relative_range, data_root, tx_id.into())
+            .get_tx_chunk_proof(offset, async |offset| {
+                self._retrieve_chunk_proof_live(offset).await
+            })
+            .await
+    }
+
+    async fn _retrieve_chunk_proof_live(
+        &self,
+        offset: u128,
+    ) -> Result<Option<TxChunkProof<'static>>, super::Error> {
+        // At the time of writing this, downloading chunk proofs from Arweave gateways is highly unreliable.
+        // There is a very high chance of getting a result with a 570 status code when requesting a legitimate chunk proof.
+        // Retrying after some time often succeeds. This flakiness severely impacts Arweave's usefulness.
+        //
+        // This multi-step, retry-heavy approach, while seemingly complex, seems to increase chances of success.
+        // Hopefully this will be fixed at one point on the gateway level and the code below can be removed / cleaned up.
+        self.with_gw(async |gw| {
+            match {
+                let mut retry_delay = Duration::from_millis(150);
+
+                let mut proof2_attempts: u8 = 10;
+                let mut proof_attempts: u8 = 10;
+                loop {
+                    if proof2_attempts > 0 {
+                        proof2_attempts = proof2_attempts.saturating_sub(1);
+                        match self.0.api.download_chunk_proof2(gw, offset).await {
+                            Ok(Some(proof)) => break Some(proof),
+                            Err(api::Error::HttpResponseError(status_code, _))
+                                if status_code == 570 =>
+                            {
+                                // Temporarily unavailable, retry
+                            }
+                            _ => break None,
+                        }
+                    }
+
+                    if proof_attempts > 0 {
+                        proof_attempts = proof_attempts.saturating_sub(1);
+                        proof2_attempts = proof2_attempts.saturating_sub(1);
+                        match self.0.api.download_chunk_proof(gw, offset).await {
+                            Ok(Some(proof)) => break Some(proof),
+                            Err(api::Error::HttpResponseError(status_code, _))
+                                if status_code == 570 =>
+                            {
+                                // Temporarily unavailable, retry
+                            }
+                            _ => break None,
+                        }
+                    }
+
+                    if proof_attempts == 0 && proof2_attempts == 0 {
+                        break None;
+                    }
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
+                }
+            } {
+                Some(chunk_proof) => {
+                    Ok::<Option<TxChunkProof<'_>>, super::Error>(Some(chunk_proof))
+                }
+                None => Err(DownloadError::ChunkUnobtainable(offset))?,
+            }
+        })
+        .await
+    }
+
+    pub(crate) async fn retrieve_unauthenticated_chunk(
+        &self,
+        relative_range: &Range<u64>,
+        tx_id: &TxId,
+    ) -> Result<Option<UnauthenticatedTxDataChunk<'static>>, super::Error> {
+        self.0
+            .cache
+            .get_unauthenticated_chunk(relative_range, tx_id, async |range, tx_id| {
+                self._retrieve_unauthenticated_chunk_live(range, tx_id)
                     .await
             })
             .await
     }
 
-    async fn _retrieve_chunk_live(
+    async fn _retrieve_unauthenticated_chunk_live(
+        &self,
+        relative_range: &Range<u64>,
+        tx_id: &TxId,
+    ) -> Result<Option<UnauthenticatedTxDataChunk<'static>>, super::Error> {
+        // Downloads the raw tx data directly using a range request.
+        self.with_gw(async |gw| {
+            Ok::<Option<UnauthenticatedTxDataChunk<'_>>, super::Error>(
+                self.0
+                    .api
+                    .download_raw_tx_data(gw, tx_id, relative_range)
+                    .await?
+                    .map(|chunk| {
+                        UnauthenticatedTxDataChunk::from_byte_buffer(chunk, relative_range.start)
+                    }),
+            )
+        })
+        .await
+    }
+
+    pub async fn retrieve_chunk(
         &self,
         offset: u128,
         relative_range: &Range<u64>,
         data_root: &DataRoot,
-        tx_id: Option<&TxId>,
-    ) -> Result<Option<AuthenticatedTxDownloadChunk<'static>>, super::Error> {
-        let chunk: UnauthenticatedTxDownloadChunk<'static> = match self
-            .with_gw(async |gw| {
-                Ok::<Option<RawTxDownloadChunk>, super::Error>({
-                    // At the time of writing this, downloading chunks from Arweave gateways is highly unreliable.
-                    // There is approximately a 10-20% chance for any given chunk to return a 404, even if it is known to exist.
-                    // Retrying after some time often succeeds. This flakiness severely impacts Arweave's usefulness.
-                    //
-                    // This multi-step, retry-heavy approach, while seemingly complex, seems to increase chances of success.
-                    // Hopefully this will be fixed at one point on the gateway level and the code below can be removed / cleaned up.
-
-                    // Step 1: chunk proofs
-                    // Separately requesting the chunk_proof first seems to help with chunk availability and also gives us more options.
-                    // Sometimes the gateway returns a 570 status code, which seems to indicate that the chunk is currently unavailable
-                    // but will be available shortly and retrying a little while later often works.
-                    let proof = {
-                        let mut retry_delay = Duration::from_millis(150);
-
-                        let mut proof2_attempts: u8 = 10;
-                        let mut proof_attempts: u8 = 10;
-                        loop {
-                            if proof2_attempts > 0 {
-                                proof2_attempts = proof2_attempts.saturating_sub(1);
-                                match self.0.api.download_chunk_proof2(gw, offset).await {
-                                    Ok(Some(proof)) => break Some(proof),
-                                    Err(api::Error::HttpResponseError(status_code, _))
-                                        if status_code == 570 =>
-                                    {
-                                        // Temporarily unavailable, retry
-                                    }
-                                    _ => break None,
-                                }
-                            }
-
-                            if proof_attempts > 0 {
-                                proof_attempts = proof_attempts.saturating_sub(1);
-                                proof2_attempts = proof2_attempts.saturating_sub(1);
-                                match self.0.api.download_chunk_proof(gw, offset).await {
-                                    Ok(Some(proof)) => break Some(proof),
-                                    Err(api::Error::HttpResponseError(status_code, _))
-                                        if status_code == 570 =>
-                                    {
-                                        // Temporarily unavailable, retry
-                                    }
-                                    _ => break None,
-                                }
-                            }
-
-                            if proof_attempts == 0 && proof2_attempts == 0 {
-                                break None;
-                            }
-                            tokio::time::sleep(retry_delay).await;
-                            retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                        }
-                    };
-
-                    let proof_obtained = proof.is_some();
-
-                    if let Some(chunk) = if let Some(proof) = proof
-                        && let Some(tx_id) = tx_id
-                    {
-                        // Step 2: Try to download the raw tx data directly using a range request.
-                        // As we have both, the proof and the TxId, we can directly download the raw payload
-                        // and attempt to build a chunk ourselves. This endpoint seems much more reliable than
-                        // the chunk-related ones.
-                        if let Ok(Some(chunk)) = self
-                            .0
-                            .api
-                            .download_raw_tx_data(gw, tx_id, relative_range)
-                            .await
-                        {
-                            Some(RawTxDownloadChunk {
-                                chunk,
-                                data_path: proof.data_path,
-                                tx_path: proof.tx_path,
-                                packing: None,
-                            })
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    } {
-                        Some(chunk)
-                    } else {
-                        // Step 3: Try the chunk-endpoints in a loop.
-                        // If a proof was successfully obtained, it significantly increases the likelihood of the chunk data also being available.
-                        // Therefore, we allow more download attempts if a proof was found, accounting for potential delays in chunk propagation.
-                        let mut attempts: u8 = if proof_obtained { 10 } else { 3 };
-                        let mut retry_delay = Duration::from_millis(250);
-
-                        loop {
-                            // try chunk2 first
-                            if let Ok(Some(chunk)) = self.0.api.download_chunk2(gw, offset).await {
-                                break Some(chunk);
-                            } else {
-                                // fall back to chunk endpoint
-                                if let Ok(Some(chunk)) = self.0.api.download_chunk(gw, offset).await
-                                {
-                                    break Some(chunk);
-                                }
-                            }
-                            attempts = attempts.saturating_sub(1);
-                            if attempts == 0 {
-                                break None;
-                            }
-                            tokio::time::sleep(retry_delay).await;
-                            retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                        }
-                    }
-                })
-            })
-            .await?
-        {
-            Some(chunk) => (chunk, relative_range.start).into(),
-            None => {
-                return Err(DownloadError::ChunkUnobtainable(offset))?;
-            }
-        };
-
-        Ok(Some(
-            chunk
-                .authenticate(data_root, relative_range.start)
-                .map_err(DownloadError::ProofError)?,
-        ))
+        tx_id: &TxId,
+    ) -> Result<Option<AuthenticatedTxDataChunk<'static>>, super::Error> {
+        self.0
+            .cache
+            .get_authenticated_chunk(
+                offset,
+                relative_range,
+                data_root,
+                tx_id,
+                async |range, tx_id| {
+                    self._retrieve_unauthenticated_chunk_live(range, tx_id)
+                        .await
+                },
+                async |offset| self.retrieve_chunk_proof(offset).await,
+            )
+            .await
     }
 }
 
@@ -444,142 +370,15 @@ struct UploadChunk<'a> {
     //chunk: AuthenticatedTxDataChunk<'a>,
 }
 
-pub(crate) type UnauthenticatedTxDownloadChunk<'a> = TxDownloadChunk<'a, Unauthenticated>;
-impl<'a> UnauthenticatedTxDownloadChunk<'a> {
-    pub(crate) fn authenticate(
-        self,
-        data_root: &DataRoot,
-        relative_offset: u64,
-    ) -> Result<AuthenticatedTxDownloadChunk<'a>, ProofError> {
-        let proof = TxDataAuthenticityProof::new(
-            data_root,
-            DefaultProof::new(
-                relative_offset..(relative_offset + self.chunk.len() as u64),
-                Blob::Slice(self.data_path.bytes()),
-            ),
-        );
-
-        let validated = self.chunk.authenticate(&proof).map_err(|(_, e)| e)?;
-
-        Ok(TxDownloadChunk {
-            chunk: validated,
-            data_path: self.data_path,
-            tx_path: self.tx_path,
-            packing: self.packing,
-        })
-    }
-}
-
-pub(crate) type AuthenticatedTxDownloadChunk<'a> = TxDownloadChunk<'a, Authenticated>;
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TxDownloadChunk<'a, Auth: AuthenticationState> {
-    pub(crate) chunk: TxDataChunk<'a, Auth>,
-    data_path: Blob<'a>,
-    tx_path: Option<Blob<'a>>,
-    packing: Option<Blob<'a>>,
-}
-
-impl<'a> From<(RawTxDownloadChunk<'a>, u64)> for UnauthenticatedTxDownloadChunk<'a> {
-    fn from((raw, offset): (RawTxDownloadChunk<'a>, u64)) -> Self {
-        Self {
-            chunk: TxDataChunk::from_byte_buffer(raw.chunk.into(), offset),
-            data_path: raw.data_path,
-            tx_path: raw.tx_path,
-            packing: raw.packing,
-        }
-    }
-}
-
-impl<'a> From<AuthenticatedTxDownloadChunk<'a>> for RawTxDownloadChunk<'a> {
-    fn from(value: AuthenticatedTxDownloadChunk<'a>) -> Self {
-        Self {
-            chunk: value.chunk.into_inner().into_untyped(),
-            data_path: value.data_path,
-            tx_path: value.tx_path,
-            packing: value.packing,
-        }
-    }
-}
-
-#[serde_as]
-#[derive(Clone, Deserialize, Debug, PartialEq)]
-pub struct RawTxDownloadChunk<'a> {
-    #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
-    pub chunk: ByteBuffer<'a>,
-    #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
-    pub data_path: Blob<'a>,
-    #[serde_as(as = "OptionalBase64As")]
-    #[serde(default)]
-    pub tx_path: Option<Blob<'a>>,
-    #[serde(default)]
-    pub packing: Option<Blob<'a>>,
-}
-
-impl<'a> TryFrom<ByteBuffer<'a>> for RawTxDownloadChunk<'a> {
-    type Error = std::io::Error;
-
-    fn try_from(value: ByteBuffer<'a>) -> Result<Self, Self::Error> {
-        let mut reader = value.cursor();
-
-        let chunk_size = read_u24_be(&mut reader)?;
-
-        reader.seek_relative(chunk_size as i64)?;
-        let tx_path_size = read_u24_be(&mut reader)?;
-
-        reader.seek_relative(tx_path_size as i64)?;
-        let data_path_size = read_u24_be(&mut reader)?;
-
-        reader.seek_relative(data_path_size as i64)?;
-        let packing_size = read_u8(&mut reader)?;
-
-        let (_, value) = value.split_at(3); // Skip chunk_size bytes
-        let (chunk, value) = value.split_at(chunk_size as u64);
-
-        let (_, value) = value.split_at(3); // Skip tx_path_size bytes
-        let (tx_path, value) = value.split_at(tx_path_size as u64);
-        let tx_path = if !tx_path.is_empty() {
-            Some(tx_path.make_contiguous())
-        } else {
-            None
-        };
-
-        let (_, value) = value.split_at(3); // Skip data_path_size bytes
-        let (data_path, value) = value.split_at(data_path_size as u64);
-        let data_path = data_path.make_contiguous();
-
-        let (_, value) = value.split_at(1); // Skip packing_size byte
-        let (packing, _) = value.split_at(packing_size as u64);
-        let packing = if !packing.is_empty() {
-            Some(packing.make_contiguous())
-        } else {
-            None
-        };
-
-        Ok(Self {
-            chunk,
-            data_path,
-            tx_path,
-            packing,
-        })
-    }
-}
-
 fn read_u24_be(reader: &mut impl Read) -> std::io::Result<u32> {
     let mut buf = [0x00, 0x00, 0x00];
     reader.read_exact(&mut buf)?;
     Ok(((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32))
 }
 
-fn read_u8(reader: &mut impl Read) -> std::io::Result<u8> {
-    let mut buf = [0x00];
-    reader.read_exact(&mut buf)?;
-    Ok(buf[0])
-}
-
 #[serde_as]
-#[derive(Clone, Deserialize, Debug, PartialEq)]
-pub struct RawTxChunkProof<'a> {
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub struct TxChunkProof<'a> {
     #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
     pub data_path: Blob<'a>,
     #[serde_as(as = "OptionalBase64As")]
@@ -587,7 +386,7 @@ pub struct RawTxChunkProof<'a> {
     pub tx_path: Option<Blob<'a>>,
 }
 
-impl<'a> TryFrom<ByteBuffer<'a>> for RawTxChunkProof<'a> {
+impl<'a> TryFrom<ByteBuffer<'a>> for TxChunkProof<'a> {
     type Error = std::io::Error;
 
     fn try_from(value: ByteBuffer<'a>) -> Result<Self, Self::Error> {
@@ -617,10 +416,7 @@ impl<'a> TryFrom<ByteBuffer<'a>> for RawTxChunkProof<'a> {
 #[cfg(test)]
 mod tests {
     use crate::Client;
-    use crate::chunk::RawTxDownloadChunk;
     use ario_core::Gateway;
-    use ario_core::blob::{OwnedBlob, TypedBlob};
-    use ario_core::buffer::ByteBuffer;
     use ario_core::network::Network;
     use ario_core::tx::TxId;
     use std::str::FromStr;
@@ -731,20 +527,6 @@ mod tests {
 
         assert_eq!(total, data_item.size());
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn read_chunk2() -> anyhow::Result<()> {
-        let chunk = ByteBuffer::from(TypedBlob::try_from(OwnedBlob::from(
-            tokio::fs::read(&CHUNK_PATH).await?,
-        ))?);
-
-        let raw_chunk = RawTxDownloadChunk::try_from(chunk)?;
-        assert_eq!(raw_chunk.chunk.len(), 256 * 1024);
-        assert_eq!(raw_chunk.data_path.len(), 928);
-        assert_eq!(raw_chunk.tx_path.unwrap().len(), 352);
-        assert_eq!(raw_chunk.packing.unwrap().as_ref(), "unpacked".as_bytes());
         Ok(())
     }
 }

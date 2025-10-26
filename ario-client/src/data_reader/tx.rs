@@ -7,8 +7,8 @@ use crate::location::TypedArl;
 use crate::tx::Offset;
 use ario_core::chunking::{AnyChunkMap, ChunkMap, DefaultChunker};
 use ario_core::data::{AuthenticatedTxDataChunk, DataChunk, DataItem, DataRoot, TxDataChunk};
-use ario_core::tx::{AuthenticatedTx, Tx, TxKind};
-use ario_core::{Authenticated, AuthenticationState, Item};
+use ario_core::tx::{AuthenticatedTx, Tx, TxId, TxKind};
+use ario_core::{Authenticated, AuthenticationState, Item, Unauthenticated};
 use async_trait::async_trait;
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -29,6 +29,7 @@ where
     for<'a> Tx<'a, Auth>: From<Tx<'a, Authenticated>>,
     for<'a> TxDataChunk<'a, Auth>: From<TxDataChunk<'a, Authenticated>>,
     for<'a> TxDataChunk<'a, Authenticated>: DataChunkExt<'a, TxKind, (), Auth>,
+    Auth: TxChunkRetriever,
 {
     fn from(value: TxChunkSource<Auth>) -> Self {
         Box::new(ChunkSourceTagEraser::new(value))
@@ -49,6 +50,7 @@ where
     for<'a> Tx<'a, Auth>: From<AuthenticatedTx<'a>>,
     for<'a> TxDataChunk<'a, Auth>: From<AuthenticatedTxDataChunk<'a>>,
     for<'a> AuthenticatedTxDataChunk<'a>: DataChunkExt<'a, TxKind, (), Auth>,
+    Auth: TxChunkRetriever,
 {
     async fn new_from_location(
         client: &Client,
@@ -113,6 +115,7 @@ where
     for<'b> Tx<'b, Auth>: From<AuthenticatedTx<'b>>,
     for<'b> TxDataChunk<'b, Auth>: From<AuthenticatedTxDataChunk<'b>>,
     for<'b> AuthenticatedTxDataChunk<'b>: DataChunkExt<'b, TxKind, (), Auth>,
+    Auth: TxChunkRetriever,
 {
     fn len(&self) -> u64 {
         self.data_size
@@ -140,11 +143,55 @@ where
             .ok_or(Error::ChunkNotFound)?;
 
         let chunk_abs_pos = self.tx_offset.absolute(range.start);
-        let chunk = self
-            .client
-            .retrieve_chunk(chunk_abs_pos, &range, &self.data_root, self.tx.id())
-            .await?
-            .ok_or(Error::ChunkNotFound)?;
-        Ok(chunk.into_state(None::<&()>)?)
+
+        let chunk = <Auth as TxChunkRetriever>::retrieve_tx_chunk(
+            &self.client,
+            chunk_abs_pos,
+            &range,
+            &self.data_root,
+            self.tx.id(),
+        )
+        .await?
+        .ok_or(Error::ChunkNotFound)?;
+
+        Ok(chunk)
+    }
+}
+
+trait TxChunkRetriever: AuthenticationState {
+    fn retrieve_tx_chunk(
+        client: &Client,
+        offset: u128,
+        relative_range: &Range<u64>,
+        data_root: &DataRoot,
+        tx_id: &TxId,
+    ) -> impl Future<Output = Result<Option<TxDataChunk<'static, Self>>, crate::Error>> + Send;
+}
+
+impl TxChunkRetriever for Authenticated {
+    async fn retrieve_tx_chunk(
+        client: &Client,
+        offset: u128,
+        relative_range: &Range<u64>,
+        data_root: &DataRoot,
+        tx_id: &TxId,
+    ) -> Result<Option<TxDataChunk<'static, Self>>, crate::Error> {
+        client
+            .retrieve_chunk(offset, relative_range, data_root, tx_id)
+            .await
+    }
+}
+
+impl TxChunkRetriever for Unauthenticated {
+    async fn retrieve_tx_chunk(
+        client: &Client,
+        _: u128,
+        relative_range: &Range<u64>,
+        _: &DataRoot,
+        tx_id: &TxId,
+    ) -> Result<Option<TxDataChunk<'static, Self>>, crate::Error> {
+        client
+            .retrieve_unauthenticated_chunk(relative_range, tx_id)
+            .await
     }
 }

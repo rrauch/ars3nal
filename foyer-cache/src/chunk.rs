@@ -1,22 +1,68 @@
 use crate::disk_cache::DiskCache;
 use crate::{DEFAULT_MEM_BUF_SIZE, Error};
 use ario_client::cache::{Context, L2ChunkCache};
-use ario_client::chunk::RawTxDownloadChunk;
 use ario_core::blob::OwnedBlob;
+use ario_core::buffer::ByteBuffer;
+use ario_core::data::UnauthenticatedTxDataChunk;
+use ario_core::tx::TxId;
 use bon::bon;
+use equivalent::Equivalent;
 use foyer::{Code, CodeError};
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
 
 #[derive(Clone)]
 #[repr(transparent)]
-struct Chunk(RawTxDownloadChunk<'static>);
+struct Chunk(UnauthenticatedTxDataChunk<'static>);
+
+impl From<UnauthenticatedTxDataChunk<'static>> for Chunk {
+    fn from(value: UnauthenticatedTxDataChunk<'static>) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+struct CacheKey {
+    relative_offset: u64,
+    tx_id: TxId,
+}
+
+impl From<(u64, TxId)> for CacheKey {
+    fn from(value: (u64, TxId)) -> Self {
+        Self {
+            relative_offset: value.0,
+            tx_id: value.1,
+        }
+    }
+}
+
+#[derive(Hash)]
+struct BorrowedCacheKey<'a> {
+    relative_offset: u64,
+    tx_id: &'a TxId,
+}
+
+impl<'a> From<(u64, &'a TxId)> for BorrowedCacheKey<'a> {
+    fn from(value: (u64, &'a TxId)) -> Self {
+        Self {
+            relative_offset: value.0,
+            tx_id: value.1,
+        }
+    }
+}
+
+impl Equivalent<CacheKey> for BorrowedCacheKey<'_> {
+    fn equivalent(&self, key: &CacheKey) -> bool {
+        self.relative_offset == key.relative_offset && self.tx_id == &key.tx_id
+    }
+}
 
 #[repr(transparent)]
-pub struct FoyerChunkCache(DiskCache<u128, Chunk>);
+pub struct FoyerChunkCache(DiskCache<CacheKey, Chunk>);
 
 const CTX_FILE_CONTENT_TYPE: &'static str = "chunk";
-const CTX_FILE_COMP_VERSION: usize = 2;
+const CTX_FILE_COMP_VERSION: usize = 3;
 
 #[bon]
 impl FoyerChunkCache {
@@ -47,25 +93,31 @@ impl L2ChunkCache for FoyerChunkCache {
 
     async fn get_chunk(
         &self,
-        offset: &u128,
-    ) -> Result<Option<RawTxDownloadChunk<'static>>, std::io::Error> {
-        Ok(self.0.get(*offset).await?.map(|e| e.0))
+        relative_offset: u64,
+        tx_id: &TxId,
+    ) -> Result<Option<UnauthenticatedTxDataChunk<'static>>, std::io::Error> {
+        Ok(self
+            .0
+            .get(BorrowedCacheKey::from((relative_offset, tx_id)))
+            .await?
+            .map(|c| c.0))
     }
 
     async fn insert_chunk(
         &self,
-        offset: u128,
-        value: RawTxDownloadChunk<'static>,
+        relative_offset: u64,
+        tx_id: TxId,
+        value: UnauthenticatedTxDataChunk<'static>,
     ) -> Result<(), std::io::Error> {
-        self.0.insert(offset, Chunk(value)).await
+        self.0.insert((relative_offset, tx_id), value).await
     }
 
     async fn invalidate_many<'a>(
         &self,
-        iter: impl Iterator<Item = &'a u128> + Send,
+        iter: impl Iterator<Item = (u64, &'a TxId)> + Send,
     ) -> Result<(), std::io::Error> {
         for key in iter {
-            self.0.invalidate(*key).await?;
+            self.0.invalidate(BorrowedCacheKey::from(key)).await?;
         }
         self.0.flush().await;
         Ok(())
@@ -74,24 +126,10 @@ impl L2ChunkCache for FoyerChunkCache {
 
 impl Code for Chunk {
     fn encode(&self, writer: &mut impl Write) -> Result<(), CodeError> {
-        self.0.chunk.len().encode(writer)?;
-        std::io::copy(&mut self.0.chunk.cursor(), writer).map_err(CodeError::from)?;
-        self.0.data_path.len().encode(writer)?;
-        writer
-            .write_all(self.0.data_path.bytes())
-            .map_err(CodeError::from)?;
-        if let Some(tx_path) = self.0.tx_path.as_ref() {
-            tx_path.len().encode(writer)?;
-            writer.write_all(tx_path.bytes()).map_err(CodeError::from)?;
-        } else {
-            0usize.encode(writer)?;
-        }
-        if let Some(packing) = self.0.packing.as_ref() {
-            packing.len().encode(writer)?;
-            writer.write_all(packing.bytes()).map_err(CodeError::from)?;
-        } else {
-            0usize.encode(writer)?;
-        }
+        let data = self.0.danger_unauthenticated_data();
+        data.len().encode(writer)?;
+        std::io::copy(&mut data.cursor(), writer).map_err(CodeError::from)?;
+        self.0.offset().encode(writer)?;
         Ok(())
     }
 
@@ -100,35 +138,12 @@ impl Code for Chunk {
         Self: Sized,
     {
         let chunk = OwnedBlob::from(Vec::<u8>::decode(reader)?);
-        let data_path = OwnedBlob::from(Vec::<u8>::decode(reader)?);
-        let tx_path = OwnedBlob::from(Vec::<u8>::decode(reader)?);
-        let tx_path = if tx_path.is_empty() {
-            None
-        } else {
-            Some(tx_path)
-        };
-        let packing = OwnedBlob::from(Vec::<u8>::decode(reader)?);
-        let packing = if packing.is_empty() {
-            None
-        } else {
-            Some(packing)
-        };
+        let offset = u64::decode(reader)?;
 
-        Ok(Chunk(RawTxDownloadChunk {
-            chunk: chunk.into(),
-            data_path,
-            tx_path,
-            packing,
-        }))
+        Ok(UnauthenticatedTxDataChunk::from_byte_buffer(ByteBuffer::from(chunk), offset).into())
     }
 
     fn estimated_size(&self) -> usize {
-        size_of::<u64>()
-            + self.0.chunk.len() as usize
-            + size_of::<usize>()
-            + self.0.data_path.len()
-            + size_of::<usize>()
-            + self.0.tx_path.as_ref().map(|b| b.len()).unwrap_or(0)
-            + self.0.packing.as_ref().map(|b| b.len()).unwrap_or(0)
+        self.0.len() as usize + size_of::<u64>()
     }
 }
