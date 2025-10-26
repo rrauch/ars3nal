@@ -141,7 +141,7 @@ impl Api {
                     .map_err(api::Error::InvalidUrl)?,
             )
             .request_method(Get)
-            .max_response_len(ByteSize::mib(64))
+            .max_response_len(ByteSize::kib(64))
             .idempotent(true)
             .build();
 
@@ -296,8 +296,8 @@ impl Client {
                     let proof = {
                         let mut retry_delay = Duration::from_millis(150);
 
-                        let mut proof2_attempts: u8 = 5;
-                        let mut proof_attempts: u8 = 5;
+                        let mut proof2_attempts: u8 = 10;
+                        let mut proof_attempts: u8 = 10;
                         loop {
                             if proof2_attempts > 0 {
                                 proof2_attempts = proof2_attempts.saturating_sub(1);
