@@ -2,7 +2,7 @@ use crate::db::{DataError, Db, Transaction, TxScope};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{Entity, Model};
-use crate::{ContentType, Visibility, db};
+use crate::{CacheSettings, ContentType, Visibility, db};
 use ario_client::data_reader::DataReader;
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use thiserror::Error;
 use typed_path::{Utf8UnixEncoding, Utf8UnixPath, Utf8UnixPathBuf};
 
@@ -136,19 +137,29 @@ async fn root(
 }
 
 impl Vfs {
-    pub(super) async fn new(client: Client, db: Db) -> Result<Self, crate::Error> {
+    pub(super) async fn new(
+        client: Client,
+        db: Db,
+        cache_settings: CacheSettings,
+    ) -> Result<Self, crate::Error> {
         let path_cache = Cache::builder()
             .name("path_cache")
             .support_invalidation_closures()
-            .build(); //todo
+            .max_capacity(cache_settings.path_cache_capacity)
+            .time_to_live(cache_settings.path_cache_ttl)
+            .build();
         let inode_cache = Cache::builder()
             .name("inode_cache")
             .support_invalidation_closures()
-            .build(); //todo
+            .max_capacity(cache_settings.inode_cache_capacity)
+            .time_to_live(cache_settings.inode_cache_ttl)
+            .build();
         let dir_cache = Cache::builder()
             .name("dir_cache")
             .support_invalidation_closures()
-            .build(); //todo
+            .max_capacity(cache_settings.dir_cache_capacity)
+            .time_to_live(cache_settings.dir_cache_ttl)
+            .build();
 
         let stats = stats(&db).await?;
         let root = root(&db, &path_cache, &inode_cache).await?;

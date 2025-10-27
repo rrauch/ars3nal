@@ -1,4 +1,4 @@
-use arfs::{ArFs, DriveId, Scope};
+use arfs::{ArFs, CacheSettings, DriveId, Scope};
 use ario_client::{Cache, Client};
 use ario_core::Gateway;
 use ario_core::wallet::WalletAddress;
@@ -6,6 +6,7 @@ use ars3nal::{Server, ServerStatus};
 use foyer_cache::{FoyerChunkCache, FoyerMetadataCache};
 use futures_lite::StreamExt;
 use std::str::FromStr;
+use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt()
@@ -24,7 +25,7 @@ fn main() -> anyhow::Result<()> {
 async fn run() -> anyhow::Result<()> {
     let client = Client::builder()
         .gateways([
-            Gateway::from_str("https://permagate.io")?,
+            //Gateway::from_str("https://permagate.io")?,
             Gateway::default(),
             Gateway::from_str("https://ar-io-gateway.svc.blacksand.xyz")?,
         ])
@@ -60,6 +61,11 @@ async fn run() -> anyhow::Result<()> {
         .drive_id(drive_1_id)
         .db_dir("/tmp/foo/")
         .scope(Scope::public(drive_1_owner.clone()))
+        .cache_settings(
+            CacheSettings::builder()
+                .path_cache_ttl(Duration::from_secs(7200))
+                .build(),
+        )
         .build()
         .await?;
 

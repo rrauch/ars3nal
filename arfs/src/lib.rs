@@ -28,6 +28,7 @@ use ario_core::tx::TxId;
 use ario_core::wallet::{Wallet, WalletAddress};
 
 use crate::types::file::FileId;
+use bon::Builder;
 use core::fmt;
 use derive_more::Display;
 use futures_lite::Stream;
@@ -107,6 +108,28 @@ struct SyncSettings {
     sync_min_initial: Duration,
 }
 
+#[derive(Builder, Clone, Debug)]
+pub struct CacheSettings {
+    #[builder(default = 1000)]
+    path_cache_capacity: u64,
+    #[builder(default = Duration::from_secs(3600))]
+    path_cache_ttl: Duration,
+    #[builder(default = 1000)]
+    inode_cache_capacity: u64,
+    #[builder(default = Duration::from_secs(3600))]
+    inode_cache_ttl: Duration,
+    #[builder(default = 1000)]
+    dir_cache_capacity: u64,
+    #[builder(default = Duration::from_secs(3600))]
+    dir_cache_ttl: Duration,
+}
+
+impl Default for CacheSettings {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+
 #[bon::bon]
 impl ArFs {
     #[builder(derive(Debug))]
@@ -119,6 +142,7 @@ impl ArFs {
         scope: Scope,
         #[builder(default = Duration::from_secs(900))] sync_interval: Duration,
         #[builder(default = Duration::from_secs(60))] sync_min_initial: Duration,
+        #[builder(default)] cache_settings: CacheSettings,
     ) -> Result<Self, Error> {
         tokio::fs::create_dir_all(db_dir).await?;
         let db = Db::new(
@@ -137,7 +161,7 @@ impl ArFs {
             sync_min_initial,
         };
 
-        let vfs = Vfs::new(client.clone(), db.clone()).await?;
+        let vfs = Vfs::new(client.clone(), db.clone(), cache_settings).await?;
 
         Ok(Self(Arc::new(
             ErasedArFs::new(client, db, vfs, sync_settings, drive_config, scope).await?,
