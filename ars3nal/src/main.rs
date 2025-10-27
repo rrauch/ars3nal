@@ -2,17 +2,26 @@ use arfs::{ArFs, CacheSettings, DriveId, Scope};
 use ario_client::{Cache, Client};
 use ario_core::Gateway;
 use ario_core::wallet::WalletAddress;
-use ars3nal::{Server, ServerStatus};
+use ars3nal::{Server, ServerHandle, ServerStatus};
 use foyer_cache::{FoyerChunkCache, FoyerMetadataCache};
 use futures_lite::StreamExt;
 use std::str::FromStr;
 use std::time::Duration;
+use tracing::Level;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 fn main() -> anyhow::Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_test_writer()
-        .try_init();
+    let filter = EnvFilter::builder()
+        .with_default_directive(Level::INFO.into())
+        .from_env_lossy();
+    let (filter, _) = tracing_subscriber::reload::Layer::new(filter);
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::Layer::default())
+        .init();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_io()
@@ -97,36 +106,109 @@ async fn run() -> anyhow::Result<()> {
 
     server.insert_bucket("test3", arfs3)?;
 
-    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
     let handle = server.serve();
     let mut status = handle.status();
 
-    let mut shutting_down = false;
+    let shutdown = tokio::spawn(shutdown_listener(RunGuard(handle.clone())));
 
-    loop {
-        tokio::select! {
-            status = status.next() => {
-                match status {
-                    Some(ServerStatus::Serving) => {
-                        tracing::debug!("received server status: serving");
-                    }
-                    Some(ServerStatus::ShuttingDown) => {
-                        tracing::info!("server shutting down");
-                        shutting_down = true;
-                    },
-                    Some(ServerStatus::Finished) | None => {
-                        break;
-                    }
-                }
+    notify_ready().await;
+
+    while let Some(status) = status.next().await {
+        match status {
+            ServerStatus::Serving => {
+                tracing::debug!("received server status: serving");
             }
-            _ = &mut ctrl_c, if !shutting_down => {
-                handle.shutdown();
-                shutting_down = true;
+            ServerStatus::ShuttingDown => {
+                tracing::info!("server shutting down");
+                notify_stopping().await;
+            }
+            ServerStatus::Finished => {
+                break;
             }
         }
     }
 
+    shutdown.abort();
+
     tracing::info!("server shutdown complete");
 
     Ok(())
+}
+
+#[repr(transparent)]
+struct RunGuard(ServerHandle);
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.0.shutdown();
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn notify_ready() {
+    let _ = tokio::task::spawn_blocking(|| {
+        let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
+    })
+    .await;
+}
+
+#[cfg(target_os = "linux")]
+async fn notify_stopping() {
+    let _ = tokio::task::spawn_blocking(|| {
+        let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Stopping]);
+    })
+    .await;
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn notify_ready() {}
+
+#[cfg(not(target_os = "linux"))]
+async fn notify_stopping() {}
+
+#[cfg(unix)]
+fn shutdown_listener(guard: RunGuard) -> impl Future<Output = ()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigint = signal(SignalKind::interrupt()).unwrap();
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
+
+    async move {
+        let _guard = guard;
+        tokio::select! {
+            _ = sigint.recv() => {
+                tracing::info!("SIGINT received, shutting down")
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("SIGTERM received, shutting down")
+            }
+        }
+        notify_stopping().await;
+    }
+}
+
+#[cfg(windows)]
+fn shutdown_listener(guard: RunGuard) -> impl Future<Output = ()> {
+    use tokio::signal::windows::ctrl_break;
+    use tokio::signal::windows::ctrl_c;
+    use tokio::signal::windows::ctrl_close;
+
+    let mut ctrl_c = ctrl_c()?;
+    let mut ctrl_close = ctrl_close()?;
+    let mut ctrl_break = ctrl_break()?;
+
+    async move {
+        let _guard = guard;
+        tokio::select! {
+            _ = ctrl_c.recv() => {
+                tracing::info!("CTRL_C received, shutting down")
+            }
+            _ = ctrl_close.recv() => {
+                tracing::info!("CTRL_CLOSE received, shutting down")
+            }
+            _ = ctrl_break.recv() => {
+                tracing::info!("CTRL_BREAK received, shutting down")
+            }
+        }
+    }
 }

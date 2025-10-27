@@ -1,4 +1,4 @@
 mod s3;
 mod server;
 
-pub use server::{Server, ServerBuilder, Status as ServerStatus};
+pub use server::{Handle as ServerHandle, Server, ServerBuilder, Status as ServerStatus};
