@@ -2,6 +2,12 @@
 resolver = "3"
 members = ["ario-core", "ario-client", "arfs", "ars3nal", "foyer-cache"]
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
 [workspace.dependencies]
 ario-client = { path = "ario-client" }
 ario-core = { path = "ario-core" }

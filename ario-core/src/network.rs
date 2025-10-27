@@ -2,6 +2,7 @@ use crate::typed::{Typed, WithSerde};
 use serde::Serializer;
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
+use std::str::FromStr;
 use thiserror::Error;
 
 pub struct NetworkIdKind;
@@ -96,6 +97,20 @@ pub enum Network {
     Mainnet,
     Testnet,
     Local(NetworkIdentifier),
+}
+
+impl FromStr for Network {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("mainnet") || s.eq_ignore_ascii_case("main") {
+            Ok(Network::Mainnet)
+        } else if s.eq_ignore_ascii_case("testnet") || s.eq_ignore_ascii_case("test") {
+            Ok(Network::Testnet)
+        } else {
+            Ok(Network::Local(NetworkIdentifier::try_from(s.to_string())?))
+        }
+    }
 }
 
 impl Default for Network {

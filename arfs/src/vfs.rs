@@ -18,7 +18,6 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
 use thiserror::Error;
 use typed_path::{Utf8UnixEncoding, Utf8UnixPath, Utf8UnixPathBuf};
 
