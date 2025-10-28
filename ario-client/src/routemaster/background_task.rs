@@ -170,7 +170,7 @@ impl BackgroundTask {
                         break;
                     }
                     // cmds received
-                    tracing::debug!(num = n, "commands received");
+                    tracing::trace!(num = n, "commands received");
                 }
                 Some((gw, res)) = pending_futs.next() => {
                     // gateway check completed

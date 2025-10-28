@@ -54,7 +54,7 @@ struct Arguments {
     port: u16,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct TomlCachingConfig {
     #[serde(default)]
     metadata_l1_cache_size: Option<ByteSize>,
@@ -72,7 +72,21 @@ struct TomlCachingConfig {
     l2_enabled: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+impl Default for TomlCachingConfig {
+    fn default() -> Self {
+        Self {
+            metadata_l1_cache_size: None,
+            metadata_l2_cache_dir: None,
+            metadata_l2_cache_size: default_metadata_l2_cache(),
+            chunk_l1_cache_size: None,
+            chunk_l2_cache_dir: None,
+            chunk_l2_cache_size: default_chunk_l2_cache(),
+            l2_enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct TomlSyncingConfig {
     #[serde(default, deserialize_with = "deserialize_duration_option")]
     interval_secs: Option<Duration>,
@@ -82,7 +96,17 @@ struct TomlSyncingConfig {
     max_concurrent_syncs: usize,
 }
 
-#[derive(Debug, Default, Deserialize)]
+impl Default for TomlSyncingConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: None,
+            min_initial_wait_secs: None,
+            max_concurrent_syncs: 1,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct TomlRoutemasterConfig {
     #[serde(default = "default_true")]
     netwatch_enabled: bool,
@@ -93,6 +117,16 @@ struct TomlRoutemasterConfig {
     gateways: Vec<Gateway>,
     #[serde(default, deserialize_with = "deserialize_network")]
     network: Network,
+}
+
+impl Default for TomlRoutemasterConfig {
+    fn default() -> Self {
+        Self {
+            netwatch_enabled: true,
+            gateways: default_gateways(),
+            network: Network::default(),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -153,10 +187,19 @@ where
     WalletAddress::from_str(&str).map_err(|e| serde::de::Error::custom(e.to_string()))
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct TomlServerConfig {
     host: Option<String>,
     port: Option<u16>,
+}
+
+impl Default for TomlServerConfig {
+    fn default() -> Self {
+        Self {
+            host: None,
+            port: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,10 +217,16 @@ struct TomlPermabucketConfig {
     sync_min_initial_wait_secs: Option<Duration>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct TomlGeneralConfig {
     #[serde(default)]
     data_dir: Option<PathBuf>,
+}
+
+impl Default for TomlGeneralConfig {
+    fn default() -> Self {
+        Self { data_dir: None }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
