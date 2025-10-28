@@ -3,7 +3,7 @@ use crate::types::ArfsEntityId;
 use crate::types::drive::{DriveEntity, DriveId};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
-use crate::{FolderId, Private, Public, Vfs, resolve};
+use crate::{FolderId, Private, Public, SyncLimit, Vfs, resolve};
 use ario_client::Client;
 use ario_core::BlockNumber;
 use ario_core::wallet::WalletAddress;
@@ -30,6 +30,8 @@ pub enum Error {
     InvalidState,
     #[error("syncer not starting")]
     StartFailure,
+    #[error("unable to acquire sync permit")]
+    PermitAcquisitionFailed,
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +71,7 @@ impl Syncer {
         privacy: Arc<PRIVACY>,
         sync_interval: Duration,
         min_initial_wait: Duration,
+        sync_limit: SyncLimit,
     ) -> Result<Self, crate::Error>
     where
         BackgroundTask<PRIVACY>: SyncNow,
@@ -103,6 +106,7 @@ impl Syncer {
             sync_trigger_rx,
             next_sync,
             sync_interval,
+            sync_limit,
         );
         let task_handle = tokio::spawn(async move { task.run().await });
 
@@ -233,6 +237,7 @@ struct BackgroundTask<PRIVACY> {
     sync_trigger: mpsc::Receiver<oneshot::Sender<()>>,
     next_sync: DateTime<Utc>,
     sync_interval: Duration,
+    sync_limit: SyncLimit,
 }
 
 impl<PRIVACY> BackgroundTask<PRIVACY> {
@@ -246,6 +251,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         sync_trigger: mpsc::Receiver<oneshot::Sender<()>>,
         next_sync: DateTime<Utc>,
         sync_interval: Duration,
+        sync_limit: SyncLimit,
     ) -> Self {
         Self {
             client,
@@ -257,6 +263,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
             sync_trigger,
             next_sync,
             sync_interval,
+            sync_limit,
         }
     }
 
@@ -370,6 +377,8 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         owner: &WalletAddress,
         private: Option<&Private>,
     ) -> Result<Success, crate::Error> {
+        tracing::debug!("waiting for sync permit");
+        let _permit = self.sync_limit.acquire_permit().await?;
         tracing::debug!("starting sync");
         let current_drive_config = self.db.read().await?.config().await?;
 
@@ -529,7 +538,10 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
 
 fn sort_folders_by_dependency(folders: Vec<FolderEntity>) -> Vec<FolderEntity> {
     let mut remaining = folders.into_iter().collect::<VecDeque<_>>();
-    let known = remaining.iter().map(|f| f.id().clone()).collect::<HashSet<_>>();
+    let known = remaining
+        .iter()
+        .map(|f| f.id().clone())
+        .collect::<HashSet<_>>();
     let mut processed = HashSet::with_capacity(remaining.len());
     let mut result = Vec::with_capacity(remaining.len());
 

@@ -34,12 +34,14 @@ use derive_more::Display;
 use futures_lite::Stream;
 use serde_json::Error as JsonError;
 use std::fmt::{Debug, Display, Formatter};
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use strum::EnumString;
 use thiserror::Error;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zeroize::Zeroize;
 
 #[derive(Error, Debug)]
@@ -103,9 +105,39 @@ pub enum MetadataError {
 #[repr(transparent)]
 pub struct ArFs(Arc<ErasedArFs>);
 
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct SyncLimit(Arc<Semaphore>);
+
+#[repr(transparent)]
+pub(crate) struct SyncPermit(OwnedSemaphorePermit);
+
+impl SyncLimit {
+    pub fn new(max_concurrency: NonZeroUsize) -> Self {
+        Self(Arc::new(Semaphore::new(max_concurrency.get())))
+    }
+
+    pub(crate) async fn acquire_permit(&self) -> Result<SyncPermit, sync::Error> {
+        Ok(SyncPermit(
+            self.0
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| sync::Error::PermitAcquisitionFailed)?,
+        ))
+    }
+}
+
+impl Default for SyncLimit {
+    fn default() -> Self {
+        unsafe { Self::new(NonZeroUsize::new_unchecked(1)) }
+    }
+}
+
 struct SyncSettings {
     sync_interval: Duration,
     sync_min_initial: Duration,
+    sync_limit: SyncLimit,
 }
 
 #[derive(Builder, Clone, Debug)]
@@ -141,7 +173,8 @@ impl ArFs {
         drive_id: DriveId,
         scope: Scope,
         #[builder(default = Duration::from_secs(900))] sync_interval: Duration,
-        #[builder(default = Duration::from_secs(60))] sync_min_initial: Duration,
+        #[builder(default = Duration::from_secs(30))] sync_min_initial: Duration,
+        #[builder(default)] sync_limit: SyncLimit,
         #[builder(default)] cache_settings: CacheSettings,
     ) -> Result<Self, Error> {
         tokio::fs::create_dir_all(db_dir).await?;
@@ -159,6 +192,7 @@ impl ArFs {
         let sync_settings = SyncSettings {
             sync_interval,
             sync_min_initial,
+            sync_limit,
         };
 
         let vfs = Vfs::new(client.clone(), db.clone(), cache_settings).await?;
@@ -410,6 +444,7 @@ impl ArFsInner<Public, ReadOnly> {
             privacy.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
+            sync_settings.sync_limit,
         )
         .await?;
         Ok(ArFsInner {
@@ -443,6 +478,7 @@ impl ArFsInner<Public, ReadWrite<Wallet>> {
             privacy.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
+            sync_settings.sync_limit,
         )
         .await?;
         Ok(ArFsInner {
@@ -474,6 +510,7 @@ impl ArFsInner<Private, ReadOnly> {
             privacy.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
+            sync_settings.sync_limit,
         )
         .await?;
         Ok(ArFsInner {
@@ -505,6 +542,7 @@ impl ArFsInner<Private, ReadWrite> {
             privacy.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
+            sync_settings.sync_limit,
         )
         .await?;
         Ok(ArFsInner {

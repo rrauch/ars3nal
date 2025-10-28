@@ -150,7 +150,7 @@ impl Client {
     {
         let per_page = tx_query
             .results_per_page
-            .unwrap_or(NonZeroUsize::new(100).unwrap())
+            .unwrap_or(NonZeroUsize::new(1000).unwrap())
             .get();
         let mut variables = TxQueryVariables::from(&tx_query);
 

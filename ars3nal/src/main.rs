@@ -1,5 +1,5 @@
-use anyhow::anyhow;
-use arfs::{ArFs, DriveId, Scope};
+use anyhow::{anyhow, bail};
+use arfs::{ArFs, DriveId, Scope, SyncLimit};
 use ario_client::{ByteSize, Cache, Client};
 use ario_core::network::Network;
 use ario_core::wallet::WalletAddress;
@@ -10,6 +10,7 @@ use directories::ProjectDirs;
 use foyer_cache::{FoyerChunkCache, FoyerMetadataCache};
 use futures_lite::StreamExt;
 use serde::{Deserialize, Deserializer};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -67,6 +68,8 @@ struct TomlCachingConfig {
     chunk_l2_cache_dir: Option<PathBuf>,
     #[serde(default = "default_chunk_l2_cache")]
     chunk_l2_cache_size: ByteSize,
+    #[serde(default = "default_true")]
+    l2_enabled: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -75,6 +78,8 @@ struct TomlSyncingConfig {
     interval_secs: Option<Duration>,
     #[serde(default, deserialize_with = "deserialize_duration_option")]
     min_initial_wait_secs: Option<Duration>,
+    #[serde(default = "default_one")]
+    max_concurrent_syncs: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -170,9 +175,15 @@ struct TomlPermabucketConfig {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct TomlConfig {
+struct TomlGeneralConfig {
     #[serde(default)]
     data_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TomlConfig {
+    #[serde(default)]
+    general: TomlGeneralConfig,
     #[serde(default)]
     server: TomlServerConfig,
     #[serde(default)]
@@ -192,6 +203,7 @@ struct Config {
     netwatch_enabled: bool,
     gateways: Vec<Gateway>,
     network: Network,
+    l2_cache_enabled: bool,
     maybe_metadata_l1_cache_size: Option<ByteSize>,
     metadata_l2_cache_dir: PathBuf,
     metadata_l2_cache_size: ByteSize,
@@ -199,6 +211,7 @@ struct Config {
     chunk_l2_cache_dir: PathBuf,
     chunk_l2_cache_size: ByteSize,
     permabuckets: Vec<PermabucketConfig>,
+    max_sync_concurrency: NonZeroUsize,
 }
 
 #[derive(Debug)]
@@ -216,7 +229,7 @@ impl Config {
         let listen_host = toml.server.host.unwrap_or_else(|| arguments.host);
         let listen_port = toml.server.port.unwrap_or_else(|| arguments.port);
 
-        let data_dir = toml.data_dir.unwrap_or_else(|| arguments.data);
+        let data_dir = toml.general.data_dir.unwrap_or_else(|| arguments.data);
 
         let maybe_metadata_l1_cache_size = toml.caching.metadata_l1_cache_size;
         let metadata_l2_cache_dir = toml
@@ -262,6 +275,7 @@ impl Config {
             netwatch_enabled: toml.routemaster.netwatch_enabled,
             gateways: toml.routemaster.gateways,
             network: toml.routemaster.network,
+            l2_cache_enabled: toml.caching.l2_enabled,
             maybe_metadata_l1_cache_size,
             metadata_l2_cache_dir,
             metadata_l2_cache_size,
@@ -269,6 +283,11 @@ impl Config {
             chunk_l2_cache_dir,
             chunk_l2_cache_size,
             permabuckets,
+            max_sync_concurrency: toml
+                .syncing
+                .max_concurrent_syncs
+                .try_into()
+                .map_err(|_| anyhow!("max_concurrent_syncs cannot be zero or negative"))?,
         })
     }
 }
@@ -301,6 +320,10 @@ fn default_cache(suffix: &str) -> String {
         return dir;
     }
     format!("/var/cache/ars3nal/{}", suffix)
+}
+
+fn default_one() -> usize {
+    1
 }
 
 fn default_metadata_cache() -> String {
@@ -364,17 +387,27 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run(config: Config) -> anyhow::Result<()> {
-    let l2_metadata_cache = FoyerMetadataCache::builder()
-        .disk_path(config.metadata_l2_cache_dir)
-        .max_disk_space(config.metadata_l2_cache_size.as_u64())
-        .build()
-        .await?;
+    let (maybe_l2_metadata_cache, maybe_l2_chunk_cache) = if config.l2_cache_enabled {
+        let l2_metadata_cache = FoyerMetadataCache::builder()
+            .disk_path(config.metadata_l2_cache_dir)
+            .max_disk_space(config.metadata_l2_cache_size.as_u64())
+            .build()
+            .await?;
 
-    let l2_chunk_cache = FoyerChunkCache::builder()
-        .disk_path(config.chunk_l2_cache_dir)
-        .max_disk_space(config.chunk_l2_cache_size.as_u64())
-        .build()
-        .await?;
+        let l2_chunk_cache = FoyerChunkCache::builder()
+            .disk_path(config.chunk_l2_cache_dir)
+            .max_disk_space(config.chunk_l2_cache_size.as_u64())
+            .build()
+            .await?;
+
+        (Some(l2_metadata_cache), Some(l2_chunk_cache))
+    } else {
+        (None, None)
+    };
+
+    if config.gateways.is_empty() {
+        bail!("at least one Gateway is required, cannot proceed");
+    }
 
     let client = Client::builder()
         .gateways(config.gateways)
@@ -384,8 +417,8 @@ async fn run(config: Config) -> anyhow::Result<()> {
             Cache::builder()
                 .maybe_metadata_max_mem(config.maybe_metadata_l1_cache_size)
                 .maybe_chunk_max_mem(config.maybe_chunk_l1_cache_size)
-                .metadata_l2_cache(l2_metadata_cache)
-                .chunk_l2_cache(l2_chunk_cache)
+                .maybe_metadata_l2_cache(maybe_l2_metadata_cache)
+                .maybe_chunk_l2_cache(maybe_l2_chunk_cache)
                 .build(),
         )
         .build()
@@ -397,6 +430,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         .build()
         .await?;
 
+    let sync_limit = SyncLimit::new(config.max_sync_concurrency);
     let bucket_count = config.permabuckets.len();
 
     for bucket in config.permabuckets {
@@ -407,6 +441,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .scope(Scope::public(bucket.owner))
             .maybe_sync_interval(bucket.maybe_sync_interval)
             .maybe_sync_min_initial(bucket.maybe_sync_min_initial_wait)
+            .sync_limit(sync_limit.clone())
             .build()
             .await?;
 

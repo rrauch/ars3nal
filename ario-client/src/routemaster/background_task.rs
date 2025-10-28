@@ -128,7 +128,7 @@ impl BackgroundTask {
             }
             if modified || (next_checks_due <= SystemTime::now()) {
                 // time to initiate new checks
-                tracing::info!("new checks are due");
+                tracing::debug!("new checks are due");
                 let (tasks, next) = self.initiate_gw_checks();
                 match next {
                     Some(next_at) => next_checks_due = next_at,
