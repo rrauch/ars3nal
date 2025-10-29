@@ -102,7 +102,7 @@ See below for details.
 
 ```bash
 # Run the Docker container in the foreground
-docker run -it --rm -p 6767:6767 -v ars3nal_data:/ars3nal ars3nal
+docker run -it --rm -p 6767:6767 -v ars3nal_data:/ars3nal ghcr.io/rrauch/ars3nal
 ```
 
 ArS3nal is now accessible at http://localhost:6767. That's it!
@@ -124,7 +124,7 @@ A C compiler *may* be required for the embedded SQLite database engine. This wil
 #### Checkout Source via Git
 
 ```bash
-git checkout https://github.com/rrauch/ars3nal.git
+git clone https://github.com/rrauch/ars3nal.git
 ```
 
 #### Build the ars3nal binary
@@ -133,6 +133,8 @@ git checkout https://github.com/rrauch/ars3nal.git
 cd ars3nal/ars3nal
 cargo build --release
 ```
+
+*(good time for a coffee break)*
 
 #### Quick check
 
