@@ -226,7 +226,7 @@ impl Client {
         // Hopefully this will be fixed at one point on the gateway level and the code below can be removed / cleaned up.
         self.with_gw(async |gw| {
             match {
-                let mut retry_delay = Duration::from_millis(150);
+                let mut retry_delay = Duration::from_millis(250);
 
                 let mut proof2_attempts: u8 = 10;
                 let mut proof_attempts: u8 = 10;
@@ -262,7 +262,7 @@ impl Client {
                         break None;
                     }
                     tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(4));
                 }
             } {
                 Some(chunk_proof) => {
