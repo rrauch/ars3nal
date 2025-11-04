@@ -637,7 +637,7 @@ unsafe impl<S: CBStorage> BufMut for CircularBuffer<S> {
 
 #[derive_where(Debug, PartialEq, Hash, Clone)]
 pub struct TypedByteBuffer<'a, T> {
-    chunks: RangeMap<u64, Blob<'a>>,
+    chunks: RangeMap<u64, (Blob<'a>, u64)>,
     len: u64,
     _phantom: PhantomData<T>,
 }
@@ -669,7 +669,7 @@ impl<'a, T> TypedByteBuffer<'a, T> {
             chunks: self
                 .chunks
                 .into_iter()
-                .map(|(r, b)| (r, b.into_owned()))
+                .map(|(r, (b, s))| (r, (b.into_owned(), s)))
                 .collect(),
             len: self.len,
             _phantom: PhantomData,
@@ -708,7 +708,7 @@ impl<'a, T> TypedByteBuffer<'a, T> {
 
         let mut new_chunks = RangeMap::new();
 
-        for (chunk_range, blob) in self.chunks.overlapping(&range) {
+        for (chunk_range, (blob, _)) in self.chunks.overlapping(&range) {
             let intersect_start = chunk_range.start.max(range.start);
             let intersect_end = chunk_range.end.min(range.end);
 
@@ -722,7 +722,7 @@ impl<'a, T> TypedByteBuffer<'a, T> {
             // Insert at normalized position (relative to new buffer start)
             let new_start = intersect_start - range.start;
             let new_end = new_start + blob_len as u64;
-            new_chunks.insert(new_start..new_end, sliced_blob);
+            new_chunks.insert(new_start..new_end, (sliced_blob, new_start));
         }
 
         Self {
@@ -807,11 +807,13 @@ impl<'a, T> TypedByteBuffer<'a, T> {
     }
 
     fn chunk_at(&self, pos: u64) -> &[u8] {
-        let (chunk_range, blob) = self.chunks.get_key_value(&pos).expect("chunk to be there");
+        let (chunk_range, (blob, _)) = self.chunks.get_key_value(&pos).expect("chunk to be there");
 
         let offset_in_chunk = (pos - chunk_range.start) as usize;
         let blob_slice = blob.as_ref();
         let remaining = &blob_slice[offset_in_chunk..];
+
+        debug_assert!(!remaining.is_empty());
 
         // Clamp to buffer boundary
         let remaining_in_buffer = (self.len - pos) as usize;
@@ -819,7 +821,7 @@ impl<'a, T> TypedByteBuffer<'a, T> {
     }
 
     pub fn make_contiguous(self) -> OwnedBlob {
-        self.chunks.into_iter().map(|(_, b)| b).collect()
+        self.chunks.into_iter().map(|(_, (b, _))| b).collect()
     }
 }
 
@@ -846,7 +848,7 @@ impl<'a, T, B: Into<TypedBlob<'a, T>>> FromIterator<B> for TypedByteBuffer<'a, T
                     let start = len;
                     let blob_len = b.len() as u64;
                     len += blob_len;
-                    Some((start..len, b.into_inner()))
+                    Some((start..len, (b.into_inner(), start)))
                 }
             })
             .collect();
