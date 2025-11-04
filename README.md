@@ -42,6 +42,7 @@ path.
 - [x] `if-modified-since` & `if-none-match` support for optimal client-side caching
 - [x] Automatic and periodic background syncing of **Permabucket** content
 - [x] Configurable local caching of metadata as well as actual chunk data
+- [x] Automatic, proactive caching of files / objects in the background
 - [x] Full **cryptographic authentication** of all data returned to user
 - [x] Support for multiple, configurable Gateways and automatic route optimization
 - [x] Ready-to-use Docker image available
@@ -239,6 +240,8 @@ chunk_l1_cache_size = "16MiB"
 chunk_l2_cache_dir = "/path/to/l2/chunk"
 chunk_l2_cache_size = "4GiB"
 l2_enabled = true
+proactive_caching_enabled = true
+proactive_caching_interval_days = 60
 
 # Automatic background sync settings
 [syncing]
