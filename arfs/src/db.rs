@@ -433,6 +433,63 @@ LIMIT (SELECT max_keys FROM params) + 1;
 
         Ok((ids, truncated))
     }
+
+    pub async fn next_proactive_cache_file(
+        &mut self,
+        cached_cutoff: &DateTime<Utc>,
+        attempt_cutoff: &DateTime<Utc>,
+    ) -> Result<Option<(InodeId, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>, Error> {
+        let cached_cutoff = cached_cutoff.timestamp();
+        let attempt_cutoff = attempt_cutoff.timestamp();
+
+        fn convert(
+            inode_id: i64,
+            last_proactively_cached_at: Option<i64>,
+            last_proactive_cache_attempt_at: Option<i64>,
+        ) -> Result<(InodeId, Option<DateTime<Utc>>, Option<DateTime<Utc>>), DataError> {
+            let inode_id = InodeId::try_from(inode_id as u64)
+                .map_err(|e| DataError::ConversionError(e.to_string()))?;
+
+            let last_proactively_cached_at = last_proactively_cached_at
+                .map(|l| DateTime::from_timestamp(l, 0))
+                .flatten();
+            let last_proactive_cache_attempt_at = last_proactive_cache_attempt_at
+                .map(|l| DateTime::from_timestamp(l, 0))
+                .flatten();
+            Ok((
+                inode_id,
+                last_proactively_cached_at,
+                last_proactive_cache_attempt_at,
+            ))
+        }
+
+        Ok(sqlx::query!(
+            "
+            SELECT id,
+       last_proactively_cached_at as \"last_proactively_cached_at: i64\",
+       last_proactive_cache_attempt_at  as \"last_proactive_cache_attempt_at: i64\"
+FROM vfs
+WHERE inode_type = 'FI'
+  AND (last_proactively_cached_at IS NULL OR last_proactively_cached_at < ?)
+  AND (last_proactive_cache_attempt_at IS NULL OR last_proactive_cache_attempt_at < ?)
+ORDER BY COALESCE(last_proactive_cache_attempt_at, 0),
+         COALESCE(last_proactively_cached_at, 0),
+         id
+LIMIT 1;",
+            cached_cutoff,
+            attempt_cutoff
+        )
+        .fetch_optional(self.conn())
+        .await?
+        .map(|r| {
+            convert(
+                r.id,
+                r.last_proactively_cached_at,
+                r.last_proactive_cache_attempt_at,
+            )
+        })
+        .transpose()?)
+    }
 }
 
 impl<C: TxScope> Transaction<C>
@@ -514,6 +571,30 @@ where
         }
 
         Ok(deletions)
+    }
+
+    pub async fn update_proactive_cache_file(
+        &mut self,
+        inode_id: InodeId,
+        last_success: Option<&DateTime<Utc>>,
+        last_attempt: Option<&DateTime<Utc>>,
+    ) -> Result<(), Error> {
+        let inode_id = *inode_id.deref() as i64;
+        let last_success = last_success.map(|ts| ts.timestamp());
+        let last_attempt = last_attempt.map(|ts| ts.timestamp());
+
+        sqlx::query!(
+            "
+            UPDATE vfs SET last_proactively_cached_at = ?, last_proactive_cache_attempt_at = ?
+            WHERE id = ? AND inode_type = 'FI'
+        ",
+            last_success,
+            last_attempt,
+            inode_id,
+        )
+        .execute(self.conn())
+        .await?;
+        Ok(())
     }
 }
 

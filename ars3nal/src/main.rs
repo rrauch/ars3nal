@@ -70,6 +70,10 @@ struct TomlCachingConfig {
     chunk_l2_cache_size: ByteSize,
     #[serde(default = "default_true")]
     l2_enabled: bool,
+    #[serde(default = "default_true")]
+    proactive_caching_enabled: bool,
+    #[serde(default, deserialize_with = "deserialize_duration_option_days")]
+    proactive_caching_interval_days: Option<Duration>,
 }
 
 impl Default for TomlCachingConfig {
@@ -82,6 +86,8 @@ impl Default for TomlCachingConfig {
             chunk_l2_cache_dir: None,
             chunk_l2_cache_size: default_chunk_l2_cache(),
             l2_enabled: true,
+            proactive_caching_enabled: true,
+            proactive_caching_interval_days: None,
         }
     }
 }
@@ -169,6 +175,21 @@ where
     D: Deserializer<'de>,
 {
     deserialize_duration(deserializer).map(Some)
+}
+
+fn deserialize_duration_days<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let days = u64::deserialize(deserializer)?;
+    Ok(Duration::from_secs(86400 * days))
+}
+
+fn deserialize_duration_option_days<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_duration_days(deserializer).map(Some)
 }
 
 fn deserialize_drive_id<'de, D>(deserializer: D) -> Result<DriveId, D::Error>
@@ -261,6 +282,7 @@ struct Config {
     chunk_l2_cache_size: ByteSize,
     permabuckets: Vec<PermabucketConfig>,
     max_sync_concurrency: NonZeroUsize,
+    proactive_cache_interval: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -337,6 +359,15 @@ impl Config {
                 .max_concurrent_syncs
                 .try_into()
                 .map_err(|_| anyhow!("max_concurrent_syncs cannot be zero or negative"))?,
+            proactive_cache_interval: if toml.caching.proactive_caching_enabled {
+                Some(
+                    toml.caching
+                        .proactive_caching_interval_days
+                        .unwrap_or_else(|| default_proactive_cache_interval()),
+                )
+            } else {
+                None
+            },
         })
     }
 }
@@ -359,6 +390,10 @@ fn default_config() -> String {
         return dir;
     }
     "/etc/ars3nal/config.toml".to_string()
+}
+
+fn default_proactive_cache_interval() -> Duration {
+    Duration::from_secs(86400 * 60)
 }
 
 fn default_cache(suffix: &str) -> String {
@@ -490,6 +525,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .scope(Scope::public(bucket.owner))
             .maybe_sync_interval(bucket.maybe_sync_interval)
             .maybe_sync_min_initial(bucket.maybe_sync_min_initial_wait)
+            .maybe_proactive_cache_interval(config.proactive_cache_interval)
             .sync_limit(sync_limit.clone())
             .build()
             .await?;

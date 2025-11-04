@@ -138,6 +138,7 @@ struct SyncSettings {
     sync_interval: Duration,
     sync_min_initial: Duration,
     sync_limit: SyncLimit,
+    proactive_cache_interval: Option<Duration>,
 }
 
 #[derive(Builder, Clone, Debug)]
@@ -176,6 +177,7 @@ impl ArFs {
         #[builder(default = Duration::from_secs(30))] sync_min_initial: Duration,
         #[builder(default)] sync_limit: SyncLimit,
         #[builder(default)] cache_settings: CacheSettings,
+        proactive_cache_interval: Option<Duration>,
     ) -> Result<Self, Error> {
         tokio::fs::create_dir_all(db_dir).await?;
         let db = Db::new(
@@ -193,6 +195,7 @@ impl ArFs {
             sync_interval,
             sync_min_initial,
             sync_limit,
+            proactive_cache_interval,
         };
 
         let vfs = Vfs::new(client.clone(), db.clone(), cache_settings).await?;
@@ -445,6 +448,7 @@ impl ArFsInner<Public, ReadOnly> {
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
+            sync_settings.proactive_cache_interval,
         )
         .await?;
         Ok(ArFsInner {
@@ -479,6 +483,7 @@ impl ArFsInner<Public, ReadWrite<Wallet>> {
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
+            sync_settings.proactive_cache_interval,
         )
         .await?;
         Ok(ArFsInner {
@@ -511,6 +516,7 @@ impl ArFsInner<Private, ReadOnly> {
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
+            sync_settings.proactive_cache_interval,
         )
         .await?;
         Ok(ArFsInner {
@@ -543,6 +549,7 @@ impl ArFsInner<Private, ReadWrite> {
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
+            sync_settings.proactive_cache_interval,
         )
         .await?;
         Ok(ArFsInner {
@@ -834,7 +841,7 @@ mod tests {
             let mut status = arfs.sync_status();
             while let Some(status) = status.next().await {
                 match status {
-                    SyncStatus::Syncing { .. } => {
+                    SyncStatus::Syncing { .. } | SyncStatus::ProactiveCaching { .. } => {
                         started = true;
                     }
                     SyncStatus::Dead => {
