@@ -24,10 +24,10 @@ use serde_sqlite_jsonb::Error as JsonbError;
 use sqlx::migrate::MigrateError;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{ConnectOptions, Error as SqlxError, Pool, Sqlite, SqliteConnection};
+use sqlx::{ConnectOptions, Connection, Error as SqlxError, Pool, Sqlite, SqliteConnection};
 use sqlx::{Transaction as SqlxTransaction, query};
 use std::borrow::Cow;
-use std::fmt::Display;
+use std::fmt::{Display, Formatter};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -37,6 +37,7 @@ use thiserror::Error;
 use tracing::Instrument;
 use tracing::instrument;
 use tracing::log::LevelFilter;
+use tracing_subscriber::fmt::format;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -70,6 +71,8 @@ pub enum DbStateError {
         expected: NetworkIdentifier,
         actual: NetworkIdentifier,
     },
+    #[error("invalid page size: '{0}'")]
+    InvalidPageSize(String),
 }
 
 #[derive(Error, Debug)]
@@ -123,6 +126,55 @@ struct DbInner {
     db_file: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PageSize {
+    Ps512 = 512,
+    Ps1024 = 1024,
+    Ps2048 = 2048,
+    Ps4096 = 4096,
+    Ps8192 = 8192,
+    Ps16384 = 16384,
+    Ps32768 = 32768,
+    Ps65536 = 65536,
+}
+
+impl Default for PageSize {
+    fn default() -> Self {
+        PageSize::Ps32768
+    }
+}
+
+impl Display for PageSize {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value())
+    }
+}
+
+impl PageSize {
+    pub fn value(&self) -> u32 {
+        self.clone() as u32
+    }
+}
+
+impl TryFrom<u32> for PageSize {
+    type Error = u32;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            512 => Ok(PageSize::Ps512),
+            1024 => Ok(PageSize::Ps1024),
+            2048 => Ok(PageSize::Ps2048),
+            4096 => Ok(PageSize::Ps4096),
+            8192 => Ok(PageSize::Ps8192),
+            16384 => Ok(PageSize::Ps16384),
+            32768 => Ok(PageSize::Ps32768),
+            65536 => Ok(PageSize::Ps65536),
+            _ => Err(value),
+        }
+    }
+}
+
 impl Db {
     pub(super) async fn new(
         db_file: PathBuf,
@@ -130,8 +182,9 @@ impl Db {
         client: Client,
         drive_id: &DriveId,
         scope: &Scope,
+        page_size: PageSize,
     ) -> Result<Self, super::Error> {
-        let (config, pool) = db_init(db_file.as_path(), max_connections).await?;
+        let (config, pool) = db_init(db_file.as_path(), max_connections, page_size).await?;
         let config = match config {
             Some(config) => {
                 check_config(
@@ -1207,12 +1260,15 @@ impl Config {
 async fn db_init(
     db_file: &Path,
     max_connections: u8,
+    page_size: PageSize,
 ) -> Result<(Option<Config>, SqlitePool), Error> {
+    prepare_db(db_file, page_size).await?;
+
     let writer = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with({
             SqliteConnectOptions::new()
-                .create_if_missing(true)
+                .create_if_missing(false)
                 .filename(db_file)
                 .log_statements(LevelFilter::Trace)
                 .journal_mode(SqliteJournalMode::Wal)
@@ -1221,10 +1277,6 @@ async fn db_init(
                 .busy_timeout(Duration::from_millis(100))
                 .shared_cache(true)
         })
-        .await?;
-
-    async { sqlx::migrate!("./migrations").run(&writer).await }
-        .instrument(tracing::warn_span!("db_migration"))
         .await?;
 
     let reader = SqlitePoolOptions::new()
@@ -1273,6 +1325,67 @@ async fn db_init(
     }
 
     Ok((config, pool))
+}
+
+#[instrument[skip_all, fields(page_size = %page_size)]]
+async fn prepare_db(db_file: &Path, page_size: PageSize) -> Result<(), Error> {
+    let opts = SqliteConnectOptions::new()
+        .create_if_missing(true)
+        .filename(db_file)
+        .log_statements(LevelFilter::Trace)
+        .journal_mode(SqliteJournalMode::Delete)
+        .foreign_keys(true)
+        .pragma("recursive_triggers", "ON")
+        .busy_timeout(Duration::from_millis(1000))
+        .shared_cache(false);
+
+    let mut conn = SqliteConnection::connect_with(&opts).await?;
+
+    async { sqlx::migrate!("./migrations").run_direct(&mut conn).await }
+        .instrument(tracing::warn_span!("db_migration"))
+        .await?;
+
+    async fn get_page_size(conn: &mut SqliteConnection) -> Result<PageSize, Error> {
+        Ok(sqlx::query!("PRAGMA page_size")
+            .fetch_one(conn)
+            .await?
+            .page_size
+            .map(|c| PageSize::try_from(c as u32).ok())
+            .flatten()
+            .ok_or(DbStateError::InvalidPageSize(
+                "unable to get page_size from database".to_string(),
+            ))?)
+    }
+
+    let current_page_size = get_page_size(&mut conn).await?;
+    conn.close().await?;
+
+    if current_page_size != page_size {
+        tracing::info!(
+            required = %page_size,
+            actual = %current_page_size,
+            "database page size needs adjusting",
+        );
+
+        {
+            let opts = opts.clone().page_size(page_size.value());
+            let mut conn = SqliteConnection::connect_with(&opts).await?;
+            sqlx::query!("VACUUM").execute(&mut conn).await?;
+            conn.close().await?;
+        }
+
+        let mut conn = SqliteConnection::connect_with(&opts).await?;
+        let current_page_size = get_page_size(&mut conn).await?;
+        if current_page_size != page_size {
+            tracing::error!(
+                required = %page_size,
+                actual = %current_page_size,
+                "database page size adjustment failed",
+            );
+        }
+        conn.close().await?;
+    }
+    Ok(())
 }
 
 trait DbEntity: Entity + Sized {

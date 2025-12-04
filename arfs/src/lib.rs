@@ -13,9 +13,9 @@ pub use sync::Status as SyncStatus;
 pub use types::{ArFsVersion, ContentType, Privacy, drive::DriveId, folder::FolderId};
 pub use vfs::{Directory, File, Inode, Name, Timestamp, Vfs, VfsPath};
 
-use crate::db::Config as DriveConfig;
 use crate::db::Db;
 use crate::db::Error as DbError;
+use crate::db::{Config as DriveConfig, PageSize};
 use crate::sync::{SyncResult, Syncer};
 use crate::types::AuthMode;
 use crate::vfs::Error as VfsError;
@@ -170,6 +170,7 @@ impl ArFs {
         client: Client,
         #[builder(with = |db_dir:  &'a (impl AsRef<Path> + ?Sized)| db_dir.as_ref())]
         db_dir: &'a Path,
+        #[builder(default)] db_page_size: PageSize,
         #[builder(default = 25)] max_db_connections: u8,
         drive_id: DriveId,
         scope: Scope,
@@ -186,6 +187,7 @@ impl ArFs {
             client.clone(),
             &drive_id,
             &scope,
+            db_page_size,
         )
         .await?;
 
