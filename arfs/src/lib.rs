@@ -6,6 +6,7 @@ pub(crate) mod serde_tag;
 mod sync;
 pub(crate) mod types;
 mod vfs;
+mod wal;
 
 pub use ario_core::bundle::Owner as BundleOwner;
 pub use ario_core::tx::Owner as TxOwner;
@@ -19,6 +20,7 @@ use crate::db::{Config as DriveConfig, PageSize};
 use crate::sync::{SyncResult, Syncer};
 use crate::types::AuthMode;
 use crate::vfs::Error as VfsError;
+use crate::wal::Error as WalError;
 
 use ario_client::Client;
 use ario_client::Error as ClientError;
@@ -56,6 +58,8 @@ pub enum Error {
     IoError(#[from] std::io::Error),
     #[error(transparent)]
     VfsError(#[from] VfsError),
+    #[error(transparent)]
+    WalError(#[from] WalError),
     #[error(transparent)]
     SyncError(#[from] sync::Error),
 }
@@ -181,6 +185,9 @@ impl ArFs {
         proactive_cache_interval: Option<Duration>,
     ) -> Result<Self, Error> {
         tokio::fs::create_dir_all(db_dir).await?;
+
+        let wal_chunk_size = db_page_size.value() - 128;
+
         let db = Db::new(
             db_dir.join(format!("arfs-{}.sqlite", drive_id)),
             max_db_connections,
@@ -200,7 +207,7 @@ impl ArFs {
             proactive_cache_interval,
         };
 
-        let vfs = Vfs::new(client.clone(), db.clone(), cache_settings).await?;
+        let vfs = Vfs::new(client.clone(), db.clone(), cache_settings, wal_chunk_size).await?;
 
         Ok(Self(Arc::new(
             ErasedArFs::new(client, db, vfs, sync_settings, drive_config, scope).await?,

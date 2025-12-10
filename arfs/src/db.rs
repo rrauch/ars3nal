@@ -9,7 +9,8 @@ use crate::types::{
     ArfsEntityId, Entity, HasId, HasName, HasVisibility, Header, Metadata, Model, ParseError,
 };
 use crate::vfs::{Directory as VfsDirectory, File as VfsFile, InodeId, Name as VfsName, Stats};
-use crate::{Inode, Privacy, Scope, Timestamp, VfsPath, Visibility, resolve};
+use crate::wal::{ContentHash, WalFileChunks};
+use crate::{Inode, Privacy, Scope, Timestamp, VfsPath, Visibility, resolve, wal};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
 use ario_core::BlockNumber;
@@ -28,7 +29,7 @@ use sqlx::{ConnectOptions, Connection, Error as SqlxError, Pool, Sqlite, SqliteC
 use sqlx::{Transaction as SqlxTransaction, query};
 use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -37,7 +38,6 @@ use thiserror::Error;
 use tracing::Instrument;
 use tracing::instrument;
 use tracing::log::LevelFilter;
-use tracing_subscriber::fmt::format;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -243,7 +243,7 @@ pub(crate) trait Read: AsMut<SqliteConnection> {
 }
 impl Read for Transaction<ReadOnly> {}
 
-trait Write: Read {}
+pub(crate) trait Write: Read {}
 impl Read for Transaction<ReadWrite> {}
 impl Write for Transaction<ReadWrite> {}
 
@@ -543,6 +543,55 @@ LIMIT 1;",
         })
         .transpose()?)
     }
+
+    pub async fn wal_file_chunks(
+        &mut self,
+        wal_file_id: u64,
+    ) -> Result<Option<Vec<(Range<u64>, Vec<u8>)>>, Error> {
+        let wal_file_id = wal_file_id as i64;
+        if sqlx::query!(
+            "
+            SELECT id FROM wal_files WHERE id = ? LIMIT 1
+            ",
+            wal_file_id
+        )
+        .fetch_optional(self.conn())
+        .await?
+        .is_none()
+        {
+            return Ok(None);
+        };
+
+        Ok(Some(sqlx::query!(
+            r#"
+            SELECT
+    COALESCE(SUM(wc.content_length) OVER (ORDER BY chunk_nr ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS "offset!: i64",
+    wc.content_length AS length,
+    wch.content_hash
+FROM wal_chunks wch
+JOIN wal_content wc ON wch.content_hash = wc.content_hash
+WHERE wch.file_id = ?
+ORDER BY chunk_nr;
+            "#,
+            wal_file_id,
+        ).map(|r| (r.offset as u64..(r.offset as u64 + r.length as u64), r.content_hash)).fetch_all(self.conn()).await?))
+    }
+
+    pub async fn wal_content(
+        &mut self,
+        content_hash: &ContentHash,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let content_hash = content_hash.as_ref();
+        Ok(sqlx::query!(
+            "
+            SELECT content FROM wal_content WHERE content_hash = ?
+            ",
+            content_hash,
+        )
+        .map(|r| r.content)
+        .fetch_optional(self.conn())
+        .await?)
+    }
 }
 
 impl<C: TxScope> Transaction<C>
@@ -644,6 +693,56 @@ where
             last_success,
             last_attempt,
             inode_id,
+        )
+        .execute(self.conn())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn new_wal_file(&mut self) -> Result<u64, Error> {
+        let id = sqlx::query!("INSERT INTO wal_files DEFAULT VALUES")
+            .execute(self.conn())
+            .await?
+            .last_insert_rowid();
+
+        Ok(id as u64)
+    }
+
+    pub async fn insert_wal_content(
+        &mut self,
+        content_hash: &[u8],
+        content: &[u8],
+    ) -> Result<(), Error> {
+        sqlx::query!(
+            "
+             INSERT INTO wal_content (content_hash, content)
+                VALUES (?, ?)
+            ON CONFLICT (content_hash) DO NOTHING
+            ",
+            content_hash,
+            content,
+        )
+        .execute(self.conn())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn insert_wal_chunk(
+        &mut self,
+        file_id: u64,
+        chunk_no: usize,
+        content_hash: &[u8],
+    ) -> Result<(), Error> {
+        let file_id = file_id as i64;
+        let chunk_no = chunk_no as i64;
+        sqlx::query!(
+            "
+             INSERT INTO wal_chunks (file_id, chunk_nr, content_hash)
+                VALUES (?, ?, ?)
+            ",
+            file_id,
+            chunk_no,
+            content_hash,
         )
         .execute(self.conn())
         .await?;

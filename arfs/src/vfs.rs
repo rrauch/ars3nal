@@ -101,6 +101,7 @@ struct VfsInner {
     path_cache: PathCache,
     inode_cache: InodeCache,
     dir_cache: DirCache,
+    wal_chunk_size: u32,
 }
 
 #[derive(Debug)]
@@ -140,6 +141,7 @@ impl Vfs {
         client: Client,
         db: Db,
         cache_settings: CacheSettings,
+        wal_chunk_size: u32,
     ) -> Result<Self, crate::Error> {
         let path_cache = Cache::builder()
             .name("path_cache")
@@ -170,6 +172,7 @@ impl Vfs {
             path_cache,
             inode_cache,
             dir_cache,
+            wal_chunk_size,
         })))
     }
 

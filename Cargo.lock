@@ -149,6 +149,7 @@ dependencies = [
  "dotenv",
  "futures-lite",
  "moka",
+ "rangemap",
  "serde",
  "serde-content",
  "serde_bytes",
