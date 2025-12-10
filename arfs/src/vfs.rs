@@ -6,11 +6,13 @@ use crate::{CacheSettings, ContentType, Visibility, db};
 use ario_client::data_reader::DataReader;
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
+use ario_core::blob::Blob;
 use ario_core::wallet::WalletAddress;
 use chrono::{DateTime, Utc};
 use derive_more::Display;
 use futures_lite::{AsyncRead, AsyncSeek, Stream, stream};
 use moka::future::Cache;
+use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::SeekFrom;
 use std::ops::Deref;
@@ -659,6 +661,20 @@ impl<E: Entity> VfsNode<E> {
     #[inline]
     pub fn path(&self) -> &VfsPath {
         &self.0.path
+    }
+
+    pub fn extra_attributes(&self) -> HashMap<&str, Blob<'_>> {
+        self.0
+            .inner
+            .extra_attribute_names()
+            .filter_map(|name| {
+                if let Some(value) = self.0.inner.extra_attribute(name) {
+                    Some((name, value))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 

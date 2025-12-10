@@ -198,7 +198,13 @@ impl<E: Entity> Model<E> {
     }
 
     pub(crate) fn extra_attribute_names(&self) -> impl Iterator<Item = &str> {
-        self.header.extra.keys().map(|k| k.as_str())
+        self.header.extra.keys().filter_map(|k| {
+            if k != "Entity-Type" {
+                Some(k.as_str())
+            } else {
+                None
+            }
+        })
     }
 
     pub(crate) fn extra_attribute<'a>(&'a self, name: &str) -> Option<Blob<'a>> {

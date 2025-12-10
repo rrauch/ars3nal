@@ -9,8 +9,8 @@ use s3s::dto::{
     Bucket, BucketName, CommonPrefix, ContentType, ETag, GetBucketLocationInput,
     GetBucketLocationOutput, GetObjectInput, GetObjectOutput, HeadBucketInput, HeadBucketOutput,
     HeadObjectInput, HeadObjectOutput, KeyCount, LastModified, ListBucketsInput, ListBucketsOutput,
-    ListObjectsInput, ListObjectsOutput, ListObjectsV2Input, ListObjectsV2Output, MaxKeys, Object,
-    ObjectKey, ObjectStorageClass, Owner, Size, StreamingBlob,
+    ListObjectsInput, ListObjectsOutput, ListObjectsV2Input, ListObjectsV2Output, MaxKeys,
+    Metadata, Object, ObjectKey, ObjectStorageClass, Owner, Size, StreamingBlob,
 };
 use s3s::{S3, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, s3_error};
 use std::collections::HashMap;
@@ -79,6 +79,26 @@ impl ArS3 {
             storage_class: Some(ObjectStorageClass::from_static(
                 ObjectStorageClass::STANDARD,
             )),
+        }
+    }
+
+    fn to_metadata(&self, file: &File) -> Option<Metadata> {
+        let metadata = file
+            .extra_attributes()
+            .into_iter()
+            .filter_map(|(k, v)| {
+                // filter out non-string values
+                if let Ok(v) = String::from_utf8(v.to_vec()) {
+                    Some((k.to_string(), v))
+                } else {
+                    None
+                }
+            })
+            .collect::<Metadata>();
+        if metadata.is_empty() {
+            None
+        } else {
+            Some(metadata)
         }
     }
 
@@ -165,6 +185,8 @@ impl S3 for ArS3 {
             )
             .await?;
 
+        let metadata = self.to_metadata(&file);
+
         let file_len = file.size().as_u64();
 
         let (seek_pos, content_length, content_range) = match input.range {
@@ -203,6 +225,7 @@ impl S3 for ArS3 {
             ),
             e_tag: object.e_tag,
             last_modified: object.last_modified,
+            metadata,
             ..Default::default()
         };
 
@@ -241,6 +264,8 @@ impl S3 for ArS3 {
             )
             .await?;
 
+        let metadata = self.to_metadata(&file);
+
         let output = HeadObjectOutput {
             accept_ranges: Some("bytes".to_string()),
             content_length: object.size,
@@ -250,6 +275,7 @@ impl S3 for ArS3 {
             ),
             e_tag: object.e_tag,
             last_modified: object.last_modified,
+            metadata,
             ..Default::default()
         };
 
