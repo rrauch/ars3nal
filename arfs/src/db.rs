@@ -551,7 +551,7 @@ LIMIT 1;",
         let wal_file_id = wal_file_id as i64;
         if sqlx::query!(
             "
-            SELECT id FROM wal_files WHERE id = ? LIMIT 1
+            SELECT id FROM wal_entity WHERE id = ? AND entity_type = 'FI' LIMIT 1
             ",
             wal_file_id
         )
@@ -700,7 +700,7 @@ where
     }
 
     pub async fn new_wal_file(&mut self) -> Result<u64, Error> {
-        let id = sqlx::query!("INSERT INTO wal_files DEFAULT VALUES")
+        let id = sqlx::query!("INSERT INTO wal_entity (entity_type) VALUES ('FI')")
             .execute(self.conn())
             .await?
             .last_insert_rowid();
@@ -995,7 +995,9 @@ struct ConfigRow {
 struct VfsRow<'a> {
     id: i64,
     inode_type: Cow<'a, str>,
-    entity: i64,
+    perm_type: Cow<'a, str>,
+    entity: Option<i64>,
+    wal_entity: Option<i64>,
     name: Cow<'a, str>,
     size: i64,
     last_modified: i64,
@@ -1033,7 +1035,9 @@ where
     VfsRow {
         id: 0,
         inode_type: <E as DbEntity>::TYPE.into(),
-        entity: entity_id,
+        perm_type: "P".into(),
+        entity: Some(entity_id),
+        wal_entity: None,
         name: entity.name().into(),
         size,
         last_modified,
@@ -1090,7 +1094,7 @@ async fn get_entity<E: DbEntity, C: Read>(id: i64, tx: &mut C) -> Result<Model<E
 async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, Error> {
     let vfs_row: VfsRow = match sqlx::query!(
         "SELECT
-             id, inode_type, entity, name, size, last_modified as \"last_modified: i64\", visibility, parent, path
+             id, inode_type, perm_type, entity, wal_entity, name, size, last_modified as \"last_modified: i64\", visibility, parent, path
          FROM
              vfs
          WHERE
@@ -1102,7 +1106,9 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
         VfsRow {
             id: r.id,
             inode_type: r.inode_type.into(),
+            perm_type: r.perm_type.into(),
             entity: r.entity,
+            wal_entity: r.wal_entity,
             name: r.name.into(),
             size: r.size,
             last_modified: r.last_modified,
@@ -1138,7 +1144,13 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
 
     match vfs_row.inode_type.as_ref() {
         <FileKind as DbEntity>::TYPE => {
-            let entity = get_entity::<FileKind, _>(vfs_row.entity, tx).await?;
+            let entity = get_entity::<FileKind, _>(
+                vfs_row
+                    .entity
+                    .ok_or_else(|| DataError::MissingData("entity not set".to_string()))?,
+                tx,
+            )
+            .await?;
             Ok(Some(Inode::File(VfsFile::new(
                 id,
                 name,
@@ -1150,7 +1162,13 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
             ))))
         }
         <FolderKind as DbEntity>::TYPE => {
-            let entity = get_entity::<FolderKind, _>(vfs_row.entity, tx).await?;
+            let entity = get_entity::<FolderKind, _>(
+                vfs_row
+                    .entity
+                    .ok_or_else(|| DataError::MissingData("entity not set".to_string()))?,
+                tx,
+            )
+            .await?;
             Ok(Some(Inode::Directory(VfsDirectory::new(
                 id,
                 name,
@@ -1192,8 +1210,8 @@ where
     let id = sqlx::query!(
         "
         INSERT INTO vfs
-            (inode_type, entity, name, size, last_modified, visibility, parent) VALUES
-            (?, ?, ?, ?, ?, ?, ?)
+            (perm_type, inode_type, entity, name, size, last_modified, visibility, parent) VALUES
+            ('P', ?, ?, ?, ?, ?, ?, ?)
         ",
         inode_type,
         row.entity,

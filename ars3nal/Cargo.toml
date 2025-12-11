@@ -16,6 +16,7 @@ axum = "0.8"
 bon = { workspace = true }
 bytesize = { workspace = true, features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env", "string"] }
+ct-codecs = { workspace = true }
 const-str = "0.7"
 directories = "6"
 futures-lite = { workspace = true }

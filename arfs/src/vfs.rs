@@ -1,17 +1,19 @@
-use crate::db::{DataError, Db, Transaction, TxScope};
+use crate::db::{DataError, Db, Read, Transaction, TxScope};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{Entity, Model};
-use crate::{CacheSettings, ContentType, Visibility, db};
-use ario_client::data_reader::DataReader;
+use crate::wal::WalNode;
+use crate::{CacheSettings, ContentType, Visibility, db, wal};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
 use ario_core::blob::Blob;
 use ario_core::wallet::WalletAddress;
 use chrono::{DateTime, Utc};
 use derive_more::Display;
-use futures_lite::{AsyncRead, AsyncSeek, Stream, stream};
+use futures_lite::{AsyncRead, AsyncSeek, AsyncWrite, Stream, StreamExt, stream};
+use maybe_owned::MaybeOwnedMut;
 use moka::future::Cache;
+use ouroboros::self_referencing;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::SeekFrom;
@@ -47,6 +49,18 @@ pub enum Error {
     CachedError(Arc<Error>),
     #[error(transparent)]
     InodeError(#[from] InodeError),
+    #[error("An Inode with name '{0}' already exists on same level")]
+    NameAlreadyExists(Name),
+    #[error(transparent)]
+    InvalidOperation(#[from] InvalidOperation),
+}
+
+#[derive(Error, Debug)]
+pub enum InvalidOperation {
+    #[error("cannot replace existing directory at '{0}'")]
+    ReplaceDir(VfsPath),
+    #[error("cannot replace file system root")]
+    ReplaceRoot,
 }
 
 #[derive(Error, Debug)]
@@ -73,6 +87,10 @@ pub enum InodeIdError {
 pub enum InodeError {
     #[error("Inode with id '{0}' not found")]
     NotFound(InodeId),
+    #[error("Inode at '{0}' not found")]
+    NotFoundByPath(VfsPath),
+    #[error("Parent needs to be a directory or root")]
+    ParentNotDirOrRoot,
 }
 
 #[derive(Error, Debug)]
@@ -118,17 +136,19 @@ async fn stats(db: &Db) -> Result<Stats, crate::Error> {
     Ok(db.read().await?.stats().await?)
 }
 
-async fn root(
-    db: &Db,
+async fn root<C: TxScope>(
+    conn: &mut Transaction<C>,
     path_cache: &PathCache,
     inode_cache: &InodeCache,
-) -> Result<Root, crate::Error> {
-    let config = db.read().await?.config().await?;
+) -> Result<Root, crate::Error>
+where
+    Transaction<C>: Read,
+{
+    let config = conn.config().await?;
     let ts = config.drive.timestamp().clone();
 
-    let mut conn = db.read().await?;
     let ids = conn.list_root().await?;
-    let content = inode_ids_to_inodes(inode_cache, path_cache, ids.into_iter(), &mut conn).await?;
+    let content = inode_ids_to_inodes(inode_cache, path_cache, ids.into_iter(), conn).await?;
 
     let root = Root(Arc::new(RootInner {
         last_modified: ts,
@@ -165,7 +185,7 @@ impl Vfs {
             .build();
 
         let stats = stats(&db).await?;
-        let root = root(&db, &path_cache, &inode_cache).await?;
+        let root = root(&mut db.read().await?, &path_cache, &inode_cache).await?;
         Ok(Self(Arc::new(VfsInner {
             client,
             db,
@@ -212,7 +232,12 @@ impl Vfs {
     }
 
     async fn reload_root(&self) -> Result<(), crate::Error> {
-        let root = root(&self.0.db, &self.0.path_cache, &self.0.inode_cache).await?;
+        let root = root(
+            &mut self.0.db.read().await?,
+            &self.0.path_cache,
+            &self.0.inode_cache,
+        )
+        .await?;
         let mut guard = self.0.root.lock().expect("to acquire lock");
         *guard = root;
         Ok(())
@@ -264,17 +289,27 @@ impl Vfs {
     }
 
     pub async fn inode_by_path(&self, path: &VfsPath) -> Result<Option<Inode>, Error> {
+        let conn = self.0.db.read().await?;
+        self._inode_by_path(path, conn).await
+    }
+
+    async fn _inode_by_path<'tx, C: TxScope>(
+        &self,
+        path: &VfsPath,
+        conn: impl Into<MaybeOwnedMut<'tx, Transaction<C>>> + Send,
+    ) -> Result<Option<Inode>, Error>
+    where
+        Transaction<C>: Read,
+    {
         if path == ROOT_PATH.deref() {
             return Ok(Some(Inode::Root(self.root())));
         }
+        let mut conn = conn.into();
 
-        let db = &self.0.db;
         let id = match self
             .0
             .path_cache
-            .try_get_with_by_ref(path, async {
-                db.read().await?.inode_id_by_path(path.as_ref()).await
-            })
+            .try_get_with_by_ref(path, async { conn.inode_id_by_path(path.as_ref()).await })
             .await
             .map_err(Error::CachedDbError)?
         {
@@ -282,14 +317,18 @@ impl Vfs {
             None => return Ok(None),
         };
 
-        self.inode_by_id(id).await
+        self._inode_by_id(id, Some(&mut conn)).await
     }
 
-    async fn _list<L: Listable>(
+    async fn _list<'tx, L: Listable, C: TxScope>(
         &self,
         listable: &L,
-    ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin, Error> {
-        Ok(listable.list(self).await?)
+        conn: impl Into<MaybeOwnedMut<'tx, Transaction<C>>> + Send,
+    ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin, Error>
+    where
+        Transaction<C>: Read,
+    {
+        Ok(listable.list(self, conn).await?)
     }
 
     pub async fn list<'a>(
@@ -297,9 +336,9 @@ impl Vfs {
         inode: &'a Inode,
     ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin + 'a, Error> {
         Ok(match inode {
-            Inode::Root(root) => Box::pin(self._list(root).await?)
+            Inode::Root(root) => Box::pin(self._list(root, self.0.db.read().await?).await?)
                 as Pin<Box<dyn Stream<Item = Result<Inode, Error>> + Send + Unpin>>,
-            Inode::Directory(dir) => Box::pin(self._list(dir).await?)
+            Inode::Directory(dir) => Box::pin(self._list(dir, self.0.db.read().await?).await?)
                 as Pin<Box<dyn Stream<Item = Result<Inode, Error>> + Send + Unpin>>,
             Inode::File(_) => Box::pin(stream::empty())
                 as Pin<Box<dyn Stream<Item = Result<Inode, Error>> + Send + Unpin>>,
@@ -307,7 +346,35 @@ impl Vfs {
     }
 
     pub async fn read_file(&self, file: &File) -> Result<FileHandle<ReadOnly>, crate::Error> {
-        let data_location = file.0.inner.data_location().ok_or_else(|| {
+        match &file.0.inner {
+            Variant::Permanent(model) => self.open_perma_file(model).await,
+            Variant::Wal(wal_node) => self.open_wal_file(wal_node).await,
+        }
+    }
+
+    async fn open_wal_file(
+        &self,
+        wal_node: &WalNode,
+    ) -> Result<FileHandle<ReadOnly>, crate::Error> {
+        match wal_node {
+            WalNode::File(wal_file_id) => {
+                let reader =
+                    wal::file_reader::FileReader::open(*wal_file_id, self.0.db.read().await?)
+                        .await?;
+                Ok(FileHandle(ReadOnly(Box::new(reader))))
+            }
+            WalNode::Directory => Err(wal::Error::InvalidWalNodeType(
+                "File".to_string(),
+                "Directory".to_string(),
+            ))?,
+        }
+    }
+
+    async fn open_perma_file(
+        &self,
+        model: &Model<FileKind>,
+    ) -> Result<FileHandle<ReadOnly>, crate::Error> {
+        let data_location = model.data_location().ok_or_else(|| {
             db::Error::from(DataError::MissingData(
                 "data_location not set for file".to_ascii_lowercase(),
             ))
@@ -337,9 +404,55 @@ impl Vfs {
         }
         Ok((matches, has_more))
     }
+
+    pub async fn create_file(
+        &self,
+        dir: &VfsPath,
+        name: &Name,
+        content_type: Option<ContentType>,
+        overwrite_existing: bool,
+        create_dirs: bool,
+    ) -> Result<FileHandle<WriteOnly>, crate::Error> {
+        let mut tx = self.0.db.write().await?;
+
+        let dir = match self._inode_by_path(dir, &mut tx).await? {
+            Some(inode) => inode,
+            None if create_dirs => {
+                todo!()
+            }
+            None => Err(Error::InodeError(InodeError::NotFoundByPath(dir.clone())))?,
+        };
+
+        let path = match dir {
+            Inode::Root(_) | Inode::Directory(_) => dir.path().join(name),
+            Inode::File(_) => Err(Error::InodeError(InodeError::ParentNotDirOrRoot))?,
+        };
+
+        let file_exists = match self._inode_by_path(&path, &mut tx).await? {
+            Some(Inode::Directory(_)) => {
+                Err(Error::InvalidOperation(InvalidOperation::ReplaceDir(path)))?
+            }
+            Some(Inode::Root(_)) => Err(Error::InvalidOperation(InvalidOperation::ReplaceRoot))?,
+            Some(Inode::File(_)) => true,
+            None => false,
+        };
+
+        if file_exists {
+            if overwrite_existing {
+                todo!("delete exiting file first")
+            } else {
+                Err(Error::NameAlreadyExists(name.clone()))?
+            }
+        }
+
+        Ok(FileHandle::<WriteOnly>::new(self.0.wal_chunk_size, tx).await?)
+    }
 }
 
-pub struct ReadOnly(Box<dyn DataReader>);
+trait FileReader: AsyncRead + AsyncSeek + Send + Sync + Unpin {}
+impl<T> FileReader for T where T: AsyncRead + AsyncSeek + Send + Sync + Unpin {}
+
+pub struct ReadOnly(Box<dyn FileReader>);
 
 #[repr(transparent)]
 pub struct FileHandle<T>(T);
@@ -366,29 +479,94 @@ impl AsyncSeek for FileHandle<ReadOnly> {
     }
 }
 
+#[self_referencing]
+pub struct WriteOnly {
+    tx: Transaction<db::ReadWrite>,
+    #[not_covariant]
+    #[borrows(mut tx)]
+    writer: wal::file_writer::FileWriter<'this, db::ReadWrite>,
+}
+
+impl FileHandle<WriteOnly> {
+    pub(crate) async fn new(
+        chunk_size: u32,
+        tx: Transaction<db::ReadWrite>,
+    ) -> Result<Self, crate::Error> {
+        let write_only = WriteOnly::try_new_async_send(tx, |tx| {
+            Box::pin(async move { wal::file_writer::FileWriter::new(chunk_size, tx).await })
+        })
+        .await?;
+
+        Ok(Self(write_only))
+    }
+}
+
+impl FileHandle<WriteOnly> {
+    pub async fn finalize(mut self) -> Result<(), crate::Error> {
+        let (file_id, bytes_written) = self
+            .0
+            .with_writer(|writer| (writer.file_id(), writer.bytes_written()));
+        let heads = self.0.into_heads();
+        //todo: update vfs
+        Ok(heads.tx.commit().await?)
+    }
+}
+
+impl AsyncWrite for FileHandle<WriteOnly> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        self.0
+            .with_writer_mut(|writer| Pin::new(writer).poll_write(cx, buf))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.0
+            .with_writer_mut(|writer| Pin::new(writer).poll_flush(cx))
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.0
+            .with_writer_mut(|writer| Pin::new(writer).poll_close(cx))
+    }
+}
+
 trait Listable {
-    fn list(
+    fn list<'tx, C: TxScope>(
         &self,
         vfs: &Vfs,
+        conn: impl Into<MaybeOwnedMut<'tx, Transaction<C>>> + Send,
     ) -> impl Future<Output = Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin, Error>>
-    + Send;
+    + Send
+    where
+        Transaction<C>: Read;
 }
 
 impl Listable for Root {
-    async fn list(
+    async fn list<'tx, C: TxScope>(
         &self,
         _: &Vfs,
-    ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin, Error> {
+        _: impl Into<MaybeOwnedMut<'tx, Transaction<C>>> + Send,
+    ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin, Error>
+    where
+        Transaction<C>: Read,
+    {
         Ok(stream::iter(self.0.content.iter().map(|i| Ok(i.clone()))))
     }
 }
 
 impl Listable for Directory {
-    async fn list(
+    async fn list<'tx, C: TxScope>(
         &self,
         vfs: &Vfs,
-    ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin, Error> {
-        let db = &vfs.0.db;
+        conn: impl Into<MaybeOwnedMut<'tx, Transaction<C>>> + Send,
+    ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin, Error>
+    where
+        Transaction<C>: Read,
+    {
+        let mut conn = conn.into();
         let id = self.0.id;
         let inode_cache = &vfs.0.inode_cache;
         let path_cache = &vfs.0.path_cache;
@@ -397,9 +575,8 @@ impl Listable for Directory {
             .0
             .dir_cache
             .try_get_with(id, async {
-                let mut conn = db.read().await?;
-                let ids = conn.list_dir(id).await?;
-                inode_ids_to_inodes(inode_cache, path_cache, ids.into_iter(), &mut conn).await
+                let ids = conn.as_mut().list_dir(id).await?;
+                inode_ids_to_inodes(inode_cache, path_cache, ids.into_iter(), conn.as_mut()).await
             })
             .await
             .map_err(Error::CachedError)?;
@@ -408,12 +585,15 @@ impl Listable for Directory {
     }
 }
 
-async fn inode_ids_to_inodes(
+async fn inode_ids_to_inodes<C: TxScope>(
     inode_cache: &InodeCache,
     path_cache: &PathCache,
     inode_ids: impl Iterator<Item = InodeId>,
-    conn: &mut Transaction<db::ReadOnly>,
-) -> Result<Vec<Inode>, Error> {
+    conn: &mut Transaction<C>,
+) -> Result<Vec<Inode>, Error>
+where
+    Transaction<C>: Read,
+{
     let mut inodes = vec![];
     for id in inode_ids {
         if let Some(inode) = inode_cache.get(&id).await.flatten() {
@@ -439,6 +619,19 @@ pub struct VfsPath(Arc<Utf8UnixPathBuf>);
 impl VfsPath {
     pub fn try_from<S: AsRef<str> + ?Sized>(value: &S) -> Result<Self, VfsPathError> {
         TryFrom::<&str>::try_from(value.as_ref())
+    }
+
+    pub fn join(&self, name: &Name) -> VfsPath {
+        Self(Arc::new(self.0.as_path().join(name.as_ref())))
+    }
+
+    pub fn split(&self) -> (Option<VfsPath>, Option<Name>) {
+        (
+            self.0.parent().map(|p| Self(Arc::new(p.to_path_buf()))),
+            self.0
+                .file_name()
+                .map(|n| Name::from_str(n).expect("name to be valid")),
+        )
     }
 }
 
@@ -561,12 +754,15 @@ impl File {
             size,
             visibility,
             path,
-            inner: entity,
+            inner: Variant::Permanent(entity),
         }))
     }
 
     pub fn content_type(&self) -> &ContentType {
-        self.0.inner.content_type()
+        match &self.0.inner {
+            Variant::Permanent(model) => model.content_type(),
+            Variant::Wal(_) => &ContentType::Binary,
+        }
     }
 
     pub fn size(&self) -> ByteSize {
@@ -574,11 +770,17 @@ impl File {
     }
 
     pub fn pinned_owner(&self) -> Option<&WalletAddress> {
-        self.0.inner.pinned_data_owner()
+        match &self.0.inner {
+            Variant::Permanent(model) => model.pinned_data_owner(),
+            Variant::Wal(_) => None,
+        }
     }
 
     pub fn data_location(&self) -> Option<&Arl> {
-        self.0.inner.data_location()
+        match &self.0.inner {
+            Variant::Permanent(model) => model.data_location(),
+            Variant::Wal(_) => None,
+        }
     }
 }
 
@@ -600,7 +802,7 @@ impl Directory {
             size: ByteSize::b(0),
             visibility,
             path,
-            inner: entity,
+            inner: Variant::Permanent(entity),
         }))
     }
 }
@@ -664,17 +866,19 @@ impl<E: Entity> VfsNode<E> {
     }
 
     pub fn extra_attributes(&self) -> HashMap<&str, Blob<'_>> {
-        self.0
-            .inner
-            .extra_attribute_names()
-            .filter_map(|name| {
-                if let Some(value) = self.0.inner.extra_attribute(name) {
-                    Some((name, value))
-                } else {
-                    None
-                }
-            })
-            .collect()
+        match &self.0.inner {
+            Variant::Permanent(model) => model
+                .extra_attribute_names()
+                .filter_map(|name| {
+                    if let Some(value) = model.extra_attribute(name) {
+                        Some((name, value))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Variant::Wal(_) => HashMap::default(),
+        }
     }
 }
 
@@ -686,7 +890,13 @@ struct VfsNodeInner<E: Entity> {
     size: ByteSize,
     visibility: Visibility,
     path: VfsPath,
-    inner: Model<E>,
+    inner: Variant<E>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum Variant<E: Entity> {
+    Permanent(Model<E>),
+    Wal(WalNode),
 }
 
 #[derive(Debug, PartialEq, Clone)]

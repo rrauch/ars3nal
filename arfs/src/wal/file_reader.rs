@@ -1,12 +1,14 @@
 use crate::db::{Read, Transaction, TxScope};
 use crate::wal::WalFileChunks;
 use futures_lite::{AsyncRead, AsyncSeek};
+use maybe_owned::MaybeOwnedMut;
 use std::io::{Cursor, Read as ReadExt, SeekFrom};
 use std::pin::Pin;
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 use tokio_util::bytes::Buf;
 
-struct FileReader<'tx, C: TxScope>
+pub(crate) struct FileReader<'tx, C: TxScope>
 where
     Transaction<C>: Read,
 {
@@ -19,7 +21,12 @@ impl<'tx, C: TxScope> FileReader<'tx, C>
 where
     Transaction<C>: Read,
 {
-    async fn open(wal_file_id: u64, tx: &'tx mut Transaction<C>) -> Result<Self, crate::Error> {
+    pub async fn open<TX: Into<MaybeOwnedMut<'tx, Transaction<C>>>>(
+        wal_file_id: u64,
+        tx: TX,
+    ) -> Result<Self, crate::Error> {
+        let mut tx = tx.into();
+
         let chunks = match tx.wal_file_chunks(wal_file_id).await? {
             None => Err(super::Error::FileNotFound(wal_file_id))?,
             Some(chunks) => WalFileChunks::try_from_iter(chunks.into_iter())?,
@@ -43,14 +50,14 @@ where
 {
     Ready(Inner<'tx, C>),
     RetrievingChunk {
-        fut: Pin<Box<dyn Future<Output = Result<Inner<'tx, C>, crate::Error>> + Send + 'tx>>,
+        fut: Mutex<Pin<Box<dyn Future<Output = Result<Inner<'tx, C>, crate::Error>> + Send + 'tx>>>,
     },
     Invalid,
 }
 
 struct Inner<'tx, C: TxScope> {
     file_id: u64,
-    tx: &'tx mut Transaction<C>,
+    tx: MaybeOwnedMut<'tx, Transaction<C>>,
     buf: Option<Cursor<Vec<u8>>>,
     chunks: WalFileChunks,
 }
@@ -84,7 +91,7 @@ impl<'tx, C: TxScope> Inner<'tx, C>
 where
     Transaction<C>: Read,
 {
-    fn new(file_id: u64, chunks: WalFileChunks, tx: &'tx mut Transaction<C>) -> Self {
+    fn new(file_id: u64, chunks: WalFileChunks, tx: MaybeOwnedMut<'tx, Transaction<C>>) -> Self {
         Self {
             file_id,
             tx,
@@ -127,22 +134,27 @@ where
 
                             // need to retrieve chunk
                             self.state = State::RetrievingChunk {
-                                fut: Box::pin(inner.retrieve_chunk(self.offset)),
+                                fut: Mutex::new(Box::pin(inner.retrieve_chunk(self.offset))),
                             };
                             continue;
                         }
                     }
                 }
-                State::RetrievingChunk { mut fut } => match fut.as_mut().poll(cx) {
-                    Poll::Ready(Ok(inner)) => {
-                        self.state = State::Ready(inner);
+                State::RetrievingChunk { fut } => {
+                    let mut inner = fut.lock().unwrap();
+
+                    match inner.as_mut().poll(cx) {
+                        Poll::Ready(Ok(inner)) => {
+                            self.state = State::Ready(inner);
+                        }
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(std::io::Error::other(e))),
+                        Poll::Pending => {
+                            drop(inner);
+                            self.state = State::RetrievingChunk { fut };
+                            return Poll::Pending;
+                        }
                     }
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(std::io::Error::other(e))),
-                    Poll::Pending => {
-                        self.state = State::RetrievingChunk { fut };
-                        return Poll::Pending;
-                    }
-                },
+                }
                 State::Invalid => return Poll::Ready(Err(Self::invalid_state_error())),
             }
         }
@@ -180,23 +192,27 @@ where
                     } else {
                         // seek
                         self.state = State::RetrievingChunk {
-                            fut: Box::pin(inner.retrieve_chunk(pos)),
+                            fut: Mutex::new(Box::pin(inner.retrieve_chunk(pos))),
                         };
                         self.offset = pos;
                         continue;
                     }
                 }
-                State::RetrievingChunk { mut fut } => match fut.as_mut().poll(cx) {
-                    Poll::Ready(Ok(inner)) => {
-                        self.state = State::Ready(inner);
-                        continue;
+                State::RetrievingChunk { fut } => {
+                    let mut inner = fut.lock().unwrap();
+                    match inner.as_mut().poll(cx) {
+                        Poll::Ready(Ok(inner)) => {
+                            self.state = State::Ready(inner);
+                            continue;
+                        }
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(std::io::Error::other(e))),
+                        Poll::Pending => {
+                            drop(inner);
+                            self.state = State::RetrievingChunk { fut };
+                            return Poll::Pending;
+                        }
                     }
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(std::io::Error::other(e))),
-                    Poll::Pending => {
-                        self.state = State::RetrievingChunk { fut };
-                        return Poll::Pending;
-                    }
-                },
+                }
                 State::Invalid => return Poll::Ready(Err(Self::invalid_state_error())),
             }
         }

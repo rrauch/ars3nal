@@ -17,7 +17,7 @@ bon = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 bytes = { workspace = true }
 circular-buffer = "1.1"
-ct-codecs = "1.1"
+ct-codecs = { workspace = true }
 ctr = { workspace = true, features = ["alloc", "zeroize", "block-padding"] }
 derive-where = { workspace = true, features = ["zeroize", "serde"] }
 digest = { workspace = true }

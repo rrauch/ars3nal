@@ -8,30 +8,43 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_util::bytes::{Buf, BufMut};
 
-struct FileWriter<'tx, C: TxScope>
+pub(crate) struct FileWriter<'tx, C: TxScope>
 where
     Transaction<C>: Write,
 {
     state: State<'tx, C>,
+    file_id: u64,
+    bytes_written: u64,
 }
 
 impl<'tx, C: TxScope> FileWriter<'tx, C>
 where
     Transaction<C>: Write,
 {
-    async fn new(chunk_size: u32, tx: &'tx mut Transaction<C>) -> Result<Self, crate::Error> {
+    pub async fn new(chunk_size: u32, tx: &'tx mut Transaction<C>) -> Result<Self, crate::Error> {
         let buf = HeapCircularBuffer::new(chunk_size as usize);
         let file_id = tx.new_wal_file().await?;
         let inner = Inner {
             file_id,
             tx,
             buf,
-            written: 0,
             chunk_no: 0,
         };
         Ok(Self {
             state: State::Buffering(inner),
+            file_id,
+            bytes_written: 0,
         })
+    }
+
+    #[inline]
+    pub(crate) fn file_id(&self) -> u64 {
+        self.file_id
+    }
+
+    #[inline]
+    pub(crate) fn bytes_written(&self) -> u64 {
+        self.bytes_written
     }
 
     fn invalid_state_error() -> std::io::Error {
@@ -61,7 +74,6 @@ struct Inner<'tx, C: TxScope> {
     file_id: u64,
     tx: &'tx mut Transaction<C>,
     buf: HeapCircularBuffer,
-    written: u64,
     chunk_no: usize,
 }
 
@@ -83,7 +95,6 @@ where
                 .await?;
 
             self.buf.consume(len);
-            self.written += len as u64;
             self.chunk_no += 1;
         }
         Ok(())
@@ -125,7 +136,7 @@ where
                     }
 
                     let n = min(buf.len(), inner.buf.remaining_mut());
-                    copy(&mut inner.buf, &mut Cursor::new(&buf[..n]));
+                    self.bytes_written += copy(&mut inner.buf, &mut Cursor::new(&buf[..n]));
                     self.state = State::Buffering(inner);
                     return Poll::Ready(Ok(n));
                 }

@@ -2,23 +2,30 @@ use anyhow::bail;
 use arfs::{ArFs, File, Inode, VfsPath};
 use ario_core::base64::{FromBase64, ToBase64};
 use ario_core::crypto::hash::Blake3;
-use futures_lite::{AsyncReadExt, AsyncSeekExt};
+use ct_codecs::{Base64, Decoder};
+use futures_lite::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, StreamExt};
 use itertools::{Either, Itertools};
 use s3s::auth::Credentials;
+use s3s::checksum::ChecksumHasher;
+use s3s::crypto::{Checksum, Md5};
 use s3s::dto::{
-    Bucket, BucketName, CommonPrefix, ContentType, ETag, GetBucketLocationInput,
+    Bucket, BucketName, ChecksumAlgorithm, ChecksumCRC32, ChecksumCRC32C, ChecksumCRC64NVME,
+    ChecksumSHA1, ChecksumSHA256, CommonPrefix, ContentType, ETag, GetBucketLocationInput,
     GetBucketLocationOutput, GetObjectInput, GetObjectOutput, HeadBucketInput, HeadBucketOutput,
     HeadObjectInput, HeadObjectOutput, KeyCount, LastModified, ListBucketsInput, ListBucketsOutput,
     ListObjectsInput, ListObjectsOutput, ListObjectsV2Input, ListObjectsV2Output, MaxKeys,
-    Metadata, Object, ObjectKey, ObjectStorageClass, Owner, Size, StreamingBlob,
+    Metadata, Object, ObjectKey, ObjectStorageClass, Owner, PutObjectInput, PutObjectOutput, Size,
+    StreamingBlob,
 };
-use s3s::{S3, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, s3_error};
+use s3s::{S3, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, TrailingHeaders, s3_error};
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::str::FromStr;
 use std::time::SystemTime;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tokio_util::io::ReaderStream;
+
+const MAX_UPLOAD_SIZE: u64 = 1024 * 1024 * 1024 * 5; // 5GiB
 
 #[repr(transparent)]
 pub struct ArS3 {
@@ -144,10 +151,239 @@ impl ArS3 {
 
         Ok((object, file))
     }
+
+    async fn put_file_object(
+        &self,
+        req: S3Request<PutObjectInput>,
+        arfs: &ArFs,
+        expected_content_len: Option<u64>,
+    ) -> S3Result<PutObjectOutput> {
+        let mut input = req.input;
+        let (mut checksum_hasher, mut checksum_values) = checksum_hasher(&mut input)?;
+        let Some(mut body) = input.body else {
+            return Err(s3_error!(IncompleteBody));
+        };
+
+        let path = VfsPath::try_from(format!("/{}", input.key.as_str()).as_str())
+            .map_err(|e| S3Error::internal_error(e))?;
+
+        let (dir, name) = match path.split() {
+            (Some(dir), Some(name)) => (dir, name),
+            _ => Err(S3Error::new(S3ErrorCode::InvalidArgument))?,
+        };
+
+        let content_type = input
+            .content_type
+            .as_ref()
+            .map(|c| arfs::ContentType::from_str(c.essence_str()))
+            .transpose()
+            .map_err(|e| S3Error::internal_error(e))?;
+
+        let mut fh = arfs
+            .vfs()
+            .create_file(&dir, &name, content_type, true, true)
+            .await
+            .map_err(|e| S3Error::internal_error(e))?;
+
+        let mut actual_content_len = 0u64;
+        let mut md5_hasher = Md5::new();
+
+        while let Some(bytes) = body
+            .try_next()
+            .await
+            .map_err(|e| S3Error::with_source(S3ErrorCode::InternalError, e))?
+        {
+            md5_hasher.update(bytes.as_ref());
+            checksum_hasher.update(bytes.as_ref());
+            fh.write_all(bytes.as_ref())
+                .await
+                .map_err(|e| S3Error::internal_error(e))?;
+            actual_content_len += bytes.len() as u64;
+
+            if actual_content_len > MAX_UPLOAD_SIZE {
+                return Err(s3_error!(EntityTooLarge));
+            }
+        }
+
+        if let Some(len) = expected_content_len {
+            if actual_content_len != len {
+                return Err(s3_error!(BadDigest, "content_length mismatch"));
+            }
+        }
+
+        let md5 = md5_hasher.finalize();
+        let checksum = checksum_hasher.finalize();
+
+        if let Some(content_md5) = input.content_md5 {
+            let expected = Base64::decode_to_vec(&content_md5, None)
+                .map_err(|e| S3Error::internal_error(e))?;
+
+            if md5.as_slice() != expected.as_slice() {
+                return Err(s3_error!(BadDigest, "content_md5 mismatch"));
+            }
+        }
+
+        if let Some(trailers) = &req.trailing_headers {
+            update_checksum_values(trailers, &mut checksum_values)?;
+        }
+
+        checksum_values.compare(&checksum)?;
+
+        fh.finalize()
+            .await
+            .map_err(|e| S3Error::internal_error(e))?;
+
+        let file = match arfs
+            .vfs()
+            .inode_by_path(&path)
+            .await
+            .map_err(|e| S3Error::internal_error(e))?
+        {
+            Some(Inode::File(file)) => file,
+            _ => Err(S3Error::with_message(
+                S3ErrorCode::InternalError,
+                "upload appeared successful but file not found in vfs",
+            ))?,
+        };
+
+        let object = self.as_object(arfs, &file);
+
+        Ok(PutObjectOutput {
+            e_tag: object.e_tag,
+            size: object.size,
+            ..Default::default()
+        })
+    }
 }
 
 fn fmt_content_range(start: u64, end_inclusive: u64, size: u64) -> String {
     format!("bytes {start}-{end_inclusive}/{size}")
+}
+
+fn check_storage_class(input: &PutObjectInput) -> Result<(), S3Error> {
+    if let Some(ref storage_class) = input.storage_class {
+        let is_valid = ["STANDARD", "REDUCED_REDUNDANCY"].contains(&storage_class.as_str());
+        if !is_valid {
+            return Err(s3_error!(InvalidStorageClass));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct Checksums {
+    crc32: Option<ChecksumCRC32>,
+    crc32c: Option<ChecksumCRC32C>,
+    crc64_nvme: Option<ChecksumCRC64NVME>,
+    sha1: Option<ChecksumSHA1>,
+    sha256: Option<ChecksumSHA256>,
+}
+
+impl Checksums {
+    fn compare(&self, calculated: &s3s::dto::Checksum) -> S3Result<()> {
+        if calculated.checksum_crc32 != self.crc32 {
+            return Err(s3_error!(BadDigest, "checksum_crc32 mismatch",));
+        }
+        if calculated.checksum_crc32c != self.crc32c {
+            return Err(s3_error!(BadDigest, "checksum_crc32c mismatch"));
+        }
+        if calculated.checksum_sha1 != self.sha1 {
+            return Err(s3_error!(BadDigest, "checksum_sha1 mismatch"));
+        }
+        if calculated.checksum_sha256 != self.sha256 {
+            return Err(s3_error!(BadDigest, "checksum_sha256 mismatch"));
+        }
+        if calculated.checksum_crc64nvme != self.crc64_nvme {
+            return Err(s3_error!(BadDigest, "checksum_crc64nvme mismatch"));
+        }
+        Ok(())
+    }
+}
+
+fn checksum_hasher(input: &mut PutObjectInput) -> Result<(ChecksumHasher, Checksums), S3Error> {
+    let mut checksum_hasher: ChecksumHasher = Default::default();
+    let mut checksum_values = Checksums::default();
+
+    if let Some(checksum) = input.checksum_crc32.take() {
+        checksum_values.crc32 = Some(checksum);
+        checksum_hasher.crc32 = Some(Default::default());
+    }
+    if let Some(checksum) = input.checksum_crc32c.take() {
+        checksum_values.crc32c = Some(checksum);
+        checksum_hasher.crc32c = Some(Default::default());
+    }
+    if let Some(checksum) = input.checksum_sha1.take() {
+        checksum_values.sha1 = Some(checksum);
+        checksum_hasher.sha1 = Some(Default::default());
+    }
+    if let Some(checksum) = input.checksum_sha256.take() {
+        checksum_values.sha256 = Some(checksum);
+        checksum_hasher.sha256 = Some(Default::default());
+    }
+    if let Some(checksum) = input.checksum_crc64nvme.take() {
+        checksum_values.crc64_nvme = Some(checksum);
+        checksum_hasher.crc64nvme = Some(Default::default());
+    }
+    if let Some(alg) = &input.checksum_algorithm {
+        match alg.as_str() {
+            ChecksumAlgorithm::CRC32 => checksum_hasher.crc32 = Some(Default::default()),
+            ChecksumAlgorithm::CRC32C => checksum_hasher.crc32c = Some(Default::default()),
+            ChecksumAlgorithm::SHA1 => checksum_hasher.sha1 = Some(Default::default()),
+            ChecksumAlgorithm::SHA256 => checksum_hasher.sha256 = Some(Default::default()),
+            ChecksumAlgorithm::CRC64NVME => checksum_hasher.crc64nvme = Some(Default::default()),
+            _ => return Err(s3_error!(NotImplemented, "Unsupported checksum algorithm")),
+        }
+    }
+    Ok((checksum_hasher, checksum_values))
+}
+
+fn update_checksum_values(
+    trailers: &TrailingHeaders,
+    checksum_values: &mut Checksums,
+) -> S3Result<()> {
+    if let Some(trailers) = trailers.take() {
+        if let Some(crc32) = trailers.get("x-amz-checksum-crc32") {
+            checksum_values.crc32 = Some(
+                crc32
+                    .to_str()
+                    .map_err(|_| s3_error!(InvalidArgument))?
+                    .to_owned(),
+            );
+        }
+        if let Some(crc32c) = trailers.get("x-amz-checksum-crc32c") {
+            checksum_values.crc32c = Some(
+                crc32c
+                    .to_str()
+                    .map_err(|_| s3_error!(InvalidArgument))?
+                    .to_owned(),
+            );
+        }
+        if let Some(sha1) = trailers.get("x-amz-checksum-sha1") {
+            checksum_values.sha1 = Some(
+                sha1.to_str()
+                    .map_err(|_| s3_error!(InvalidArgument))?
+                    .to_owned(),
+            );
+        }
+        if let Some(sha256) = trailers.get("x-amz-checksum-sha256") {
+            checksum_values.sha256 = Some(
+                sha256
+                    .to_str()
+                    .map_err(|_| s3_error!(InvalidArgument))?
+                    .to_owned(),
+            );
+        }
+        if let Some(crc64nvme) = trailers.get("x-amz-checksum-crc64nvme") {
+            checksum_values.crc64_nvme = Some(
+                crc64nvme
+                    .to_str()
+                    .map_err(|_| s3_error!(InvalidArgument))?
+                    .to_owned(),
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -411,5 +647,38 @@ impl S3 for ArS3 {
         };
 
         Ok(S3Response::new(output))
+    }
+
+    async fn put_object(
+        &self,
+        req: S3Request<PutObjectInput>,
+    ) -> S3Result<S3Response<PutObjectOutput>> {
+        let input = &req.input;
+        check_storage_class(&input)?;
+        let arfs = self.arfs(&input.bucket, req.credentials.as_ref())?;
+        let content_length = input.content_length.map(|cl| cl as u64);
+        if input.key.ends_with('/') {
+            // directory
+            if let Some(len) = content_length {
+                if len > 0 {
+                    return Err(s3_error!(
+                        UnexpectedContent,
+                        "Unexpected content_length when creating a directory object."
+                    ));
+                }
+            }
+            if input.body.is_some() {
+                return Err(s3_error!(
+                    UnexpectedContent,
+                    "Unexpected request body when creating a directory object."
+                ));
+            }
+            todo!()
+        } else {
+            // file
+            Ok(S3Response::new(
+                self.put_file_object(req, arfs, content_length).await?,
+            ))
+        }
     }
 }

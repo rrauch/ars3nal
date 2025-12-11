@@ -5,8 +5,8 @@ use std::ops::Range;
 use thiserror::Error;
 use tokio_util::bytes::{Buf, BufMut};
 
-mod file_reader;
-mod file_writer;
+pub(crate) mod file_reader;
+pub(crate) mod file_writer;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -18,6 +18,14 @@ pub enum Error {
     NoChunkForOffset(u64),
     #[error("content not found for content hash '{0}'")]
     ContentNotFound(String),
+    #[error("invalid wal node type; expected '{0}', actual '{1}'")]
+    InvalidWalNodeType(String, String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) enum WalNode {
+    File(u64),
+    Directory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
