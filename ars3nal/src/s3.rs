@@ -229,22 +229,10 @@ impl ArS3 {
 
         checksum_values.compare(&checksum)?;
 
-        fh.finalize()
+        let file = fh
+            .finalize()
             .await
             .map_err(|e| S3Error::internal_error(e))?;
-
-        let file = match arfs
-            .vfs()
-            .inode_by_path(&path)
-            .await
-            .map_err(|e| S3Error::internal_error(e))?
-        {
-            Some(Inode::File(file)) => file,
-            _ => Err(S3Error::with_message(
-                S3ErrorCode::InternalError,
-                "upload appeared successful but file not found in vfs",
-            ))?,
-        };
 
         let object = self.as_object(arfs, &file);
 

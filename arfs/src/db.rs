@@ -96,6 +96,8 @@ pub enum DataError {
     IdMismatch { expected: String, actual: String },
     #[error("entity type '{0}' is not a valid inode type")]
     NotInodeEntityType(String),
+    #[error("not a valid perm_type: '{0}'")]
+    InvalidPermType(String),
 }
 
 #[derive(Debug, Clone)]
@@ -708,6 +710,105 @@ where
         Ok(id as u64)
     }
 
+    pub async fn upsert_vfs_file(
+        &mut self,
+        path: &VfsPath,
+        last_modified: &DateTime<Utc>,
+        size: ByteSize,
+        wal_entity_id: u64,
+    ) -> Result<(InodeId, Vec<InodeId>), Error> {
+        let inode_id = if let Some(inode_id) = self.inode_id_by_path(path.as_ref()).await? {
+            // existing vfs entry
+            let vfs_row = get_vfs_row(*inode_id.deref() as i64, self)
+                .await?
+                .ok_or_else(|| {
+                    DataError::MissingData(format!("inode with id '{0}' not found", inode_id))
+                })?;
+
+            match vfs_row.inode_type.as_ref() {
+                <FileKind as DbEntity>::TYPE => {}
+                other => Err(DataError::IncorrectEntityType {
+                    expected: <FileKind as DbEntity>::TYPE.into(),
+                    actual: other.to_string().into(),
+                })?,
+            }
+
+            let wal_entity_id = wal_entity_id as i64;
+            let size = size.as_u64() as i64;
+            let last_modified = last_modified.timestamp();
+            let id = *inode_id as i64;
+            sqlx::query!(
+                "
+                    UPDATE vfs SET
+                                   perm_type = 'W',
+                                   entity = NULL,
+                                   wal_entity = ?,
+                                   size = ?,
+                                   last_modified = ?,
+                                   last_proactively_cached_at = NULL,
+                                   last_proactive_cache_attempt_at = NULL
+                        WHERE id = ? AND inode_type = 'FI'
+                    ",
+                wal_entity_id,
+                size,
+                last_modified,
+                id,
+            )
+            .execute(self.conn())
+            .await?;
+            Ok::<_, Error>(inode_id)
+        } else {
+            // new vfs entry
+            let (parent, name) = path.split();
+            let parent_id = if let Some(parent_path) = parent {
+                if &parent_path == crate::vfs::ROOT_PATH.deref() {
+                    None
+                } else {
+                    Some(
+                        *self
+                            .inode_id_by_path(parent_path.as_ref())
+                            .await?
+                            .ok_or_else(|| DataError::MissingData("parent not found".to_string()))?
+                            as i64,
+                    )
+                }
+            } else {
+                None
+            };
+
+            let name = name.ok_or_else(|| DataError::MissingData("name not set".to_string()))?;
+            let size = size.as_u64() as i64;
+            let last_modified = last_modified.timestamp();
+            let row = VfsRow {
+                id: 0,
+                inode_type: "FI".into(),
+                perm_type: "W".into(),
+                entity: None,
+                wal_entity: Some(wal_entity_id as i64),
+                name: name.as_ref().into(),
+                size,
+                last_modified,
+                visibility: "V".into(),
+                parent: parent_id,
+                path: None,
+            };
+
+            Ok(InodeId::try_from(insert_vfs_row(&row, self).await?)
+                .map_err(|e| DataError::ConversionError(e.to_string()))?)
+        }?;
+
+        let affected_inode_ids = collect_affected_inode_ids(self)
+            .await?
+            .map(|id| {
+                InodeId::try_from(id as u64)
+                    .map_err(|e| DataError::ConversionError(e.to_string()).into())
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        clear_temp_tables(self).await?;
+
+        Ok((inode_id, affected_inode_ids))
+    }
+
     pub async fn insert_wal_content(
         &mut self,
         content_hash: &[u8],
@@ -1091,8 +1192,8 @@ async fn get_entity<E: DbEntity, C: Read>(id: i64, tx: &mut C) -> Result<Model<E
     Ok(E::try_from_row(row)?)
 }
 
-async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, Error> {
-    let vfs_row: VfsRow = match sqlx::query!(
+async fn get_vfs_row<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<VfsRow<'static>>, Error> {
+    Ok(sqlx::query!(
         "SELECT
              id, inode_type, perm_type, entity, wal_entity, name, size, last_modified as \"last_modified: i64\", visibility, parent, path
          FROM
@@ -1116,8 +1217,11 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
             parent: r.parent,
             path: Some(r.path.into()),
         }
-    })
-    {
+    }))
+}
+
+async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, Error> {
+    let vfs_row = match get_vfs_row(inode_id, tx).await? {
         Some(vfs_row) => vfs_row,
         None => return Ok(None),
     };
@@ -1142,44 +1246,96 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
     let path = VfsPath::try_from::<str>(path.as_ref())
         .map_err(|e| DataError::ConversionError(e.to_string()))?;
 
-    match vfs_row.inode_type.as_ref() {
-        <FileKind as DbEntity>::TYPE => {
-            let entity = get_entity::<FileKind, _>(
-                vfs_row
-                    .entity
-                    .ok_or_else(|| DataError::MissingData("entity not set".to_string()))?,
-                tx,
-            )
-            .await?;
-            Ok(Some(Inode::File(VfsFile::new(
-                id,
-                name,
-                ByteSize::b(vfs_row.size as u64),
-                last_modified,
-                visibility,
-                path,
-                entity,
-            ))))
+    match vfs_row.perm_type.as_ref() {
+        "P" => match vfs_row.inode_type.as_ref() {
+            <FileKind as DbEntity>::TYPE => {
+                let entity = get_entity::<FileKind, _>(
+                    vfs_row
+                        .entity
+                        .ok_or_else(|| DataError::MissingData("entity not set".to_string()))?,
+                    tx,
+                )
+                .await?;
+                Ok(Some(Inode::File(VfsFile::new_permanent(
+                    id,
+                    name,
+                    ByteSize::b(vfs_row.size as u64),
+                    last_modified,
+                    visibility,
+                    path,
+                    entity,
+                ))))
+            }
+            <FolderKind as DbEntity>::TYPE => {
+                let entity = get_entity::<FolderKind, _>(
+                    vfs_row
+                        .entity
+                        .ok_or_else(|| DataError::MissingData("entity not set".to_string()))?,
+                    tx,
+                )
+                .await?;
+                Ok(Some(Inode::Directory(VfsDirectory::new_permanent(
+                    id,
+                    name,
+                    last_modified,
+                    visibility,
+                    path,
+                    entity,
+                ))))
+            }
+            other => Err(DataError::NotInodeEntityType(other.to_string()))?,
+        },
+        "W" => {
+            match vfs_row.inode_type.as_ref() {
+                <FileKind as DbEntity>::TYPE => {
+                    //todo: read metadata
+                    Ok(Some(Inode::File(VfsFile::new_wal(
+                        id,
+                        name,
+                        ByteSize::b(vfs_row.size as u64),
+                        last_modified,
+                        visibility,
+                        path,
+                        vfs_row.wal_entity.ok_or_else(|| {
+                            DataError::MissingData("wal_entity not set".to_string())
+                        })? as u64,
+                    ))))
+                }
+                <FolderKind as DbEntity>::TYPE => Ok(Some(Inode::Directory(
+                    VfsDirectory::new_wal(id, name, last_modified, visibility, path),
+                ))),
+                other => Err(DataError::NotInodeEntityType(other.to_string()))?,
+            }
         }
-        <FolderKind as DbEntity>::TYPE => {
-            let entity = get_entity::<FolderKind, _>(
-                vfs_row
-                    .entity
-                    .ok_or_else(|| DataError::MissingData("entity not set".to_string()))?,
-                tx,
-            )
-            .await?;
-            Ok(Some(Inode::Directory(VfsDirectory::new(
-                id,
-                name,
-                last_modified,
-                visibility,
-                path,
-                entity,
-            ))))
-        }
-        other => Err(DataError::NotInodeEntityType(other.to_string()))?,
+        other => Err(DataError::InvalidPermType(other.to_string()))?,
     }
+}
+
+async fn insert_vfs_row<C: Write>(row: &VfsRow<'_>, tx: &mut C) -> Result<u64, Error> {
+    let inode_type = row.inode_type.deref();
+    let perm_type = row.perm_type.deref();
+    let name = row.name.deref();
+    let visibility = row.visibility.deref();
+
+    Ok(sqlx::query!(
+        "
+        INSERT INTO vfs
+            (perm_type, inode_type, entity, wal_entity, name, size, last_modified, visibility, parent) VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ",
+        perm_type,
+        inode_type,
+        row.entity,
+        row.wal_entity,
+        name,
+        row.size,
+        row.last_modified,
+        visibility,
+        row.parent,
+    )
+    .execute(tx.conn())
+    .await?
+    .last_insert_rowid() as u64)
 }
 
 async fn insert_inode<'a, E: DbEntity, C: Write>(
@@ -1203,27 +1359,7 @@ where
     };
 
     let row = VfsRow::from((entity, entity_id, parent_id));
-    let inode_type = row.inode_type.deref();
-    let name = row.name.deref();
-    let visibility = row.visibility.deref();
-
-    let id = sqlx::query!(
-        "
-        INSERT INTO vfs
-            (perm_type, inode_type, entity, name, size, last_modified, visibility, parent) VALUES
-            ('P', ?, ?, ?, ?, ?, ?, ?)
-        ",
-        inode_type,
-        row.entity,
-        name,
-        row.size,
-        row.last_modified,
-        visibility,
-        row.parent,
-    )
-    .execute(tx.conn())
-    .await?
-    .last_insert_rowid();
+    let id = insert_vfs_row(&row, tx).await? as i64;
 
     let path = sqlx::query!("SELECT path FROM vfs WHERE id = ?", id)
         .fetch_one(tx.conn())

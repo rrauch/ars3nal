@@ -25,10 +25,10 @@ use std::task::{Context, Poll};
 use thiserror::Error;
 use typed_path::{Utf8UnixEncoding, Utf8UnixPath, Utf8UnixPathBuf};
 
-const ROOT_INODE_ID: InodeId = InodeId(2);
+pub(crate) const ROOT_INODE_ID: InodeId = InodeId(2);
 static ROOT_NAME: LazyLock<Name> =
     LazyLock::new(|| Name::from_str("ROOT").expect("ROOT should be a valid name"));
-static ROOT_PATH: LazyLock<VfsPath> =
+pub(crate) static ROOT_PATH: LazyLock<VfsPath> =
     LazyLock::new(|| VfsPath::try_from("/").expect("/ to be valid Root path"));
 
 const MIN_INODE_ID: u64 = 1000;
@@ -429,23 +429,19 @@ impl Vfs {
         };
 
         let file_exists = match self._inode_by_path(&path, &mut tx).await? {
-            Some(Inode::Directory(_)) => {
-                Err(Error::InvalidOperation(InvalidOperation::ReplaceDir(path)))?
-            }
+            Some(Inode::Directory(_)) => Err(Error::InvalidOperation(
+                InvalidOperation::ReplaceDir(path.clone()),
+            ))?,
             Some(Inode::Root(_)) => Err(Error::InvalidOperation(InvalidOperation::ReplaceRoot))?,
             Some(Inode::File(_)) => true,
             None => false,
         };
 
-        if file_exists {
-            if overwrite_existing {
-                todo!("delete exiting file first")
-            } else {
-                Err(Error::NameAlreadyExists(name.clone()))?
-            }
+        if file_exists && !overwrite_existing {
+            Err(Error::NameAlreadyExists(name.clone()))?
         }
 
-        Ok(FileHandle::<WriteOnly>::new(self.0.wal_chunk_size, tx).await?)
+        Ok(FileHandle::<WriteOnly>::new(self.0.wal_chunk_size, tx, path, self.clone()).await?)
     }
 }
 
@@ -482,6 +478,8 @@ impl AsyncSeek for FileHandle<ReadOnly> {
 #[self_referencing]
 pub struct WriteOnly {
     tx: Transaction<db::ReadWrite>,
+    path: VfsPath,
+    vfs: Vfs,
     #[not_covariant]
     #[borrows(mut tx)]
     writer: wal::file_writer::FileWriter<'this, db::ReadWrite>,
@@ -491,8 +489,10 @@ impl FileHandle<WriteOnly> {
     pub(crate) async fn new(
         chunk_size: u32,
         tx: Transaction<db::ReadWrite>,
+        path: VfsPath,
+        vfs: Vfs,
     ) -> Result<Self, crate::Error> {
-        let write_only = WriteOnly::try_new_async_send(tx, |tx| {
+        let write_only = WriteOnly::try_new_async_send(tx, path, vfs, |tx| {
             Box::pin(async move { wal::file_writer::FileWriter::new(chunk_size, tx).await })
         })
         .await?;
@@ -502,13 +502,30 @@ impl FileHandle<WriteOnly> {
 }
 
 impl FileHandle<WriteOnly> {
-    pub async fn finalize(mut self) -> Result<(), crate::Error> {
-        let (file_id, bytes_written) = self
+    pub async fn finalize(mut self) -> Result<File, crate::Error> {
+        let (wal_entity_id, bytes_written) = self
             .0
             .with_writer(|writer| (writer.file_id(), writer.bytes_written()));
-        let heads = self.0.into_heads();
-        //todo: update vfs
-        Ok(heads.tx.commit().await?)
+        let mut heads = self.0.into_heads();
+        let now = Utc::now();
+        let size = ByteSize::b(bytes_written);
+        let (inode_id, affected_ids) = heads
+            .tx
+            .upsert_vfs_file(&heads.path, &now, size, wal_entity_id)
+            .await?;
+
+        let file = match heads.tx.inode_by_id(inode_id).await? {
+            Some(Inode::File(file)) => file,
+            None => Err(wal::Error::FileNotFound(inode_id.0))?,
+            _ => Err(wal::Error::InvalidWalNodeType(
+                "File".to_string(),
+                "not a file".to_string(),
+            ))?,
+        };
+        heads.tx.commit().await?;
+        heads.vfs.invalidate_cache(affected_ids).await;
+
+        Ok(file)
     }
 }
 
@@ -738,7 +755,7 @@ impl TryFrom<u64> for InodeId {
 pub type File = VfsNode<FileKind>;
 
 impl File {
-    pub(crate) fn new(
+    pub(crate) fn new_permanent(
         id: InodeId,
         name: Name,
         size: ByteSize,
@@ -755,6 +772,26 @@ impl File {
             visibility,
             path,
             inner: Variant::Permanent(entity),
+        }))
+    }
+
+    pub(crate) fn new_wal(
+        id: InodeId,
+        name: Name,
+        size: ByteSize,
+        last_modified: Timestamp,
+        visibility: Visibility,
+        path: VfsPath,
+        wal_entity_id: u64,
+    ) -> Self {
+        Self(Arc::new(VfsNodeInner {
+            id,
+            name,
+            last_modified,
+            size,
+            visibility,
+            path,
+            inner: Variant::Wal(WalNode::File(wal_entity_id)),
         }))
     }
 
@@ -787,7 +824,7 @@ impl File {
 pub type Directory = VfsNode<FolderKind>;
 
 impl Directory {
-    pub(crate) fn new(
+    pub(crate) fn new_permanent(
         id: InodeId,
         name: Name,
         last_modified: Timestamp,
@@ -803,6 +840,24 @@ impl Directory {
             visibility,
             path,
             inner: Variant::Permanent(entity),
+        }))
+    }
+
+    pub(crate) fn new_wal(
+        id: InodeId,
+        name: Name,
+        last_modified: Timestamp,
+        visibility: Visibility,
+        path: VfsPath,
+    ) -> Self {
+        Self(Arc::new(VfsNodeInner {
+            id,
+            name,
+            last_modified,
+            size: ByteSize::b(0),
+            visibility,
+            path,
+            inner: Variant::Wal(WalNode::Directory),
         }))
     }
 }
@@ -877,8 +932,13 @@ impl<E: Entity> VfsNode<E> {
                     }
                 })
                 .collect(),
-            Variant::Wal(_) => HashMap::default(),
+            Variant::Wal(_) => HashMap::default(), //todo
         }
+    }
+
+    #[inline]
+    pub(crate) fn perm_type(&self) -> &Variant<E> {
+        &self.0.inner
     }
 }
 
@@ -894,7 +954,7 @@ struct VfsNodeInner<E: Entity> {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-enum Variant<E: Entity> {
+pub(crate) enum Variant<E: Entity> {
     Permanent(Model<E>),
     Wal(WalNode),
 }
