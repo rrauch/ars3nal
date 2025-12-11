@@ -1,7 +1,8 @@
 CREATE TABLE wal_entity
 (
     id          INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-    entity_type TEXT                              NOT NULL CHECK (entity_type IN ('FI', 'FO'))
+    entity_type TEXT                              NOT NULL CHECK (entity_type IN ('FI', 'FO')),
+    metadata    BLOB CHECK (metadata IS NULL OR json_valid(metadata, 8))
 );
 
 CREATE TABLE wal_content
@@ -189,7 +190,9 @@ FROM vfs;
 -- Drop old table
 DROP TABLE vfs;
 
-DELETE FROM sqlite_sequence WHERE name = 'vfs';
+DELETE
+FROM sqlite_sequence
+WHERE name = 'vfs';
 
 -- Rename new table
 ALTER TABLE vfs_new

@@ -42,6 +42,10 @@ where
     fn invalid_state_error() -> std::io::Error {
         std::io::Error::new(std::io::ErrorKind::Other, "invalid reader state")
     }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
 }
 
 enum State<'tx, C: TxScope>

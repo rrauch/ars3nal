@@ -181,7 +181,7 @@ impl ArS3 {
 
         let mut fh = arfs
             .vfs()
-            .create_file(&dir, &name, content_type, true, true)
+            .create_file(&dir, &name, None, content_type, true, true)
             .await
             .map_err(|e| S3Error::internal_error(e))?;
 
@@ -269,19 +269,19 @@ struct Checksums {
 
 impl Checksums {
     fn compare(&self, calculated: &s3s::dto::Checksum) -> S3Result<()> {
-        if calculated.checksum_crc32 != self.crc32 {
+        if self.crc32.is_some() && calculated.checksum_crc32 != self.crc32 {
             return Err(s3_error!(BadDigest, "checksum_crc32 mismatch",));
         }
-        if calculated.checksum_crc32c != self.crc32c {
+        if self.crc32c.is_some() && calculated.checksum_crc32c != self.crc32c {
             return Err(s3_error!(BadDigest, "checksum_crc32c mismatch"));
         }
-        if calculated.checksum_sha1 != self.sha1 {
+        if self.sha1.is_some() && calculated.checksum_sha1 != self.sha1 {
             return Err(s3_error!(BadDigest, "checksum_sha1 mismatch"));
         }
-        if calculated.checksum_sha256 != self.sha256 {
+        if self.sha256.is_some() && calculated.checksum_sha256 != self.sha256 {
             return Err(s3_error!(BadDigest, "checksum_sha256 mismatch"));
         }
-        if calculated.checksum_crc64nvme != self.crc64_nvme {
+        if self.crc64_nvme.is_some() && calculated.checksum_crc64nvme != self.crc64_nvme {
             return Err(s3_error!(BadDigest, "checksum_crc64nvme mismatch"));
         }
         Ok(())

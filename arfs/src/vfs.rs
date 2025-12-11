@@ -10,7 +10,7 @@ use ario_core::blob::Blob;
 use ario_core::wallet::WalletAddress;
 use chrono::{DateTime, Utc};
 use derive_more::Display;
-use futures_lite::{AsyncRead, AsyncSeek, AsyncWrite, Stream, StreamExt, stream};
+use futures_lite::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, Stream, StreamExt, stream};
 use maybe_owned::MaybeOwnedMut;
 use moka::future::Cache;
 use ouroboros::self_referencing;
@@ -348,19 +348,26 @@ impl Vfs {
     pub async fn read_file(&self, file: &File) -> Result<FileHandle<ReadOnly>, crate::Error> {
         match &file.0.inner {
             Variant::Permanent(model) => self.open_perma_file(model).await,
-            Variant::Wal(wal_node) => self.open_wal_file(wal_node).await,
+            Variant::Wal(wal_node) => self.open_wal_file(wal_node, file.size()).await,
         }
     }
 
     async fn open_wal_file(
         &self,
         wal_node: &WalNode,
+        expected_size: ByteSize,
     ) -> Result<FileHandle<ReadOnly>, crate::Error> {
         match wal_node {
             WalNode::File(wal_file_id) => {
                 let reader =
                     wal::file_reader::FileReader::open(*wal_file_id, self.0.db.read().await?)
                         .await?;
+                if reader.len() != expected_size.as_u64() {
+                    Err(wal::Error::InvalidFileSize(
+                        expected_size.as_u64(),
+                        reader.len(),
+                    ))?
+                }
                 Ok(FileHandle(ReadOnly(Box::new(reader))))
             }
             WalNode::Directory => Err(wal::Error::InvalidWalNodeType(
@@ -409,7 +416,9 @@ impl Vfs {
         &self,
         dir: &VfsPath,
         name: &Name,
+        last_modified: Option<DateTime<Utc>>,
         content_type: Option<ContentType>,
+
         overwrite_existing: bool,
         create_dirs: bool,
     ) -> Result<FileHandle<WriteOnly>, crate::Error> {
@@ -441,7 +450,14 @@ impl Vfs {
             Err(Error::NameAlreadyExists(name.clone()))?
         }
 
-        Ok(FileHandle::<WriteOnly>::new(self.0.wal_chunk_size, tx, path, self.clone()).await?)
+        Ok(FileHandle::<WriteOnly>::new(
+            self.0.wal_chunk_size,
+            tx,
+            path,
+            self.clone(),
+            last_modified,
+        )
+        .await?)
     }
 }
 
@@ -480,6 +496,7 @@ pub struct WriteOnly {
     tx: Transaction<db::ReadWrite>,
     path: VfsPath,
     vfs: Vfs,
+    last_modified: Option<DateTime<Utc>>,
     #[not_covariant]
     #[borrows(mut tx)]
     writer: wal::file_writer::FileWriter<'this, db::ReadWrite>,
@@ -491,8 +508,9 @@ impl FileHandle<WriteOnly> {
         tx: Transaction<db::ReadWrite>,
         path: VfsPath,
         vfs: Vfs,
+        last_modified: Option<DateTime<Utc>>,
     ) -> Result<Self, crate::Error> {
-        let write_only = WriteOnly::try_new_async_send(tx, path, vfs, |tx| {
+        let write_only = WriteOnly::try_new_async_send(tx, path, vfs, last_modified, |tx| {
             Box::pin(async move { wal::file_writer::FileWriter::new(chunk_size, tx).await })
         })
         .await?;
@@ -503,15 +521,16 @@ impl FileHandle<WriteOnly> {
 
 impl FileHandle<WriteOnly> {
     pub async fn finalize(mut self) -> Result<File, crate::Error> {
+        self.close().await?;
         let (wal_entity_id, bytes_written) = self
             .0
             .with_writer(|writer| (writer.file_id(), writer.bytes_written()));
         let mut heads = self.0.into_heads();
-        let now = Utc::now();
+        let last_modified = heads.last_modified.unwrap_or_else(|| Utc::now());
         let size = ByteSize::b(bytes_written);
         let (inode_id, affected_ids) = heads
             .tx
-            .upsert_vfs_file(&heads.path, &now, size, wal_entity_id)
+            .upsert_vfs_file(&heads.path, &last_modified, size, wal_entity_id)
             .await?;
 
         let file = match heads.tx.inode_by_id(inode_id).await? {

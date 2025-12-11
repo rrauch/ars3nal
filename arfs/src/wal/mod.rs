@@ -20,6 +20,8 @@ pub enum Error {
     ContentNotFound(String),
     #[error("invalid wal node type; expected '{0}', actual '{1}'")]
     InvalidWalNodeType(String, String),
+    #[error("invalid file size, expected '{0}', actual: '{1}'")]
+    InvalidFileSize(u64, u64),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -44,18 +46,20 @@ pub(crate) struct WalFileChunks {
 }
 
 impl WalFileChunks {
-    fn try_from_iter(
-        iter: impl Iterator<Item = (Range<u64>, Vec<u8>)>,
-    ) -> Result<Self, crate::Error> {
+    fn try_from_iter(iter: impl Iterator<Item = (usize, Vec<u8>)>) -> Result<Self, crate::Error> {
+        let mut len = 0;
+
         let range_map = iter
-            .map(|(range, hash)| {
+            .map(|(chunk_len, hash)| {
+                let chunk_len = chunk_len as u64;
+                let range = len..(len + chunk_len);
+                len += chunk_len;
+
                 Blake3Hash::try_from(Blob::from(hash))
                     .map(|h| (range, ContentHash(h)))
                     .map_err(|e| Error::ContentHashError(e.to_string()).into())
             })
             .collect::<Result<RangeMap<u64, ContentHash>, crate::Error>>()?;
-
-        let len = range_map.iter().map(|(r, _)| r.end - r.start).sum();
 
         Ok(Self { range_map, len })
     }

@@ -549,7 +549,7 @@ LIMIT 1;",
     pub async fn wal_file_chunks(
         &mut self,
         wal_file_id: u64,
-    ) -> Result<Option<Vec<(Range<u64>, Vec<u8>)>>, Error> {
+    ) -> Result<Option<Vec<(usize, Vec<u8>)>>, Error> {
         let wal_file_id = wal_file_id as i64;
         if sqlx::query!(
             "
@@ -564,19 +564,21 @@ LIMIT 1;",
             return Ok(None);
         };
 
-        Ok(Some(sqlx::query!(
-            r#"
-            SELECT
-    COALESCE(SUM(wc.content_length) OVER (ORDER BY chunk_nr ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS "offset!: i64",
-    wc.content_length AS length,
-    wch.content_hash
-FROM wal_chunks wch
-JOIN wal_content wc ON wch.content_hash = wc.content_hash
-WHERE wch.file_id = ?
-ORDER BY chunk_nr;
+        Ok(Some(
+            sqlx::query!(
+                r#"
+SELECT c.content_length, c.content_hash
+FROM wal_chunks wc
+JOIN wal_content c ON wc.content_hash = c.content_hash
+WHERE wc.file_id = ?
+ORDER BY wc.chunk_nr;
             "#,
-            wal_file_id,
-        ).map(|r| (r.offset as u64..(r.offset as u64 + r.length as u64), r.content_hash)).fetch_all(self.conn()).await?))
+                wal_file_id,
+            )
+            .map(|r| (r.content_length as usize, r.content_hash))
+            .fetch_all(self.conn())
+            .await?,
+        ))
     }
 
     pub async fn wal_content(
