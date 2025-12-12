@@ -1,4 +1,5 @@
 use crate::db::{Transaction, TxScope, Write};
+use crate::wal::WalFileMetadata;
 use ario_core::buffer::HeapCircularBuffer;
 use ario_core::crypto::hash::{Blake3, HasherExt};
 use futures_lite::AsyncWrite;
@@ -21,9 +22,13 @@ impl<'tx, C: TxScope> FileWriter<'tx, C>
 where
     Transaction<C>: Write,
 {
-    pub async fn new(chunk_size: u32, tx: &'tx mut Transaction<C>) -> Result<Self, crate::Error> {
+    pub async fn new(
+        chunk_size: u32,
+        tx: &'tx mut Transaction<C>,
+        metadata: Option<&WalFileMetadata>,
+    ) -> Result<Self, crate::Error> {
         let buf = HeapCircularBuffer::new(chunk_size as usize);
-        let file_id = tx.new_wal_file().await?;
+        let file_id = tx.new_wal_file(metadata).await?;
         let inner = Inner {
             file_id,
             tx,

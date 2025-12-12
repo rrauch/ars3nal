@@ -2,11 +2,11 @@ use crate::db::{DataError, Db, Read, Transaction, TxScope};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{Entity, Model};
-use crate::wal::WalNode;
+use crate::wal::{WalFileMetadata, WalNode};
 use crate::{CacheSettings, ContentType, Visibility, db, wal};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
-use ario_core::blob::Blob;
+use ario_core::blob::{Blob, OwnedBlob};
 use ario_core::wallet::WalletAddress;
 use chrono::{DateTime, Utc};
 use derive_more::Display;
@@ -358,7 +358,7 @@ impl Vfs {
         expected_size: ByteSize,
     ) -> Result<FileHandle<ReadOnly>, crate::Error> {
         match wal_node {
-            WalNode::File(wal_file_id) => {
+            WalNode::File(wal_file_id, _) => {
                 let reader =
                     wal::file_reader::FileReader::open(*wal_file_id, self.0.db.read().await?)
                         .await?;
@@ -418,11 +418,22 @@ impl Vfs {
         name: &Name,
         last_modified: Option<DateTime<Utc>>,
         content_type: Option<ContentType>,
-
+        extra: Option<HashMap<String, OwnedBlob>>,
         overwrite_existing: bool,
         create_dirs: bool,
     ) -> Result<FileHandle<WriteOnly>, crate::Error> {
         let mut tx = self.0.db.write().await?;
+
+        let metadata = WalFileMetadata {
+            content_type,
+            extra: extra.unwrap_or_default(),
+        };
+
+        let metadata = if metadata.content_type.is_none() && metadata.extra.is_empty() {
+            None
+        } else {
+            Some(metadata)
+        };
 
         let dir = match self._inode_by_path(dir, &mut tx).await? {
             Some(inode) => inode,
@@ -456,6 +467,7 @@ impl Vfs {
             path,
             self.clone(),
             last_modified,
+            metadata,
         )
         .await?)
     }
@@ -509,9 +521,12 @@ impl FileHandle<WriteOnly> {
         path: VfsPath,
         vfs: Vfs,
         last_modified: Option<DateTime<Utc>>,
+        metadata: Option<WalFileMetadata>,
     ) -> Result<Self, crate::Error> {
         let write_only = WriteOnly::try_new_async_send(tx, path, vfs, last_modified, |tx| {
-            Box::pin(async move { wal::file_writer::FileWriter::new(chunk_size, tx).await })
+            Box::pin(async move {
+                wal::file_writer::FileWriter::new(chunk_size, tx, metadata.as_ref()).await
+            })
         })
         .await?;
 
@@ -802,6 +817,7 @@ impl File {
         visibility: Visibility,
         path: VfsPath,
         wal_entity_id: u64,
+        metadata: Option<WalFileMetadata>,
     ) -> Self {
         Self(Arc::new(VfsNodeInner {
             id,
@@ -810,14 +826,18 @@ impl File {
             size,
             visibility,
             path,
-            inner: Variant::Wal(WalNode::File(wal_entity_id)),
+            inner: Variant::Wal(WalNode::File(wal_entity_id, metadata)),
         }))
     }
 
     pub fn content_type(&self) -> &ContentType {
         match &self.0.inner {
             Variant::Permanent(model) => model.content_type(),
-            Variant::Wal(_) => &ContentType::Binary,
+            Variant::Wal(WalNode::File(_, Some(metadata))) => metadata
+                .content_type
+                .as_ref()
+                .unwrap_or_else(|| &ContentType::Binary),
+            _ => &ContentType::Binary,
         }
     }
 
@@ -951,7 +971,12 @@ impl<E: Entity> VfsNode<E> {
                     }
                 })
                 .collect(),
-            Variant::Wal(_) => HashMap::default(), //todo
+            Variant::Wal(WalNode::File(_, Some(metadata))) => metadata
+                .extra
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.borrow()))
+                .collect(),
+            _ => HashMap::default(),
         }
     }
 

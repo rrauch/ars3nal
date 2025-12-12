@@ -9,7 +9,7 @@ use crate::types::{
     ArfsEntityId, Entity, HasId, HasName, HasVisibility, Header, Metadata, Model, ParseError,
 };
 use crate::vfs::{Directory as VfsDirectory, File as VfsFile, InodeId, Name as VfsName, Stats};
-use crate::wal::{ContentHash, WalFileChunks};
+use crate::wal::{ContentHash, WalFileChunks, WalFileMetadata};
 use crate::{Inode, Privacy, Scope, Timestamp, VfsPath, Visibility, resolve, wal};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
@@ -703,11 +703,19 @@ where
         Ok(())
     }
 
-    pub async fn new_wal_file(&mut self) -> Result<u64, Error> {
-        let id = sqlx::query!("INSERT INTO wal_entity (entity_type) VALUES ('FI')")
-            .execute(self.conn())
-            .await?
-            .last_insert_rowid();
+    pub async fn new_wal_file(&mut self, metadata: Option<&WalFileMetadata>) -> Result<u64, Error> {
+        let metadata = metadata
+            .map(|m| serde_sqlite_jsonb::to_vec(m))
+            .transpose()
+            .map_err(DataError::JsonbError)?;
+
+        let id = sqlx::query!(
+            "INSERT INTO wal_entity (entity_type, metadata) VALUES ('FI', ?)",
+            metadata
+        )
+        .execute(self.conn())
+        .await?
+        .last_insert_rowid();
 
         Ok(id as u64)
     }
@@ -1290,7 +1298,21 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
         "W" => {
             match vfs_row.inode_type.as_ref() {
                 <FileKind as DbEntity>::TYPE => {
-                    //todo: read metadata
+                    let wal_id = vfs_row
+                        .wal_entity
+                        .ok_or_else(|| DataError::MissingData("wal_entity not set".to_string()))?;
+
+                    let metadata = sqlx::query!(
+                        "SELECT metadata from wal_entity WHERE id = ? AND entity_type = 'FI'",
+                        wal_id
+                    )
+                    .fetch_one(tx.conn())
+                    .await?
+                    .metadata
+                    .map(|jsonb| serde_sqlite_jsonb::from_slice::<WalFileMetadata>(&jsonb))
+                    .transpose()
+                    .map_err(|e| DataError::ConversionError(e.to_string()))?;
+
                     Ok(Some(Inode::File(VfsFile::new_wal(
                         id,
                         name,
@@ -1298,9 +1320,8 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
                         last_modified,
                         visibility,
                         path,
-                        vfs_row.wal_entity.ok_or_else(|| {
-                            DataError::MissingData("wal_entity not set".to_string())
-                        })? as u64,
+                        wal_id as u64,
+                        metadata,
                     ))))
                 }
                 <FolderKind as DbEntity>::TYPE => Ok(Some(Inode::Directory(

@@ -1,6 +1,7 @@
 use anyhow::bail;
 use arfs::{ArFs, File, Inode, VfsPath};
 use ario_core::base64::{FromBase64, ToBase64};
+use ario_core::blob::OwnedBlob;
 use ario_core::crypto::hash::Blake3;
 use ct_codecs::{Base64, Decoder};
 use futures_lite::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, StreamExt};
@@ -179,9 +180,15 @@ impl ArS3 {
             .transpose()
             .map_err(|e| S3Error::internal_error(e))?;
 
+        let metadata = input.metadata.map(|m| {
+            m.into_iter()
+                .map(|(k, v)| (k, v.into_bytes().into()))
+                .collect()
+        });
+
         let mut fh = arfs
             .vfs()
-            .create_file(&dir, &name, None, content_type, true, true)
+            .create_file(&dir, &name, None, content_type, metadata, true, true)
             .await
             .map_err(|e| S3Error::internal_error(e))?;
 

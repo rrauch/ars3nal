@@ -1,7 +1,12 @@
-use ario_core::blob::Blob;
+use crate::ContentType;
+use ario_core::JsonValue;
+use ario_core::blob::{Blob, OwnedBlob};
 use ario_core::crypto::hash::Blake3Hash;
 use rangemap::RangeMap;
-use std::ops::Range;
+use serde::{Deserialize, Serialize};
+use serde_with::DisplayFromStr;
+use serde_with::{serde_as, skip_serializing_none};
+use std::collections::HashMap;
 use thiserror::Error;
 use tokio_util::bytes::{Buf, BufMut};
 
@@ -26,7 +31,7 @@ pub enum Error {
 
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum WalNode {
-    File(u64),
+    File(u64, Option<WalFileMetadata>),
     Directory,
 }
 
@@ -63,4 +68,15 @@ impl WalFileChunks {
 
         Ok(Self { range_map, len })
     }
+}
+
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WalFileMetadata {
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default)]
+    pub content_type: Option<ContentType>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, OwnedBlob>,
 }
