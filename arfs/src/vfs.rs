@@ -481,6 +481,9 @@ pub struct ReadOnly(Box<dyn FileReader>);
 #[repr(transparent)]
 pub struct FileHandle<T>(T);
 
+pub type ReadHandle = FileHandle<ReadOnly>;
+pub type WriteHandle = FileHandle<WriteOnly>;
+
 impl AsyncRead for FileHandle<ReadOnly> {
     #[inline]
     fn poll_read(
