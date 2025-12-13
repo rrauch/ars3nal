@@ -525,6 +525,7 @@ LIMIT (SELECT max_keys FROM params) + 1;
        last_proactive_cache_attempt_at  as \"last_proactive_cache_attempt_at: i64\"
 FROM vfs
 WHERE inode_type = 'FI'
+  AND perm_type = 'P'
   AND (last_proactively_cached_at IS NULL OR last_proactively_cached_at < ?)
   AND (last_proactive_cache_attempt_at IS NULL OR last_proactive_cache_attempt_at < ?)
 ORDER BY COALESCE(last_proactive_cache_attempt_at, 0),
@@ -692,7 +693,7 @@ where
         sqlx::query!(
             "
             UPDATE vfs SET last_proactively_cached_at = ?, last_proactive_cache_attempt_at = ?
-            WHERE id = ? AND inode_type = 'FI'
+            WHERE id = ? AND inode_type = 'FI' AND perm_type = 'P'
         ",
             last_success,
             last_attempt,
