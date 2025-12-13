@@ -27,13 +27,17 @@ use std::io::SeekFrom;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::task::JoinHandle;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tokio_util::io::ReaderStream;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use uuid::Uuid;
 
 const MAX_UPLOAD_SIZE: u64 = 1024 * 1024 * 1024 * 5; // 5GiB
+const MAX_PART_NUMBER: i32 = 10000;
+const MULTIPART_MAX_INACTIVITY: Duration = Duration::from_secs(60);
 
 #[repr(transparent)]
 pub struct ArS3 {
@@ -43,15 +47,68 @@ pub struct ArS3 {
 struct ArBucket {
     name: BucketName,
     arfs: ArFs,
-    multipart_uploads: Mutex<HashMap<MultipartUploadId, Arc<AsyncMutex<MultipartUpload>>>>,
+    multipart_uploads: Arc<Mutex<HashMap<MultipartUploadId, Arc<AsyncMutex<MultipartUpload>>>>>,
+    _drop_guard: DropGuard,
+    jh: JoinHandle<()>,
+}
+
+impl Drop for ArBucket {
+    fn drop(&mut self) {
+        if !self.jh.is_finished() {
+            self.jh.abort();
+        }
+    }
 }
 
 impl ArBucket {
     fn new(name: BucketName, arfs: ArFs) -> Self {
+        let ct = CancellationToken::new();
+        let drop_guard = ct.clone().drop_guard();
+        let multipart_uploads = Arc::new(Mutex::new(HashMap::default()));
+        let jh = {
+            let multipart_uploads = multipart_uploads.clone();
+            tokio::task::spawn(async move { ArBucket::gc(ct, multipart_uploads).await })
+        };
+
         Self {
             name,
             arfs,
-            multipart_uploads: Mutex::new(HashMap::default()),
+            multipart_uploads,
+            jh,
+            _drop_guard: drop_guard,
+        }
+    }
+
+    async fn gc(
+        ct: CancellationToken,
+        multipart_upload: Arc<Mutex<HashMap<MultipartUploadId, Arc<AsyncMutex<MultipartUpload>>>>>,
+    ) {
+        loop {
+            tokio::select! {
+                _ = ct.cancelled() => {
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                    let current_jobs = {
+                        let lock = multipart_upload.lock().expect("lock to not be poisoned");
+                        lock.values().into_iter().map(|j| j.clone()).collect_vec()
+                    };
+                    let now = Instant::now();
+                    for job in current_jobs {
+                        if ct.is_cancelled() {
+                            break;
+                        }
+                        if let Ok(mut handle) = job.try_lock() {
+                            if handle.expires <= now {
+                                // job expired, abort
+                                let _ = handle.next_part_tx.send(MAX_PART_NUMBER + 1);
+                                let mut lock = multipart_upload.lock().expect("lock to not be poisoned");
+                                lock.remove(&handle.id);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -73,9 +130,11 @@ impl ArBucket {
         guard.insert(
             id.clone(),
             Arc::new(AsyncMutex::new(MultipartUpload {
+                id: id.clone(),
                 access_key,
                 object_key,
                 fh: Some(fh),
+                expires: Instant::now() + MULTIPART_MAX_INACTIVITY,
                 next_part_tx,
                 _next_part_rx: next_part_rx,
             })),
@@ -88,11 +147,13 @@ impl ArBucket {
         upload_id: &MultipartUploadId,
         credentials: Option<&Credentials>,
     ) -> S3Result<()> {
-        let _ = self.get_multipart_upload(upload_id, credentials).await?;
+        let job = self.get_multipart_upload(upload_id, credentials).await?;
         self.multipart_uploads
             .lock()
             .expect("lock to not be poisoned")
             .remove(upload_id);
+        let mut lock = job.lock().await;
+        let _ = lock.next_part_tx.send(MAX_PART_NUMBER + 1);
         Ok(())
     }
 
@@ -150,6 +211,13 @@ impl ArBucket {
         upload_id: &MultipartUploadId,
         credentials: Option<&Credentials>,
     ) -> S3Result<MultipartUploadHandle> {
+        if part_number < 1 || part_number > MAX_PART_NUMBER {
+            Err(S3Error::with_message(
+                S3ErrorCode::InvalidArgument,
+                "multipart_upload part_number invalid",
+            ))?
+        }
+
         let job = self.get_multipart_upload(upload_id, credentials).await?;
         let mut next_part_rx = {
             let upload = job.lock().await;
@@ -188,9 +256,11 @@ type MultipartUploadJob = Arc<AsyncMutex<MultipartUpload>>;
 type MultipartUploadHandle = tokio::sync::OwnedMutexGuard<MultipartUpload>;
 
 struct MultipartUpload {
+    id: MultipartUploadId,
     access_key: Option<String>,
     object_key: ObjectKey,
     fh: Option<WriteHandle>,
+    expires: Instant,
     next_part_tx: watch::Sender<PartNumber>,
     _next_part_rx: watch::Receiver<PartNumber>,
 }
@@ -1014,7 +1084,7 @@ impl S3 for ArS3 {
                 .await;
             return Err(err);
         }
-
+        upload_handle.expires = Instant::now() + MULTIPART_MAX_INACTIVITY;
         // notify other listeners that next part is ready for upload
         let _ = upload_handle.next_part_tx.send(input.part_number + 1);
 
