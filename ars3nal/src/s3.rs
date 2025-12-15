@@ -1,7 +1,6 @@
 use anyhow::bail;
-use arfs::{ArFs, File, Inode, VfsPath, WriteHandle};
+use arfs::{ArFs, File, Inode, InodeId, VfsPath, WriteHandle};
 use ario_core::base64::{FromBase64, ToBase64};
-use ario_core::blob::OwnedBlob;
 use ario_core::crypto::hash::Blake3;
 use ct_codecs::{Base64, Decoder};
 use futures_lite::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, StreamExt};
@@ -13,17 +12,20 @@ use s3s::dto::{
     AbortMultipartUploadInput, AbortMultipartUploadOutput, Bucket, BucketName, ChecksumAlgorithm,
     ChecksumCRC32, ChecksumCRC32C, ChecksumCRC64NVME, ChecksumSHA1, ChecksumSHA256, CommonPrefix,
     CompleteMultipartUploadInput, CompleteMultipartUploadOutput, ContentMD5, ContentType,
-    CreateMultipartUploadInput, CreateMultipartUploadOutput, ETag, GetBucketLocationInput,
-    GetBucketLocationOutput, GetObjectInput, GetObjectOutput, HeadBucketInput, HeadBucketOutput,
-    HeadObjectInput, HeadObjectOutput, KeyCount, LastModified, ListBucketsInput, ListBucketsOutput,
-    ListMultipartUploadsInput, ListMultipartUploadsOutput, ListObjectsInput, ListObjectsOutput,
-    ListObjectsV2Input, ListObjectsV2Output, ListPartsInput, ListPartsOutput, MaxKeys, Metadata,
-    MultipartUploadId, Object, ObjectKey, ObjectStorageClass, Owner, PartNumber, PutObjectInput,
-    PutObjectOutput, Size, StorageClass, StreamingBlob, UploadPartInput, UploadPartOutput,
+    CreateMultipartUploadInput, CreateMultipartUploadOutput, DeleteObjectInput, DeleteObjectOutput,
+    DeleteObjectsInput, DeleteObjectsOutput, DeletedObject, DeletedObjects, ETag,
+    GetBucketLocationInput, GetBucketLocationOutput, GetObjectInput, GetObjectOutput,
+    HeadBucketInput, HeadBucketOutput, HeadObjectInput, HeadObjectOutput, KeyCount, LastModified,
+    ListBucketsInput, ListBucketsOutput, ListObjectsInput, ListObjectsOutput, ListObjectsV2Input,
+    ListObjectsV2Output, MaxKeys, Metadata, MultipartUploadId, Object, ObjectKey,
+    ObjectStorageClass, Owner, PartNumber, PutObjectInput, PutObjectOutput, Size, StorageClass,
+    StreamingBlob, UploadPartInput, UploadPartOutput,
 };
 use s3s::{S3, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, TrailingHeaders, s3_error};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::SeekFrom;
+use std::iter;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -98,7 +100,7 @@ impl ArBucket {
                         if ct.is_cancelled() {
                             break;
                         }
-                        if let Ok(mut handle) = job.try_lock() {
+                        if let Ok(handle) = job.try_lock() {
                             if handle.expires <= now {
                                 // job expired, abort
                                 let _ = handle.next_part_tx.send(MAX_PART_NUMBER + 1);
@@ -152,7 +154,7 @@ impl ArBucket {
             .lock()
             .expect("lock to not be poisoned")
             .remove(upload_id);
-        let mut lock = job.lock().await;
+        let lock = job.lock().await;
         let _ = lock.next_part_tx.send(MAX_PART_NUMBER + 1);
         Ok(())
     }
@@ -307,57 +309,86 @@ impl ArS3 {
         self.buckets.get(bucket_name).ok_or(s3_error!(NoSuchBucket))
     }
 
-    fn as_object(&self, arfs: &ArFs, file: &File) -> Object {
-        let key_str = file.path().as_ref();
+    fn as_object(&self, arfs: &ArFs, inode: &Inode) -> Object {
+        let key_str = inode.path().as_ref();
         let key = key_str.strip_prefix("/").unwrap_or(key_str);
-        let owner = file.pinned_owner().unwrap_or_else(|| arfs.owner());
-        let etag = if let Some(location) = file.data_location() {
-            let mut etag_hasher = Blake3::new();
-            etag_hasher.update("s3_object_etag\n".as_bytes());
-            etag_hasher.update(location.to_string().as_bytes());
-            etag_hasher.update(file.size().as_u64().to_be_bytes().as_slice());
-            etag_hasher.update("\ns3_object_etag".as_bytes());
-            Some(ETag::Strong(etag_hasher.finalize().to_hex().to_string()))
-        } else {
-            None
-        };
+        let mut etag = None;
+        let mut owner = None;
+        let mut size = None;
+
+        match inode {
+            Inode::File(file) => {
+                let owner_address = file.pinned_owner().unwrap_or_else(|| arfs.owner());
+                owner = Some(Owner {
+                    display_name: None,
+                    id: Some(owner_address.to_string()),
+                });
+
+                etag = if let Some(location) = file.data_location() {
+                    let mut etag_hasher = Blake3::new();
+                    etag_hasher.update("s3_object_etag\n".as_bytes());
+                    etag_hasher.update(location.to_string().as_bytes());
+                    etag_hasher.update(file.size().as_u64().to_be_bytes().as_slice());
+                    etag_hasher.update("\ns3_object_etag".as_bytes());
+                    Some(ETag::Strong(etag_hasher.finalize().to_hex().to_string()))
+                } else {
+                    None
+                };
+
+                size = Some(file.size().as_u64() as Size);
+            }
+            Inode::Directory(_) | Inode::Root(_) => size = Some(0),
+        }
 
         Object {
             checksum_algorithm: None,
             checksum_type: None,
             e_tag: etag,
             key: Some(key.to_string()),
-            last_modified: Some(SystemTime::from(file.last_modified().clone()).into()),
-            owner: Some(Owner {
-                display_name: None,
-                id: Some(owner.to_string()),
-            }),
+            last_modified: Some(SystemTime::from(inode.last_modified().clone()).into()),
+            owner,
             restore_status: None,
-            size: Some(file.size().as_u64() as Size),
+            size,
             storage_class: Some(ObjectStorageClass::from_static(
                 ObjectStorageClass::STANDARD,
             )),
         }
     }
 
-    fn to_metadata(&self, file: &File) -> Option<Metadata> {
-        let metadata = file
-            .extra_attributes()
-            .into_iter()
-            .filter_map(|(k, v)| {
-                // filter out non-string values
-                if let Ok(v) = String::from_utf8(v.to_vec()) {
-                    Some((k.to_string(), v))
-                } else {
+    fn to_metadata(&self, inode: &Inode) -> S3Result<(Option<Metadata>, Option<ContentType>)> {
+        Ok(match inode {
+            Inode::File(file) => {
+                let metadata = file
+                    .extra_attributes()
+                    .into_iter()
+                    .filter_map(|(k, v)| {
+                        // filter out non-string values
+                        if let Ok(v) = String::from_utf8(v.to_vec()) {
+                            Some((k.to_string(), v))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Metadata>();
+                let metadata = if metadata.is_empty() {
                     None
-                }
-            })
-            .collect::<Metadata>();
-        if metadata.is_empty() {
-            None
-        } else {
-            Some(metadata)
-        }
+                } else {
+                    Some(metadata)
+                };
+
+                let content_type = ContentType::from_str(file.content_type().as_ref())
+                    .map_err(S3Error::internal_error)?;
+
+                (metadata, Some(content_type))
+            }
+            Inode::Directory(_) | Inode::Root(_) => (
+                None,
+                Some(
+                    ContentType::from_str("application/x-directory")
+                        .map_err(S3Error::internal_error)?,
+                ),
+            ),
+        })
     }
 
     async fn get_object(
@@ -366,7 +397,7 @@ impl ArS3 {
         key: &ObjectKey,
         known_etag: Option<&ETag>,
         known_last_modified: Option<&LastModified>,
-    ) -> Result<(Object, File), S3Error> {
+    ) -> Result<(Object, Inode), S3Error> {
         let path = VfsPath::try_from(format!("/{}", key.as_str()).as_str())
             .map_err(|e| S3Error::internal_error(e))?;
 
@@ -377,12 +408,7 @@ impl ArS3 {
             .map_err(|e| S3Error::internal_error(e))?
             .ok_or_else(|| S3Error::new(S3ErrorCode::NoSuchKey))?;
 
-        let file = match inode {
-            Inode::File(file) => file,
-            _ => Err(S3Error::new(S3ErrorCode::NoSuchKey))?,
-        };
-
-        let object = self.as_object(arfs, &file);
+        let object = self.as_object(arfs, &inode);
 
         match (object.e_tag.as_ref(), known_etag) {
             (Some(e1), Some(e2)) if e1 == e2 => {
@@ -400,7 +426,64 @@ impl ArS3 {
             _ => {}
         }
 
-        Ok((object, file))
+        Ok((object, inode))
+    }
+
+    async fn delete_precheck<'input, const SKIP_PRECONDITION_FAILURE: bool>(
+        &self,
+        arfs: &ArFs,
+        iter: impl Iterator<
+            Item = (
+                &'input ObjectKey,
+                Option<&'input str>,
+                Option<&'input LastModified>,
+                Option<&'input Size>,
+            ),
+        >,
+    ) -> S3Result<Vec<(InodeId, &'input ObjectKey)>> {
+        let mut inode_ids = vec![];
+
+        for (key, etag, last_modified, size) in iter {
+            let (object, inode) = match self.get_object(arfs, &key, None, None).await {
+                Ok(res) => res,
+                Err(err) if err.code() == &S3ErrorCode::NoSuchKey => continue,
+                Err(other_err) => Err(other_err)?,
+            };
+
+            if let Some(etag) = etag {
+                if Some(etag.as_ref()) != object.e_tag.as_ref().map(|etag| etag.value()) {
+                    if SKIP_PRECONDITION_FAILURE {
+                        continue;
+                    } else {
+                        Err(S3Error::new(S3ErrorCode::PreconditionFailed))?
+                    }
+                }
+            }
+
+            if let Some(last_modified) = last_modified {
+                if Some(last_modified) != object.last_modified.as_ref() {
+                    if SKIP_PRECONDITION_FAILURE {
+                        continue;
+                    } else {
+                        Err(S3Error::new(S3ErrorCode::PreconditionFailed))?
+                    }
+                }
+            }
+
+            if let Some(size) = size {
+                if Some(size) != object.size.as_ref() {
+                    if SKIP_PRECONDITION_FAILURE {
+                        continue;
+                    } else {
+                        Err(S3Error::new(S3ErrorCode::PreconditionFailed))?
+                    }
+                }
+            }
+
+            inode_ids.push((inode.id(), key));
+        }
+
+        Ok(inode_ids)
     }
 
     async fn write_file_content(
@@ -477,7 +560,7 @@ impl ArS3 {
         arfs: &ArFs,
         expected_content_len: Option<u64>,
     ) -> S3Result<PutObjectOutput> {
-        let mut input = req.input;
+        let input = req.input;
 
         let mut fh = begin_write_file(
             arfs,
@@ -502,12 +585,13 @@ impl ArS3 {
         )
         .await?;
 
-        let file = fh
-            .finalize()
-            .await
-            .map_err(|e| S3Error::internal_error(e))?;
+        let inode = Inode::File(
+            fh.finalize()
+                .await
+                .map_err(|e| S3Error::internal_error(e))?,
+        );
 
-        let object = self.as_object(arfs, &file);
+        let object = self.as_object(arfs, &inode);
 
         Ok(PutObjectOutput {
             e_tag: object.e_tag,
@@ -707,7 +791,7 @@ impl S3 for ArS3 {
 
         let arfs = &self.bucket(&input.bucket, req.credentials.as_ref())?.arfs;
 
-        let (object, file) = self
+        let (object, inode) = self
             .get_object(
                 arfs,
                 &input.key,
@@ -721,48 +805,58 @@ impl S3 for ArS3 {
             )
             .await?;
 
-        let metadata = self.to_metadata(&file);
+        let (metadata, content_type) = self.to_metadata(&inode)?;
 
-        let file_len = file.size().as_u64();
+        let output = match inode {
+            Inode::File(file) => {
+                let file_len = file.size().as_u64();
 
-        let (seek_pos, content_length, content_range) = match input.range {
-            None => (0, file_len, None),
-            Some(range) => {
-                let file_range = range.check(file_len)?;
-                let content_length = file_range.end - file_range.start;
-                let content_range =
-                    fmt_content_range(file_range.start, file_range.end - 1, file_len);
-                (file_range.start, content_length, Some(content_range))
+                let (seek_pos, content_length, content_range) = match input.range {
+                    None => (0, file_len, None),
+                    Some(range) => {
+                        let file_range = range.check(file_len)?;
+                        let content_length = file_range.end - file_range.start;
+                        let content_range =
+                            fmt_content_range(file_range.start, file_range.end - 1, file_len);
+                        (file_range.start, content_length, Some(content_range))
+                    }
+                };
+
+                let mut reader = arfs.vfs().read_file(&file).await.map_err(|e| {
+                    tracing::error!(error = %e);
+                    S3Error::internal_error(e)
+                })?;
+
+                reader
+                    .seek(SeekFrom::Start(seek_pos))
+                    .await
+                    .map_err(|e| S3Error::internal_error(e))?;
+
+                let reader = reader.take(content_length);
+
+                let body = ReaderStream::with_capacity(reader.compat(), 32 * 1024);
+
+                GetObjectOutput {
+                    accept_ranges: Some("bytes".to_string()),
+                    body: Some(StreamingBlob::wrap(body)),
+                    content_length: Some(content_length as i64),
+                    content_range,
+                    content_type,
+                    e_tag: object.e_tag,
+                    last_modified: object.last_modified,
+                    metadata,
+                    ..Default::default()
+                }
             }
-        };
-
-        let mut reader = arfs.vfs().read_file(&file).await.map_err(|e| {
-            tracing::error!(error = %e);
-            S3Error::internal_error(e)
-        })?;
-
-        reader
-            .seek(SeekFrom::Start(seek_pos))
-            .await
-            .map_err(|e| S3Error::internal_error(e))?;
-
-        let reader = reader.take(content_length);
-
-        let body = ReaderStream::with_capacity(reader.compat(), 32 * 1024);
-
-        let output = GetObjectOutput {
-            accept_ranges: Some("bytes".to_string()),
-            body: Some(StreamingBlob::wrap(body)),
-            content_length: Some(content_length as i64),
-            content_range,
-            content_type: Some(
-                ContentType::from_str(file.content_type().as_ref())
-                    .map_err(|e| S3Error::internal_error(e))?,
-            ),
-            e_tag: object.e_tag,
-            last_modified: object.last_modified,
-            metadata,
-            ..Default::default()
+            Inode::Directory(_) | Inode::Root(_) => GetObjectOutput {
+                body: None,
+                content_length: Some(0),
+                content_type,
+                e_tag: object.e_tag,
+                last_modified: object.last_modified,
+                metadata,
+                ..Default::default()
+            },
         };
 
         Ok(S3Response::new(output))
@@ -786,7 +880,7 @@ impl S3 for ArS3 {
 
         let arfs = &self.bucket(&input.bucket, req.credentials.as_ref())?.arfs;
 
-        let (object, file) = self
+        let (object, inode) = self
             .get_object(
                 arfs,
                 &input.key,
@@ -800,20 +894,20 @@ impl S3 for ArS3 {
             )
             .await?;
 
-        let metadata = self.to_metadata(&file);
+        let (metadata, content_type) = self.to_metadata(&inode)?;
 
-        let output = HeadObjectOutput {
-            accept_ranges: Some("bytes".to_string()),
+        let mut output = HeadObjectOutput {
             content_length: object.size,
-            content_type: Some(
-                ContentType::from_str(file.content_type().as_ref())
-                    .map_err(|e| S3Error::internal_error(e))?,
-            ),
+            content_type,
             e_tag: object.e_tag,
             last_modified: object.last_modified,
             metadata,
             ..Default::default()
         };
+
+        if let Inode::File(_) = inode {
+            output.accept_ranges = Some("bytes".to_string());
+        }
 
         Ok(S3Response::new(output))
     }
@@ -900,7 +994,10 @@ impl S3 for ArS3 {
 
         let (contents, common_prefixes): (Vec<_>, Vec<_>) =
             inodes.into_iter().partition_map(|inode| match inode {
-                Inode::File(file) => Either::Left(self.as_object(&arfs, &file)),
+                Inode::File(file) => {
+                    let inode = Inode::File(file);
+                    Either::Left(self.as_object(&arfs, &inode))
+                }
                 other => Either::Right({
                     let str = other.path().as_ref();
                     CommonPrefix {
@@ -1008,7 +1105,8 @@ impl S3 for ArS3 {
             .finalize_multipart_upload(&input.upload_id, req.credentials.as_ref())
             .await?;
 
-        let object = self.as_object(&bucket.arfs, &file);
+        let inode = Inode::File(file);
+        let object = self.as_object(&bucket.arfs, &inode);
 
         Ok(S3Response::new(CompleteMultipartUploadOutput {
             bucket: Some(bucket.name.clone()),
@@ -1090,6 +1188,74 @@ impl S3 for ArS3 {
 
         let output = UploadPartOutput::default();
 
+        Ok(S3Response::new(output))
+    }
+
+    async fn delete_object(
+        &self,
+        req: S3Request<DeleteObjectInput>,
+    ) -> S3Result<S3Response<DeleteObjectOutput>> {
+        let input = req.input;
+        let arfs = &self.bucket(&input.bucket, req.credentials.as_ref())?.arfs;
+        let inode_ids = self
+            .delete_precheck::<false>(
+                arfs,
+                iter::once((
+                    &input.key,
+                    input.if_match.as_ref().map(|ifm| ifm.as_str()),
+                    input.if_match_last_modified_time.as_ref(),
+                    input.if_match_size.as_ref(),
+                )),
+            )
+            .await?;
+        if !inode_ids.is_empty() {
+            arfs.vfs()
+                .delete(inode_ids.into_iter().map(|(inode_id, _)| inode_id), false)
+                .await
+                .map_err(S3Error::internal_error)?;
+        }
+        let output = DeleteObjectOutput::default();
+        Ok(S3Response::new(output))
+    }
+
+    async fn delete_objects(
+        &self,
+        req: S3Request<DeleteObjectsInput>,
+    ) -> S3Result<S3Response<DeleteObjectsOutput>> {
+        let input = req.input;
+        let arfs = &self.bucket(&input.bucket, req.credentials.as_ref())?.arfs;
+
+        let (inode_ids, keys): (Vec<InodeId>, Vec<&ObjectKey>) = self
+            .delete_precheck::<true>(
+                arfs,
+                input.delete.objects.iter().map(|o| {
+                    (
+                        &o.key,
+                        o.e_tag.as_ref().map(|etag| etag.value()),
+                        o.last_modified_time.as_ref(),
+                        o.size.as_ref(),
+                    )
+                }),
+            )
+            .await?
+            .into_iter()
+            .unzip();
+
+        arfs.vfs()
+            .delete(inode_ids.clone().into_iter(), false)
+            .await
+            .map_err(S3Error::internal_error)?;
+        let mut output = DeleteObjectsOutput::default();
+        if !input.delete.objects.is_empty() {
+            output.deleted = Some(
+                keys.into_iter()
+                    .map(|key| DeletedObject {
+                        key: Some(key.clone()),
+                        ..Default::default()
+                    })
+                    .collect(),
+            );
+        }
         Ok(S3Response::new(output))
     }
 }

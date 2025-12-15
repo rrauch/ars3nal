@@ -8,7 +8,9 @@ use crate::types::snapshot::{SnapshotEntity, SnapshotKind};
 use crate::types::{
     ArfsEntityId, Entity, HasId, HasName, HasVisibility, Header, Metadata, Model, ParseError,
 };
-use crate::vfs::{Directory as VfsDirectory, File as VfsFile, InodeId, Name as VfsName, Stats};
+use crate::vfs::{
+    Directory as VfsDirectory, File as VfsFile, InodeId, Name as VfsName, ROOT_INODE_ID, Stats,
+};
 use crate::wal::{ContentHash, WalFileChunks, WalFileMetadata};
 use crate::{Inode, Privacy, Scope, Timestamp, VfsPath, Visibility, resolve, wal};
 use ario_client::location::Arl;
@@ -98,6 +100,10 @@ pub enum DataError {
     NotInodeEntityType(String),
     #[error("not a valid perm_type: '{0}'")]
     InvalidPermType(String),
+    #[error("deletion of inode '{0}' failed. (recursive_delete: '{1}')")]
+    DeletionFailure(InodeId, bool),
+    #[error("VFS root cannot be deleted")]
+    RootDeletionAttempt,
 }
 
 #[derive(Debug, Clone)]
@@ -641,6 +647,7 @@ where
             let (inode_id, path) = insert_inode(file, file_id, parent_entity_id, self).await?;
             ids.push(file_id);
         }
+        self.delete_orphaned_entities().await?;
 
         let affected_inode_ids = collect_affected_inode_ids(self)
             .await?
@@ -728,6 +735,7 @@ where
         size: ByteSize,
         wal_entity_id: u64,
     ) -> Result<(InodeId, Vec<InodeId>), Error> {
+        clear_temp_tables(self).await?;
         let inode_id = if let Some(inode_id) = self.inode_id_by_path(path.as_ref()).await? {
             // existing vfs entry
             let vfs_row = get_vfs_row(*inode_id.deref() as i64, self)
@@ -860,6 +868,145 @@ where
         .await?;
         Ok(())
     }
+
+    pub async fn delete_inodes(
+        &mut self,
+        inode_ids: impl Iterator<Item = InodeId>,
+        recursive_delete: bool,
+    ) -> Result<Vec<InodeId>, Error> {
+        clear_temp_tables(self).await?;
+        for inode_id in inode_ids {
+            self.delete_inode(inode_id, recursive_delete).await?;
+        }
+        self.delete_orphaned_entities().await?;
+
+        let affected_inode_ids = collect_affected_inode_ids(self)
+            .await?
+            .map(|id| {
+                InodeId::try_from(id as u64)
+                    .map_err(|e| DataError::ConversionError(e.to_string()).into())
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        clear_temp_tables(self).await?;
+
+        Ok(affected_inode_ids)
+    }
+
+    async fn delete_inode(
+        &mut self,
+        inode_id: InodeId,
+        recursive_delete: bool,
+    ) -> Result<(), Error> {
+        if inode_id == ROOT_INODE_ID {
+            Err(DataError::RootDeletionAttempt)?
+        }
+
+        let inode_id_int = *inode_id as i64;
+        let rows_affected = if recursive_delete {
+            sqlx::query!(
+                "
+                 DELETE FROM vfs
+                 WHERE id = ?
+                ",
+                inode_id_int,
+            )
+            .execute(self.conn())
+            .await?
+            .rows_affected()
+        } else {
+            sqlx::query!(
+                "
+                 DELETE FROM vfs
+                 WHERE id = ?
+                    AND (
+                      inode_type = 'FI'
+                      OR NOT EXISTS (
+                        SELECT 1
+                        FROM vfs
+                         WHERE parent = ?
+                      )
+                );
+                ",
+                inode_id_int,
+                inode_id_int
+            )
+            .execute(self.conn())
+            .await?
+            .rows_affected()
+        };
+
+        if rows_affected == 0 {
+            Err(DataError::DeletionFailure(inode_id, recursive_delete))?
+        }
+
+        Ok(())
+    }
+
+    async fn delete_orphaned_entities(&mut self) -> Result<(), Error> {
+        sqlx::query!(
+            "
+              DELETE FROM entity
+              WHERE id NOT IN (SELECT drive_id
+                 FROM config)
+              AND entity_type = 'DR';
+            "
+        )
+        .execute(self.conn())
+        .await?;
+
+        sqlx::query!(
+            "
+              DELETE FROM entity
+              WHERE id NOT IN (SELECT signature_id
+                 FROM config)
+              AND entity_type = 'SN';
+            "
+        )
+            .execute(self.conn())
+            .await?;
+
+        sqlx::query!(
+            "
+              DELETE FROM entity
+              WHERE id NOT IN (SELECT entity
+                 FROM vfs
+                 WHERE entity IS NOT NULL)
+              AND entity_type = 'FI';
+            "
+        )
+            .execute(self.conn())
+            .await?;
+
+        sqlx::query!(
+            "
+              DELETE FROM entity
+              WHERE id NOT IN (SELECT entity
+                 FROM vfs
+                 WHERE entity IS NOT NULL)
+              AND id NOT IN (SELECT root_folder_id
+                 FROM config)
+              AND entity_type = 'FO';
+            "
+        )
+        .execute(self.conn())
+        .await?;
+
+        sqlx::query!(
+            "
+              DELETE FROM wal_entity
+              WHERE id NOT IN (
+                SELECT wal_entity
+                  FROM vfs
+                  WHERE wal_entity IS NOT NULL
+              );
+            "
+        )
+        .execute(self.conn())
+        .await?;
+
+        Ok(())
+    }
 }
 
 async fn bootstrap(
@@ -897,6 +1044,7 @@ async fn bootstrap(
 
     let config = Config::from(
         drive_entity,
+        root_folder_entity,
         None,
         owner.into_owned(),
         client.network().id().clone(),
@@ -916,6 +1064,7 @@ async fn insert_config<C: Write>(
     let owner = config.owner.as_slice();
     let network_id: &str = config.network_id.as_ref();
     let drive_entity_id = config.drive.id().as_ref();
+    let root_folder_entity_id = config.root_folder.id().as_ref();
 
     let drive_id = sqlx::query!(
         "SELECT id FROM entity WHERE entity_type = 'DR' AND entity_id = ?",
@@ -925,9 +1074,18 @@ async fn insert_config<C: Write>(
     .await?
     .id;
 
+    let root_folder_id = sqlx::query!(
+        "SELECT id FROM entity WHERE entity_type = 'FO' AND entity_id = ?",
+        root_folder_entity_id,
+    )
+    .fetch_one(conn.conn())
+    .await?
+    .id;
+
     sqlx::query!(
-        "INSERT INTO config (drive_id, signature_id, name, owner, network_id) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO config (drive_id, root_folder_id, signature_id, name, owner, network_id) VALUES (?, ?, ?, ?, ?, ?)",
         drive_id,
+        root_folder_id,
         signature_id,
         name,
         owner,
@@ -1098,6 +1256,7 @@ impl From<&SyncLogEntry> for SyncLogRow {
 
 struct ConfigRow {
     drive_id: i64,
+    root_folder_id: i64,
     signature_id: Option<i64>,
     name: String,
     owner: Vec<u8>,
@@ -1427,7 +1586,7 @@ async fn insert_entity<E: DbEntity, C: Write>(entity: &Model<E>, tx: &mut C) -> 
 async fn get_config<C: Read>(tx: &mut C) -> Result<Option<Config>, Error> {
     let config_row: ConfigRow = match sqlx::query_as!(
         ConfigRow,
-        "SELECT drive_id, signature_id, name, owner, network_id FROM config"
+        "SELECT drive_id, root_folder_id, signature_id, name, owner, network_id FROM config"
     )
     .fetch_optional(tx.conn())
     .await?
@@ -1437,6 +1596,7 @@ async fn get_config<C: Read>(tx: &mut C) -> Result<Option<Config>, Error> {
     };
 
     let drive = get_entity::<DriveKind, _>(config_row.drive_id, tx).await?;
+    let root_folder = get_entity::<FolderKind, _>(config_row.root_folder_id, tx).await?;
 
     let signature: Option<Model<DriveSignatureKind>> = if let Some(sig_id) = config_row.signature_id
     {
@@ -1445,7 +1605,12 @@ async fn get_config<C: Read>(tx: &mut C) -> Result<Option<Config>, Error> {
         None
     };
 
-    Ok(Some(Config::try_from(config_row, drive, signature)?))
+    Ok(Some(Config::try_from(
+        config_row,
+        drive,
+        root_folder,
+        signature,
+    )?))
 }
 
 async fn clear_temp_tables<C: Write>(tx: &mut C) -> Result<(), Error> {
@@ -1492,6 +1657,7 @@ async fn inode_ids_by_parent<C: Read>(
 #[derive(Debug)]
 pub struct Config {
     pub drive: DriveEntity,
+    pub root_folder: FolderEntity,
     pub signature: Option<DriveSignatureEntity>,
     pub owner: WalletAddress,
     pub network_id: NetworkIdentifier,
@@ -1501,6 +1667,7 @@ impl Config {
     fn try_from(
         config_row: ConfigRow,
         drive: DriveEntity,
+        root_folder: FolderEntity,
         signature: Option<DriveSignatureEntity>,
     ) -> Result<Self, DataError> {
         let owner = WalletAddress::try_from(OwnedBlob::from(config_row.owner))
@@ -1510,6 +1677,7 @@ impl Config {
 
         Ok(Self {
             drive,
+            root_folder,
             signature,
             owner,
             network_id,
@@ -1520,12 +1688,14 @@ impl Config {
 impl Config {
     fn from(
         drive: DriveEntity,
+        root_folder: FolderEntity,
         signature: Option<DriveSignatureEntity>,
         owner: WalletAddress,
         network_id: NetworkIdentifier,
     ) -> Self {
         Self {
             drive,
+            root_folder,
             signature,
             owner,
             network_id,

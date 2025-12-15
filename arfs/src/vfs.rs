@@ -471,6 +471,18 @@ impl Vfs {
         )
         .await?)
     }
+
+    pub async fn delete(
+        &self,
+        inode_ids: impl Iterator<Item = InodeId>,
+        recursive_delete: bool,
+    ) -> Result<(), crate::Error> {
+        let mut tx = self.0.db.write().await?;
+        let affected_ids = tx.delete_inodes(inode_ids, recursive_delete).await?;
+        tx.commit().await?;
+        self.invalidate_cache(affected_ids).await;
+        Ok(())
+    }
 }
 
 trait FileReader: AsyncRead + AsyncSeek + Send + Sync + Unpin {}

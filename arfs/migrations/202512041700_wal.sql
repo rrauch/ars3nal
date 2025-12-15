@@ -1,3 +1,127 @@
+-- Config change
+
+ALTER TABLE config
+    ADD COLUMN root_folder_id INTEGER REFERENCES entity (id);
+
+UPDATE config
+SET root_folder_id = (SELECT e2.id
+                      FROM entity e1
+                               JOIN entity e2
+                                    ON e2.entity_id = CAST(json_extract(e1.metadata, '$.rootFolderId') AS BLOB)
+                      WHERE e1.id = config.drive_id
+                        AND e2.entity_type = 'FO')
+WHERE EXISTS (SELECT 1
+              FROM entity
+              WHERE id = config.drive_id);
+
+CREATE TABLE config_new
+(
+    drive_id       INTEGER NOT NULL REFERENCES entity (id),
+    signature_id   INTEGER REFERENCES entity (id),
+    root_folder_id INTEGER NOT NULL REFERENCES entity (id),
+
+    name           TEXT    NOT NULL CHECK (LENGTH(name) > 0 AND LENGTH(name) < 256),
+    owner          BLOB    NOT NULL CHECK (TYPEOF(owner) == 'blob' AND LENGTH(owner) == 32),
+    network_id     TEXT    NOT NULL CHECK (LENGTH(network_id) > 0 AND LENGTH(network_id) < 256)
+);
+
+INSERT INTO config_new
+SELECT drive_id, signature_id, root_folder_id, name, owner, network_id
+FROM config;
+
+DROP TABLE config;
+ALTER TABLE config_new
+    RENAME TO config;
+
+CREATE INDEX idx_config_drive_id ON config (drive_id);
+CREATE INDEX idx_config_signature_id ON config (signature_id);
+
+CREATE TRIGGER config_prevent_multiple
+    BEFORE INSERT
+    ON config
+    WHEN (SELECT COUNT(*)
+          FROM config) >= 1
+BEGIN
+    SELECT RAISE(ABORT, 'Only one config entry allowed');
+END;
+
+CREATE TRIGGER config_prevent_deletes
+    BEFORE DELETE
+    ON config
+BEGIN
+    SELECT RAISE(ABORT, 'Config cannot be deleted');
+END;
+
+CREATE TRIGGER config_drive_entity_type
+    BEFORE INSERT
+    ON config
+BEGIN
+    SELECT RAISE(ABORT, 'drive_id must reference a Drive entity')
+    WHERE NOT EXISTS (SELECT 1
+                      FROM entity
+                      WHERE id = NEW.drive_id
+                        AND entity_type = 'DR');
+END;
+
+CREATE TRIGGER config_drive_entity_type_update
+    BEFORE UPDATE
+    ON config
+BEGIN
+    SELECT RAISE(ABORT, 'drive_id must reference a Drive entity')
+    WHERE NOT EXISTS (SELECT 1
+                      FROM entity
+                      WHERE id = NEW.drive_id
+                        AND entity_type = 'DR');
+END;
+
+CREATE TRIGGER config_root_folder_entity_type
+    BEFORE INSERT
+    ON config
+BEGIN
+    SELECT RAISE(ABORT, 'root_folder_id must reference a Folder entity')
+    WHERE NOT EXISTS (SELECT 1
+                      FROM entity
+                      WHERE id = NEW.root_folder_id
+                        AND entity_type = 'FO');
+END;
+
+CREATE TRIGGER config_root_folder_entity_type_update
+    BEFORE UPDATE
+    ON config
+BEGIN
+    SELECT RAISE(ABORT, 'root_folder_id must reference a Folder entity')
+    WHERE NOT EXISTS (SELECT 1
+                      FROM entity
+                      WHERE id = NEW.root_folder_id
+                        AND entity_type = 'FO');
+END;
+
+CREATE TRIGGER config_signature_entity_type
+    BEFORE INSERT
+    ON config
+    WHEN NEW.signature_id IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'signature_id must reference a Signature entity')
+    WHERE NOT EXISTS (SELECT 1
+                      FROM entity
+                      WHERE id = NEW.signature_id
+                        AND entity_type = 'SN');
+END;
+
+CREATE TRIGGER config_signature_entity_type_update
+    BEFORE UPDATE
+    ON config
+    WHEN NEW.signature_id IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'signature_id must reference a Signature entity')
+    WHERE NOT EXISTS (SELECT 1
+                      FROM entity
+                      WHERE id = NEW.signature_id
+                        AND entity_type = 'SN');
+END;
+
+-- / Config change
+
 CREATE TABLE wal_entity
 (
     id          INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,

@@ -12,7 +12,9 @@ pub use ario_core::bundle::Owner as BundleOwner;
 pub use ario_core::tx::Owner as TxOwner;
 pub use sync::Status as SyncStatus;
 pub use types::{ArFsVersion, ContentType, Privacy, drive::DriveId, folder::FolderId};
-pub use vfs::{Directory, File, Inode, Name, ReadHandle, Timestamp, Vfs, VfsPath, WriteHandle};
+pub use vfs::{
+    Directory, File, Inode, InodeId, Name, ReadHandle, Timestamp, Vfs, VfsPath, WriteHandle,
+};
 
 use crate::db::Db;
 use crate::db::Error as DbError;
