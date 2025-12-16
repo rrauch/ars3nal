@@ -380,6 +380,19 @@ where
         get_inode(*id.deref() as i64, self).await
     }
 
+    pub async fn inodes_by_ids(
+        &mut self,
+        ids: impl IntoIterator<Item = InodeId>,
+    ) -> Result<Vec<Inode>, Error> {
+        let mut inodes = vec![];
+        for id in ids.into_iter() {
+            inodes.push(self.inode_by_id(id).await?.ok_or_else(|| {
+                DataError::MissingData(format!("Inode with id '{}' not found", id))
+            })?);
+        }
+        Ok(inodes)
+    }
+
     pub async fn list_dir(&mut self, dir_id: InodeId) -> Result<Vec<InodeId>, Error> {
         Ok(inode_ids_by_parent(*dir_id.deref() as i64, self)
             .await?
@@ -711,6 +724,67 @@ where
         Ok(())
     }
 
+    pub async fn new_wal_dir(
+        &mut self,
+        path: &VfsPath,
+        last_modified: &DateTime<Utc>,
+    ) -> Result<(InodeId, Vec<InodeId>), Error> {
+        clear_temp_tables(self).await?;
+        let (parent, name) = path.split();
+        let parent_inode_id = if !parent.is_root() {
+            Some(
+                self.inode_id_by_path(parent.as_ref())
+                    .await?
+                    .ok_or_else(|| {
+                        DataError::MissingData(format!(
+                            "parent directory '{}' missing",
+                            parent.as_ref()
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        let name = name.ok_or_else(|| {
+            DataError::MissingData("cannot create directory without name".to_string())
+        })?;
+        let last_modified = last_modified.timestamp();
+
+        let wal_entity_id = sqlx::query!("INSERT INTO wal_entity (entity_type) VALUES ('FO')")
+            .execute(self.conn())
+            .await?
+            .last_insert_rowid();
+
+        let row = VfsRow {
+            id: 0,
+            inode_type: "FO".into(),
+            perm_type: "W".into(),
+            entity: None,
+            wal_entity: Some(wal_entity_id),
+            name: name.as_ref().into(),
+            size: 0,
+            last_modified,
+            visibility: "V".into(),
+            parent: parent_inode_id.map(|i| *i as i64),
+            path: None,
+        };
+
+        let inode_id = InodeId::try_from(insert_vfs_row(&row, self).await?)
+            .map_err(|e| DataError::ConversionError(e.to_string()))?;
+
+        let affected_inode_ids = collect_affected_inode_ids(self)
+            .await?
+            .map(|id| {
+                InodeId::try_from(id as u64)
+                    .map_err(|e| DataError::ConversionError(e.to_string()).into())
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        clear_temp_tables(self).await?;
+
+        Ok((inode_id, affected_inode_ids))
+    }
+
     pub async fn new_wal_file(&mut self, metadata: Option<&WalFileMetadata>) -> Result<u64, Error> {
         let metadata = metadata
             .map(|m| serde_sqlite_jsonb::to_vec(m))
@@ -775,22 +849,19 @@ where
             )
             .execute(self.conn())
             .await?;
+            self.delete_orphaned_entities().await?;
             Ok::<_, Error>(inode_id)
         } else {
             // new vfs entry
             let (parent, name) = path.split();
-            let parent_id = if let Some(parent_path) = parent {
-                if &parent_path == crate::vfs::ROOT_PATH.deref() {
-                    None
-                } else {
-                    Some(
-                        *self
-                            .inode_id_by_path(parent_path.as_ref())
-                            .await?
-                            .ok_or_else(|| DataError::MissingData("parent not found".to_string()))?
-                            as i64,
-                    )
-                }
+            let parent_id = if !parent.is_root() {
+                Some(
+                    *self
+                        .inode_id_by_path(parent.as_ref())
+                        .await?
+                        .ok_or_else(|| DataError::MissingData("parent not found".to_string()))?
+                        as i64,
+                )
             } else {
                 None
             };
@@ -963,8 +1034,8 @@ where
               AND entity_type = 'SN';
             "
         )
-            .execute(self.conn())
-            .await?;
+        .execute(self.conn())
+        .await?;
 
         sqlx::query!(
             "
@@ -975,8 +1046,8 @@ where
               AND entity_type = 'FI';
             "
         )
-            .execute(self.conn())
-            .await?;
+        .execute(self.conn())
+        .await?;
 
         sqlx::query!(
             "

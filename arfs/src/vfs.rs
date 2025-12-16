@@ -1,4 +1,4 @@
-use crate::db::{DataError, Db, Read, Transaction, TxScope};
+use crate::db::{DataError, Db, Read, Transaction, TxScope, Write};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{Entity, Model};
@@ -10,7 +10,7 @@ use ario_core::blob::{Blob, OwnedBlob};
 use ario_core::wallet::WalletAddress;
 use chrono::{DateTime, Utc};
 use derive_more::Display;
-use futures_lite::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, Stream, StreamExt, stream};
+use futures_lite::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, Stream, stream};
 use maybe_owned::MaybeOwnedMut;
 use moka::future::Cache;
 use ouroboros::self_referencing;
@@ -23,7 +23,7 @@ use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll};
 use thiserror::Error;
-use typed_path::{Utf8UnixEncoding, Utf8UnixPath, Utf8UnixPathBuf};
+use typed_path::{Utf8Component, Utf8UnixEncoding, Utf8UnixPath, Utf8UnixPathBuf};
 
 pub(crate) const ROOT_INODE_ID: InodeId = InodeId(2);
 static ROOT_NAME: LazyLock<Name> =
@@ -91,6 +91,8 @@ pub enum InodeError {
     NotFoundByPath(VfsPath),
     #[error("Parent needs to be a directory or root")]
     ParentNotDirOrRoot,
+    #[error("Inode type incorrect")]
+    IncorrectType,
 }
 
 #[derive(Error, Debug)]
@@ -248,13 +250,14 @@ impl Vfs {
     }
 
     pub async fn inode_by_id(&self, id: InodeId) -> Result<Option<Inode>, Error> {
-        self._inode_by_id::<db::ReadOnly>(id, None).await
+        self._inode_by_id::<db::ReadOnly>(id, None, true).await
     }
 
     async fn _inode_by_id<C: TxScope>(
         &self,
         id: InodeId,
         conn: Option<&mut Transaction<C>>,
+        use_cache: bool,
     ) -> Result<Option<Inode>, Error>
     where
         Transaction<C>: db::Read,
@@ -264,6 +267,14 @@ impl Vfs {
         }
 
         let db = &self.0.db;
+
+        if !use_cache {
+            return Ok(match conn {
+                Some(conn) => conn.inode_by_id(id).await?,
+                None => db.read().await?.inode_by_id(id).await?,
+            });
+        }
+
         let path_cache = &self.0.path_cache;
         Ok(self
             .0
@@ -290,13 +301,14 @@ impl Vfs {
 
     pub async fn inode_by_path(&self, path: &VfsPath) -> Result<Option<Inode>, Error> {
         let conn = self.0.db.read().await?;
-        self._inode_by_path(path, conn).await
+        self._inode_by_path(path, conn, true).await
     }
 
     async fn _inode_by_path<'tx, C: TxScope>(
         &self,
         path: &VfsPath,
         conn: impl Into<MaybeOwnedMut<'tx, Transaction<C>>> + Send,
+        use_cache: bool,
     ) -> Result<Option<Inode>, Error>
     where
         Transaction<C>: Read,
@@ -306,29 +318,32 @@ impl Vfs {
         }
         let mut conn = conn.into();
 
-        let id = match self
-            .0
-            .path_cache
-            .try_get_with_by_ref(path, async { conn.inode_id_by_path(path.as_ref()).await })
-            .await
-            .map_err(Error::CachedDbError)?
-        {
+        let id = match if use_cache {
+            self.0
+                .path_cache
+                .try_get_with_by_ref(path, async { conn.inode_id_by_path(path.as_ref()).await })
+                .await
+                .map_err(Error::CachedDbError)?
+        } else {
+            conn.inode_id_by_path(path.as_ref()).await?
+        } {
             Some(id) => id,
             None => return Ok(None),
         };
 
-        self._inode_by_id(id, Some(&mut conn)).await
+        self._inode_by_id(id, Some(&mut conn), use_cache).await
     }
 
     async fn _list<'tx, L: Listable, C: TxScope>(
         &self,
         listable: &L,
         conn: impl Into<MaybeOwnedMut<'tx, Transaction<C>>> + Send,
+        use_cache: bool,
     ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin, Error>
     where
         Transaction<C>: Read,
     {
-        Ok(listable.list(self, conn).await?)
+        Ok(listable.list(self, conn, use_cache).await?)
     }
 
     pub async fn list<'a>(
@@ -336,10 +351,12 @@ impl Vfs {
         inode: &'a Inode,
     ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin + 'a, Error> {
         Ok(match inode {
-            Inode::Root(root) => Box::pin(self._list(root, self.0.db.read().await?).await?)
+            Inode::Root(root) => Box::pin(self._list(root, self.0.db.read().await?, true).await?)
                 as Pin<Box<dyn Stream<Item = Result<Inode, Error>> + Send + Unpin>>,
-            Inode::Directory(dir) => Box::pin(self._list(dir, self.0.db.read().await?).await?)
-                as Pin<Box<dyn Stream<Item = Result<Inode, Error>> + Send + Unpin>>,
+            Inode::Directory(dir) => {
+                Box::pin(self._list(dir, self.0.db.read().await?, true).await?)
+                    as Pin<Box<dyn Stream<Item = Result<Inode, Error>> + Send + Unpin>>
+            }
             Inode::File(_) => Box::pin(stream::empty())
                 as Pin<Box<dyn Stream<Item = Result<Inode, Error>> + Send + Unpin>>,
         })
@@ -404,12 +421,94 @@ impl Vfs {
         let mut matches = Vec::with_capacity(ids.len());
         for id in ids {
             let inode = self
-                ._inode_by_id(id, Some(&mut conn))
+                ._inode_by_id(id, Some(&mut conn), true)
                 .await?
                 .ok_or(crate::Error::VfsError(InodeError::NotFound(id).into()))?;
             matches.push(inode);
         }
         Ok((matches, has_more))
+    }
+
+    pub async fn create_dir(
+        &self,
+        dir: &VfsPath,
+        name: &Name,
+        last_modified: Option<DateTime<Utc>>,
+        create_dirs: bool,
+    ) -> Result<Directory, crate::Error> {
+        let mut tx = self.0.db.write().await?;
+        let path = dir.join(name);
+
+        if self._inode_by_path(&path, &mut tx, false).await?.is_some() {
+            Err(Error::NameAlreadyExists(name.clone()))?
+        }
+
+        let mut affected_inode_ids = vec![];
+
+        if create_dirs {
+            let (_, affected) = self.ensure_dir_exists(dir, &mut tx).await?;
+            affected_inode_ids.extend(affected);
+        } else {
+            match self
+                ._inode_by_path(dir, &mut tx, false)
+                .await?
+                .ok_or_else(|| Error::InodeError(InodeError::NotFoundByPath(dir.clone())))?
+            {
+                Inode::Directory(_) | Inode::Root(_) => {}
+                _ => Err(Error::InodeError(InodeError::IncorrectType))?,
+            }
+        }
+
+        let last_modified = last_modified.unwrap_or_else(|| Utc::now());
+        let (inode_id, affected) = tx.new_wal_dir(&path, &last_modified).await?;
+        affected_inode_ids.extend(affected);
+        let created_dir = match self
+            ._inode_by_id(inode_id, Some(&mut tx), false)
+            .await?
+            .ok_or_else(|| Error::InodeError(InodeError::NotFound(inode_id)))?
+        {
+            Inode::Directory(dir) => dir,
+            _ => Err(Error::InodeError(InodeError::IncorrectType))?,
+        };
+
+        tx.commit().await?;
+
+        self.invalidate_cache(affected_inode_ids).await;
+        Ok(created_dir)
+    }
+
+    async fn ensure_dir_exists<C: TxScope>(
+        &self,
+        dir: &VfsPath,
+        tx: &mut Transaction<C>,
+    ) -> Result<(Inode, Vec<InodeId>), crate::Error>
+    where
+        Transaction<C>: Write,
+    {
+        let mut affected_inode_ids = vec![];
+        for path in dir.parts() {
+            match self._inode_by_path(&path, &mut *tx, false).await? {
+                Some(Inode::Directory(_)) | Some(Inode::Root(_)) => {} // exists,
+                Some(Inode::File(_)) => Err(Error::InodeError(InodeError::IncorrectType))?,
+                None => {
+                    // create dir
+                    let now = Utc::now();
+                    let (_, affected) = tx.new_wal_dir(&path, &now).await?;
+                    affected_inode_ids.extend(affected);
+                }
+            }
+        }
+
+        let inode = match self
+            ._inode_by_path(dir, tx, false)
+            .await?
+            .ok_or_else(|| Error::InodeError(InodeError::NotFoundByPath(dir.clone())))?
+        {
+            Inode::File(_) => Err(Error::InodeError(InodeError::IncorrectType))?,
+            inode => inode,
+        };
+
+        Ok((inode, affected_inode_ids))
     }
 
     pub async fn create_file(
@@ -435,10 +534,14 @@ impl Vfs {
             Some(metadata)
         };
 
-        let dir = match self._inode_by_path(dir, &mut tx).await? {
+        let mut affected_inode_ids = vec![];
+
+        let dir = match self._inode_by_path(dir, &mut tx, false).await? {
             Some(inode) => inode,
             None if create_dirs => {
-                todo!()
+                let (inode, affected) = self.ensure_dir_exists(dir, &mut tx).await?;
+                affected_inode_ids.extend(affected);
+                inode
             }
             None => Err(Error::InodeError(InodeError::NotFoundByPath(dir.clone())))?,
         };
@@ -448,7 +551,7 @@ impl Vfs {
             Inode::File(_) => Err(Error::InodeError(InodeError::ParentNotDirOrRoot))?,
         };
 
-        let file_exists = match self._inode_by_path(&path, &mut tx).await? {
+        let file_exists = match self._inode_by_path(&path, &mut tx, false).await? {
             Some(Inode::Directory(_)) => Err(Error::InvalidOperation(
                 InvalidOperation::ReplaceDir(path.clone()),
             ))?,
@@ -468,6 +571,7 @@ impl Vfs {
             self.clone(),
             last_modified,
             metadata,
+            affected_inode_ids,
         )
         .await?)
     }
@@ -524,6 +628,7 @@ pub struct WriteOnly {
     path: VfsPath,
     vfs: Vfs,
     last_modified: Option<DateTime<Utc>>,
+    affected_inode_ids: Vec<InodeId>,
     #[not_covariant]
     #[borrows(mut tx)]
     writer: wal::file_writer::FileWriter<'this, db::ReadWrite>,
@@ -537,13 +642,15 @@ impl FileHandle<WriteOnly> {
         vfs: Vfs,
         last_modified: Option<DateTime<Utc>>,
         metadata: Option<WalFileMetadata>,
+        affected_inode_ids: Vec<InodeId>,
     ) -> Result<Self, crate::Error> {
-        let write_only = WriteOnly::try_new_async_send(tx, path, vfs, last_modified, |tx| {
-            Box::pin(async move {
-                wal::file_writer::FileWriter::new(chunk_size, tx, metadata.as_ref()).await
+        let write_only =
+            WriteOnly::try_new_async_send(tx, path, vfs, last_modified, affected_inode_ids, |tx| {
+                Box::pin(async move {
+                    wal::file_writer::FileWriter::new(chunk_size, tx, metadata.as_ref()).await
+                })
             })
-        })
-        .await?;
+            .await?;
 
         Ok(Self(write_only))
     }
@@ -558,10 +665,12 @@ impl FileHandle<WriteOnly> {
         let mut heads = self.0.into_heads();
         let last_modified = heads.last_modified.unwrap_or_else(|| Utc::now());
         let size = ByteSize::b(bytes_written);
-        let (inode_id, affected_ids) = heads
+        let (inode_id, affected) = heads
             .tx
             .upsert_vfs_file(&heads.path, &last_modified, size, wal_entity_id)
             .await?;
+
+        heads.affected_inode_ids.extend(affected);
 
         let file = match heads.tx.inode_by_id(inode_id).await? {
             Some(Inode::File(file)) => file,
@@ -572,7 +681,7 @@ impl FileHandle<WriteOnly> {
             ))?,
         };
         heads.tx.commit().await?;
-        heads.vfs.invalidate_cache(affected_ids).await;
+        heads.vfs.invalidate_cache(heads.affected_inode_ids).await;
 
         Ok(file)
     }
@@ -604,6 +713,7 @@ trait Listable {
         &self,
         vfs: &Vfs,
         conn: impl Into<MaybeOwnedMut<'tx, Transaction<C>>> + Send,
+        use_cache: bool,
     ) -> impl Future<Output = Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin, Error>>
     + Send
     where
@@ -614,12 +724,21 @@ impl Listable for Root {
     async fn list<'tx, C: TxScope>(
         &self,
         _: &Vfs,
-        _: impl Into<MaybeOwnedMut<'tx, Transaction<C>>> + Send,
+        conn: impl Into<MaybeOwnedMut<'tx, Transaction<C>>> + Send,
+        use_cache: bool,
     ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin, Error>
     where
         Transaction<C>: Read,
     {
-        Ok(stream::iter(self.0.content.iter().map(|i| Ok(i.clone()))))
+        let content = if use_cache {
+            self.0.content.clone()
+        } else {
+            let mut conn = conn.into();
+            let ids = conn.as_mut().list_root().await?;
+            conn.as_mut().inodes_by_ids(ids).await?
+        };
+
+        Ok(stream::iter(content.into_iter().map(|i| Ok(i))))
     }
 }
 
@@ -628,6 +747,7 @@ impl Listable for Directory {
         &self,
         vfs: &Vfs,
         conn: impl Into<MaybeOwnedMut<'tx, Transaction<C>>> + Send,
+        use_cache: bool,
     ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin, Error>
     where
         Transaction<C>: Read,
@@ -637,15 +757,21 @@ impl Listable for Directory {
         let inode_cache = &vfs.0.inode_cache;
         let path_cache = &vfs.0.path_cache;
 
-        let content = vfs
-            .0
-            .dir_cache
-            .try_get_with(id, async {
-                let ids = conn.as_mut().list_dir(id).await?;
-                inode_ids_to_inodes(inode_cache, path_cache, ids.into_iter(), conn.as_mut()).await
-            })
-            .await
-            .map_err(Error::CachedError)?;
+        let content = if use_cache {
+            vfs.0
+                .dir_cache
+                .try_get_with(id, async {
+                    let ids = conn.as_mut().list_dir(id).await?;
+                    inode_ids_to_inodes(inode_cache, path_cache, ids.into_iter(), conn.as_mut())
+                        .await
+                })
+                .await
+                .map_err(Error::CachedError)?
+        } else {
+            let tx = conn.as_mut();
+            let ids = tx.list_dir(id).await?;
+            tx.inodes_by_ids(ids).await?
+        };
 
         Ok(stream::iter(content.into_iter().map(|i| Ok(i))))
     }
@@ -691,13 +817,42 @@ impl VfsPath {
         Self(Arc::new(self.0.as_path().join(name.as_ref())))
     }
 
-    pub fn split(&self) -> (Option<VfsPath>, Option<Name>) {
+    pub fn is_root(&self) -> bool {
+        let str = self.0.as_str();
+        str == "/" || str == ""
+    }
+
+    pub fn split(&self) -> (VfsPath, Option<Name>) {
         (
-            self.0.parent().map(|p| Self(Arc::new(p.to_path_buf()))),
+            self.0
+                .parent()
+                .map(|p| {
+                    if p.as_str().is_empty() || p.as_str() == "/" {
+                        ROOT_PATH.clone()
+                    } else {
+                        Self(Arc::new(p.to_path_buf()))
+                    }
+                })
+                .unwrap_or_else(|| ROOT_PATH.clone()),
             self.0
                 .file_name()
                 .map(|n| Name::from_str(n).expect("name to be valid")),
         )
+    }
+
+    pub fn parts(&self) -> impl Iterator<Item = Self> {
+        let root = ROOT_PATH.clone();
+        let components = self.0.components();
+        components
+            .into_iter()
+            .enumerate()
+            .scan(root, |path, (n, name)| {
+                if n > 0 {
+                    let name = Name::from_str(name.as_str()).expect("name to be valid");
+                    *path = path.join(&name);
+                }
+                Some(path.clone())
+            })
     }
 }
 

@@ -611,7 +611,7 @@ async fn begin_write_file(
         .map_err(|e| S3Error::internal_error(e))?;
 
     let (dir, name) = match path.split() {
-        (Some(dir), Some(name)) => (dir, name),
+        (dir, Some(name)) => (dir, name),
         _ => Err(S3Error::new(S3ErrorCode::InvalidArgument))?,
     };
 
@@ -1071,7 +1071,31 @@ impl S3 for ArS3 {
                     "Unexpected request body when creating a directory object."
                 ));
             }
-            todo!()
+            let path = VfsPath::try_from(format!("/{}", input.key.as_str()).as_str())
+                .map_err(|e| S3Error::internal_error(e))?;
+
+            let (dir, name) = match path.split() {
+                ((dir), Some(name)) => (dir, name),
+                _ => Err(S3Error::with_message(
+                    S3ErrorCode::InvalidArgument,
+                    "multipart_upload part_number invalid",
+                ))?,
+            };
+
+            let inode = Inode::Directory(
+                arfs.vfs()
+                    .create_dir(&dir, &name, None, true)
+                    .await
+                    .map_err(S3Error::internal_error)?,
+            );
+
+            let object = self.as_object(arfs, &inode);
+
+            Ok(S3Response::new(PutObjectOutput {
+                e_tag: object.e_tag,
+                size: object.size,
+                ..Default::default()
+            }))
         } else {
             // file
             Ok(S3Response::new(
