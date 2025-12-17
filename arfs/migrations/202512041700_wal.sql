@@ -1,5 +1,4 @@
 -- Config change
-
 ALTER TABLE config
     ADD COLUMN root_folder_id INTEGER REFERENCES entity (id);
 
@@ -264,7 +263,6 @@ CREATE TABLE vfs_new
         AND name NOT LIKE '%/%'),
     size                            INTEGER                                 NOT NULL CHECK (size >= 0),
     last_modified                   TIMESTAMP                               NOT NULL,
-    visibility                      TEXT CHECK (visibility IN ('V', 'H'))   NOT NULL DEFAULT 'V',
     parent                          INTEGER CHECK (parent IS NULL OR parent >= 1),
     path                            TEXT                                    NOT NULL DEFAULT '__INVALID__',
     last_proactively_cached_at      TIMESTAMP CHECK (last_proactively_cached_at IS NULL OR
@@ -294,7 +292,7 @@ FROM sqlite_sequence
 WHERE name = 'vfs';
 
 -- Copy data from old table (all existing entries are permanent)
-INSERT INTO vfs_new (id, inode_type, perm_type, entity, wal_entity, name, size, last_modified, visibility, parent, path,
+INSERT INTO vfs_new (id, inode_type, perm_type, entity, wal_entity, name, size, last_modified, parent, path,
                      last_proactively_cached_at, last_proactive_cache_attempt_at)
 SELECT id,
        inode_type,
@@ -304,7 +302,6 @@ SELECT id,
        name,
        size,
        last_modified,
-       visibility,
        parent,
        path,
        last_proactively_cached_at,
@@ -326,7 +323,7 @@ ALTER TABLE vfs_new
 CREATE INDEX idx_vfs_entity ON vfs (entity);
 CREATE INDEX idx_vfs_wal_entity ON vfs (wal_entity);
 CREATE INDEX idx_vfs_parent ON vfs (parent);
-CREATE INDEX idx_vfs_path_cover ON vfs (path, visibility, inode_type);
+CREATE INDEX idx_vfs_path_cover ON vfs (path, inode_type);
 
 -- Recreate the view
 CREATE VIEW vfs_inode_ancestors AS

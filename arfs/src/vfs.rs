@@ -3,7 +3,7 @@ use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{Entity, Model};
 use crate::wal::{WalFileMetadata, WalNode};
-use crate::{CacheSettings, ContentType, Visibility, db, wal};
+use crate::{CacheSettings, ContentType, db, wal};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
 use ario_core::blob::{Blob, OwnedBlob};
@@ -964,7 +964,6 @@ impl File {
         name: Name,
         size: ByteSize,
         last_modified: Timestamp,
-        visibility: Visibility,
         path: VfsPath,
         entity: FileEntity,
     ) -> Self {
@@ -973,7 +972,6 @@ impl File {
             name,
             last_modified,
             size,
-            visibility,
             path,
             inner: Variant::Permanent(entity),
         }))
@@ -984,7 +982,6 @@ impl File {
         name: Name,
         size: ByteSize,
         last_modified: Timestamp,
-        visibility: Visibility,
         path: VfsPath,
         wal_entity_id: u64,
         metadata: Option<WalFileMetadata>,
@@ -994,7 +991,6 @@ impl File {
             name,
             last_modified,
             size,
-            visibility,
             path,
             inner: Variant::Wal(WalNode::File(wal_entity_id, metadata)),
         }))
@@ -1037,7 +1033,6 @@ impl Directory {
         id: InodeId,
         name: Name,
         last_modified: Timestamp,
-        visibility: Visibility,
         path: VfsPath,
         entity: FolderEntity,
     ) -> Self {
@@ -1046,7 +1041,6 @@ impl Directory {
             name,
             last_modified,
             size: ByteSize::b(0),
-            visibility,
             path,
             inner: Variant::Permanent(entity),
         }))
@@ -1056,7 +1050,6 @@ impl Directory {
         id: InodeId,
         name: Name,
         last_modified: Timestamp,
-        visibility: Visibility,
         path: VfsPath,
     ) -> Self {
         Self(Arc::new(VfsNodeInner {
@@ -1064,7 +1057,6 @@ impl Directory {
             name,
             last_modified,
             size: ByteSize::b(0),
-            visibility,
             path,
             inner: Variant::Wal(WalNode::Directory),
         }))
@@ -1117,14 +1109,6 @@ impl<E: Entity> VfsNode<E> {
     }
 
     #[inline]
-    pub fn is_hidden(&self) -> bool {
-        match self.0.visibility {
-            Visibility::Visible => false,
-            Visibility::Hidden => true,
-        }
-    }
-
-    #[inline]
     pub fn path(&self) -> &VfsPath {
         &self.0.path
     }
@@ -1162,7 +1146,6 @@ struct VfsNodeInner<E: Entity> {
     name: Name,
     last_modified: Timestamp,
     size: ByteSize,
-    visibility: Visibility,
     path: VfsPath,
     inner: Variant<E>,
 }
@@ -1215,15 +1198,6 @@ impl Inode {
             Self::Root(root) => &root.0.last_modified,
             Self::File(file) => file.last_modified(),
             Self::Directory(dir) => dir.last_modified(),
-        }
-    }
-
-    #[inline]
-    pub fn is_hidden(&self) -> bool {
-        match self {
-            Self::Root(_) => false,
-            Self::File(file) => file.is_hidden(),
-            Self::Directory(dir) => dir.is_hidden(),
         }
     }
 

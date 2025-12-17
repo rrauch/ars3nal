@@ -446,8 +446,7 @@ FROM vfs,
      params
 WHERE
   -- Base filters
-    vfs.visibility = 'V'
-  AND vfs.path LIKE params.prefix || '%'
+  vfs.path LIKE params.prefix || '%'
   AND vfs.path > params.start_after
 
   -- S3 Logic Gate: Handles both flat and delimited listing modes
@@ -473,8 +472,7 @@ WHERE
                 SUBSTR(vfs_inner.path, LENGTH(bp.prefix) + 1), bp.delimiter))
                              FROM vfs AS vfs_inner,
                                   params AS bp
-                             WHERE vfs_inner.path LIKE bp.prefix || '%' || bp.delimiter || '%'
-                               AND vfs_inner.visibility = 'V')
+                             WHERE vfs_inner.path LIKE bp.prefix || '%' || bp.delimiter || '%')
         )
     )
 ORDER BY vfs.path
@@ -765,7 +763,6 @@ where
             name: name.as_ref().into(),
             size: 0,
             last_modified,
-            visibility: "V".into(),
             parent: parent_inode_id.map(|i| *i as i64),
             path: None,
         };
@@ -878,7 +875,6 @@ where
                 name: name.as_ref().into(),
                 size,
                 last_modified,
-                visibility: "V".into(),
                 parent: parent_id,
                 path: None,
             };
@@ -1343,7 +1339,6 @@ struct VfsRow<'a> {
     name: Cow<'a, str>,
     size: i64,
     last_modified: i64,
-    visibility: Cow<'a, str>,
     parent: Option<i64>,
     path: Option<Cow<'a, str>>,
 }
@@ -1372,7 +1367,6 @@ fn to_vfs_row<E: DbEntity>(
 ) -> VfsRow<'_>
 where
     E: HasName,
-    E: HasVisibility,
 {
     VfsRow {
         id: 0,
@@ -1383,7 +1377,6 @@ where
         name: entity.name().into(),
         size,
         last_modified,
-        visibility: { if entity.is_hidden() { "H" } else { "V" } }.into(),
         parent,
         path: None,
     }
@@ -1436,7 +1429,7 @@ async fn get_entity<E: DbEntity, C: Read>(id: i64, tx: &mut C) -> Result<Model<E
 async fn get_vfs_row<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<VfsRow<'static>>, Error> {
     Ok(sqlx::query!(
         "SELECT
-             id, inode_type, perm_type, entity, wal_entity, name, size, last_modified as \"last_modified: i64\", visibility, parent, path
+             id, inode_type, perm_type, entity, wal_entity, name, size, last_modified as \"last_modified: i64\", parent, path
          FROM
              vfs
          WHERE
@@ -1454,7 +1447,6 @@ async fn get_vfs_row<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<VfsRow
             name: r.name.into(),
             size: r.size,
             last_modified: r.last_modified,
-            visibility: r.visibility.into(),
             parent: r.parent,
             path: Some(r.path.into()),
         }
@@ -1473,14 +1465,6 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
         .map_err(|e| DataError::ConversionError(e.to_string()))?;
     let last_modified = Timestamp::from_timestamp(vfs_row.last_modified, 0)
         .ok_or_else(|| DataError::ConversionError("timestamp is invalid".to_string()))?;
-    let visibility = match vfs_row.visibility.as_ref() {
-        "H" => Visibility::Hidden,
-        "V" => Visibility::Visible,
-        other => Err(DataError::ConversionError(format!(
-            "invalid visibility value: '{}'",
-            other
-        )))?,
-    };
     let path = vfs_row
         .path
         .ok_or_else(|| DataError::MissingData("path not set".to_string()))?;
@@ -1502,7 +1486,6 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
                     name,
                     ByteSize::b(vfs_row.size as u64),
                     last_modified,
-                    visibility,
                     path,
                     entity,
                 ))))
@@ -1519,7 +1502,6 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
                     id,
                     name,
                     last_modified,
-                    visibility,
                     path,
                     entity,
                 ))))
@@ -1549,14 +1531,13 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
                         name,
                         ByteSize::b(vfs_row.size as u64),
                         last_modified,
-                        visibility,
                         path,
                         wal_id as u64,
                         metadata,
                     ))))
                 }
                 <FolderKind as DbEntity>::TYPE => Ok(Some(Inode::Directory(
-                    VfsDirectory::new_wal(id, name, last_modified, visibility, path),
+                    VfsDirectory::new_wal(id, name, last_modified, path),
                 ))),
                 other => Err(DataError::NotInodeEntityType(other.to_string()))?,
             }
@@ -1569,13 +1550,12 @@ async fn insert_vfs_row<C: Write>(row: &VfsRow<'_>, tx: &mut C) -> Result<u64, E
     let inode_type = row.inode_type.deref();
     let perm_type = row.perm_type.deref();
     let name = row.name.deref();
-    let visibility = row.visibility.deref();
 
     Ok(sqlx::query!(
         "
         INSERT INTO vfs
-            (perm_type, inode_type, entity, wal_entity, name, size, last_modified, visibility, parent) VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (perm_type, inode_type, entity, wal_entity, name, size, last_modified, parent) VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?)
         ",
         perm_type,
         inode_type,
@@ -1584,7 +1564,6 @@ async fn insert_vfs_row<C: Write>(row: &VfsRow<'_>, tx: &mut C) -> Result<u64, E
         name,
         row.size,
         row.last_modified,
-        visibility,
         row.parent,
     )
     .execute(tx.conn())
