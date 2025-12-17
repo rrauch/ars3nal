@@ -1,3 +1,109 @@
+-- Entities change
+CREATE TABLE entity_new
+(
+    id            INTEGER PRIMARY KEY NOT NULL,
+    entity_type   TEXT                NOT NULL CHECK (entity_type IN ('DR', 'DS', 'FI', 'FO', 'SN')),
+    location      TEXT                NOT NULL CHECK (location LIKE 'ar://%' AND LENGTH(location) >= 47),
+    block         INTEGER             NOT NULL CHECK (block > 0 AND block < 1000000000),
+    entity_id     BLOB CHECK (entity_id IS NULL OR (TYPEOF(entity_id) == 'blob' AND LENGTH(entity_id) == 16)),
+    header        BLOB                NOT NULL CHECK (json_valid(header, 8)),
+    metadata      BLOB CHECK (metadata IS NULL OR json_valid(metadata, 8)),
+    data_location TEXT CHECK (data_location IS NULL OR (data_location LIKE 'ar://%' AND LENGTH(data_location) >= 47)),
+
+    UNIQUE (entity_type, entity_id, block),
+
+    CHECK (entity_type != 'DR' OR (entity_id IS NOT NULL AND metadata IS NOT NULL)),
+    CHECK (entity_type != 'FO' OR (entity_id IS NOT NULL AND metadata IS NOT NULL)),
+    CHECK (entity_type != 'FI' OR (entity_id IS NOT NULL AND metadata IS NOT NULL AND data_location IS NOT NULL)),
+    CHECK (entity_type != 'SN' OR (entity_id IS NOT NULL))
+);
+
+INSERT INTO entity_new
+SELECT *
+FROM entity;
+
+DROP TRIGGER config_drive_entity_type;
+DROP TRIGGER config_drive_entity_type_update;
+DROP TRIGGER config_signature_entity_type;
+DROP TRIGGER config_signature_entity_type_update;
+
+DROP TRIGGER vfs_validate_entity_type_on_insert;
+DROP TRIGGER vfs_validate_entity_type_on_update;
+
+DROP TABLE entity;
+ALTER TABLE entity_new
+    RENAME TO entity;
+
+-- Sync Log change
+CREATE TABLE sync_log_new
+(
+    start_time   TIMESTAMP NOT NULL PRIMARY KEY CHECK (start_time >= 1577836800 AND start_time < 4733510400),
+    duration_ms  INTEGER   NOT NULL CHECK (duration_ms >= 0 AND duration_ms < 2592000000),
+    result       TEXT      NOT NULL CHECK (result IN ('S', 'E')),
+    insertions   INTEGER CHECK (insertions IS NULL OR insertions >= 0),
+    updates      INTEGER CHECK (updates IS NULL OR updates >= 0),
+    deletions    INTEGER CHECK (deletions IS NULL OR deletions >= 0),
+    block_height INTEGER CHECK (block_height IS NULL OR (block_height > 0 and block_height < 1000000000)),
+    error        TEXT CHECK (error IS NULL OR LENGTH(error) <= 255),
+
+    CHECK (result != 'S' OR (
+        insertions IS NOT NULL AND
+        updates IS NOT NULL AND
+        deletions IS NOT NULL AND
+        block_height IS NOT NULL AND
+        error IS NULL
+        )),
+
+    CHECK (result != 'E' OR (
+        insertions IS NULL AND
+        updates IS NULL AND
+        deletions IS NULL AND
+        error IS NOT NULL
+        ))
+);
+
+INSERT INTO sync_log_new
+SELECT start_time,
+       duration_ms,
+       result,
+       insertions,
+       NULL,
+       deletions,
+       block_height,
+       error
+FROM sync_log;
+DROP TABLE sync_log;
+ALTER TABLE sync_log_new
+    RENAME TO sync_log;
+
+-- GC - keep max 1000 entries, discard the rest
+CREATE TRIGGER sync_log_gc
+    AFTER INSERT
+    ON sync_log
+BEGIN
+    DELETE
+    FROM sync_log
+    WHERE start_time IN (SELECT start_time
+                         FROM sync_log
+                         ORDER BY start_time DESC
+                         LIMIT -1 OFFSET 1000);
+END;
+
+CREATE TRIGGER sync_log_protect_latest
+    BEFORE DELETE
+    ON sync_log
+BEGIN
+    SELECT RAISE(ABORT, 'Cannot delete the most recent entry')
+    WHERE OLD.start_time = (SELECT MAX(start_time) FROM sync_log);
+END;
+
+CREATE TRIGGER sync_log_prevent_updates
+    BEFORE UPDATE
+    ON sync_log
+BEGIN
+    SELECT RAISE(ABORT, 'sync_log table entries cannot be updated');
+END;
+
 -- Config change
 ALTER TABLE config
     ADD COLUMN root_folder_id INTEGER REFERENCES entity (id);
@@ -225,8 +331,6 @@ END;
 -- Drop all triggers related to vfs
 DROP TRIGGER vfs_unique_root_inodes;
 DROP TRIGGER vfs_unique_root_inodes_update;
-DROP TRIGGER vfs_validate_entity_type_on_insert;
-DROP TRIGGER vfs_validate_entity_type_on_update;
 DROP TRIGGER vfs_prevent_inode_type_change;
 DROP TRIGGER vfs_ensure_directory_as_parent_on_insert;
 DROP TRIGGER vfs_ensure_directory_as_parent_on_update;
@@ -272,9 +376,9 @@ CREATE TABLE vfs_new
                                                      ((last_proactive_cache_attempt_at >= 1577836800 AND
                                                        last_proactive_cache_attempt_at < 4733510400))),
 
-    FOREIGN KEY (entity) REFERENCES entity (id) ON DELETE CASCADE,
-    FOREIGN KEY (wal_entity) REFERENCES wal_entity (id) ON DELETE CASCADE,
-    FOREIGN KEY (parent) REFERENCES vfs_new (id) ON DELETE CASCADE,
+    FOREIGN KEY (entity) REFERENCES entity (id),
+    FOREIGN KEY (wal_entity) REFERENCES wal_entity (id),
+    FOREIGN KEY (parent) REFERENCES vfs_new (id),
     UNIQUE (parent, name),
     CHECK (
         (perm_type = 'P' AND entity IS NOT NULL AND wal_entity IS NULL) OR

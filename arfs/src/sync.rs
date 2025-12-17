@@ -51,6 +51,7 @@ pub enum SyncResult {
 
 #[derive(Debug, Clone)]
 pub struct Success {
+    pub updates: usize,
     pub insertions: usize,
     pub deletions: usize,
     pub block: BlockNumber,
@@ -376,7 +377,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
 
                     let result = match result {
                         Ok(success) => {
-                            if success.insertions > 0 || success.deletions > 0 {
+                            if success.insertions > 0 || success.deletions > 0 || success.updates > 0 {
                                 // vfs modified
                                 if self.proactive_cache_interval.is_some() {
                                     // trigger proactive caching if enabled
@@ -589,9 +590,11 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
             }
         }
 
-        let (insertions, deletions) = self.update(obsolete, new_files, new_folders).await?;
+        let (updates, insertions, deletions) =
+            self.update(obsolete, new_files, new_folders).await?;
 
         Ok(Success {
+            updates,
             insertions,
             deletions,
             block: current_block_height,
@@ -604,12 +607,12 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         obsolete: Vec<ArfsEntityId>,
         new_files: Vec<FileEntity>,
         new_folders: Vec<FolderEntity>,
-    ) -> Result<(usize, usize), crate::Error> {
+    ) -> Result<(usize, usize, usize), crate::Error> {
         // sort new folders to make sure they are inserted in the correct order
         let new_folders = sort_folders_by_dependency(new_folders);
 
         let mut tx = self.db.write().await?;
-        let (insertions, deletions, affected_inode_ids) =
+        let (updates, insertions, deletions, affected_inode_ids) =
             tx.sync_update(&obsolete, &new_files, &new_folders).await?;
         tx.commit().await?;
 
@@ -617,7 +620,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
             self.vfs.invalidate_cache(affected_inode_ids).await;
         }
 
-        Ok((insertions, deletions))
+        Ok((updates, insertions, deletions))
     }
 
     #[tracing::instrument(skip(self))]

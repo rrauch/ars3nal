@@ -629,7 +629,7 @@ where
         obsolete: &Vec<ArfsEntityId>,
         new_files: &Vec<FileEntity>,
         new_folders: &Vec<FolderEntity>,
-    ) -> Result<(usize, usize, Vec<InodeId>), Error> {
+    ) -> Result<(usize, usize, usize, Vec<InodeId>), Error> {
         clear_temp_tables(self).await?;
         let config = self.config().await?;
         let root_folder_id =
@@ -668,7 +668,7 @@ where
             })
             .collect::<Result<Vec<_>, Error>>()?;
         clear_temp_tables(self).await?;
-        Ok((ids.len(), deletions, affected_inode_ids))
+        Ok((0, ids.len(), deletions, affected_inode_ids))
     }
 
     async fn delete_entities(
@@ -1202,7 +1202,7 @@ async fn get_latest_sync_log_entry<C: Read>(conn: &mut C) -> Result<Option<SyncL
     let row: SyncLogRow = match sqlx::query_as!(
         SyncLogRow,
         "SELECT
-             start_time as \"start_time: i64\", duration_ms, result, insertions, deletions, block_height, error
+             start_time as \"start_time: i64\", duration_ms, result, updates, insertions, deletions, block_height, error
          FROM
              sync_log
          ORDER BY
@@ -1228,12 +1228,13 @@ async fn insert_sync_log_entry<C: Write>(
 
     sqlx::query!(
         "INSERT INTO sync_log
-             (start_time, duration_ms, result, insertions, deletions, block_height, error)
+             (start_time, duration_ms, result, updates, insertions, deletions, block_height, error)
          VALUES
-             (?, ?, ?, ?, ?, ?, ?)",
+             (?, ?, ?, ?, ?, ?, ?, ?)",
         row.start_time,
         row.duration_ms,
         row.result,
+        row.updates,
         row.insertions,
         row.deletions,
         row.block_height,
@@ -1248,6 +1249,7 @@ struct SyncLogRow {
     start_time: i64,
     duration_ms: i64,
     result: String,
+    updates: Option<i64>,
     insertions: Option<i64>,
     deletions: Option<i64>,
     block_height: Option<i64>,
@@ -1264,6 +1266,7 @@ impl TryFrom<SyncLogRow> for SyncLogEntry {
 
         let result = match value.result.as_ref() {
             "S" => SyncResult::OK(SyncSuccess {
+                updates: value.updates.map(|v| v as usize).unwrap_or_default(),
                 insertions: value.insertions.map(|v| v as usize).unwrap_or_default(),
                 deletions: value.deletions.map(|v| v as usize).unwrap_or_default(),
                 block: BlockNumber::from_inner(
@@ -1290,11 +1293,12 @@ impl TryFrom<SyncLogRow> for SyncLogEntry {
 
 impl From<&SyncLogEntry> for SyncLogRow {
     fn from(value: &SyncLogEntry) -> Self {
-        let (result, block_height, insertions, deletions, error);
+        let (result, block_height, updates, insertions, deletions, error);
 
         match &value.result {
             SyncResult::OK(success) => {
                 result = "S".into();
+                updates = Some(success.updates as i64);
                 insertions = Some(success.insertions as i64);
                 deletions = Some(success.deletions as i64);
                 block_height = Some(i64::try_from(*success.block.as_ref()).unwrap_or(i64::MAX));
@@ -1302,6 +1306,7 @@ impl From<&SyncLogEntry> for SyncLogRow {
             }
             SyncResult::Error(err) => {
                 result = "E".into();
+                updates = None;
                 insertions = None;
                 deletions = None;
                 block_height = None;
@@ -1313,6 +1318,7 @@ impl From<&SyncLogEntry> for SyncLogRow {
             start_time: value.start_time.timestamp(),
             duration_ms: value.duration.as_millis() as i64,
             result,
+            updates,
             insertions,
             deletions,
             block_height,
