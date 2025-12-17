@@ -1,4 +1,4 @@
-use crate::db::Db;
+use crate::db::{Db, ReadWrite, Transaction, TxScope, Write};
 use crate::types::ArfsEntityId;
 use crate::types::drive::{DriveEntity, DriveId};
 use crate::types::file::{FileEntity, FileKind};
@@ -21,6 +21,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::time::FutureExt;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -34,6 +35,8 @@ pub enum Error {
     StartFailure,
     #[error("unable to acquire sync permit")]
     PermitAcquisitionFailed,
+    #[error("acquiring tx timed out")]
+    TxAcquisitionTimeout,
 }
 
 #[derive(Clone, Debug)]
@@ -476,8 +479,17 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
     ) -> Result<Success, crate::Error> {
         tracing::debug!("waiting for sync permit");
         let _permit = self.sync_limit.acquire_permit().await?;
+
+        tracing::debug!("acquiring write tx");
+        let mut tx = self
+            .db
+            .write()
+            .timeout(Duration::from_secs(60))
+            .await
+            .map_err(|_| Error::TxAcquisitionTimeout)??;
+
         tracing::debug!("starting sync");
-        let current_drive_config = self.db.read().await?.config().await?;
+        let current_drive_config = tx.config().await?;
 
         let current_block_height = self.current_block_height().await?;
         let latest_drive = self
@@ -591,7 +603,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         }
 
         let (updates, insertions, deletions) =
-            self.update(obsolete, new_files, new_folders).await?;
+            self.update(obsolete, new_files, new_folders, tx).await?;
 
         Ok(Success {
             updates,
@@ -601,17 +613,17 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         })
     }
 
-    #[tracing::instrument(skip(self, obsolete, new_files, new_folders))]
+    #[tracing::instrument(skip(self, obsolete, new_files, new_folders, tx))]
     async fn update(
         &self,
         obsolete: Vec<ArfsEntityId>,
         new_files: Vec<FileEntity>,
         new_folders: Vec<FolderEntity>,
+        mut tx: Transaction<ReadWrite>,
     ) -> Result<(usize, usize, usize), crate::Error> {
         // sort new folders to make sure they are inserted in the correct order
         let new_folders = sort_folders_by_dependency(new_folders);
 
-        let mut tx = self.db.write().await?;
         let (updates, insertions, deletions, affected_inode_ids) =
             tx.sync_update(&obsolete, &new_files, &new_folders).await?;
         tx.commit().await?;
