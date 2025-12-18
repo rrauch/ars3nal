@@ -326,6 +326,15 @@ pub struct BlockRange {
     pub end: BlockNumber,
 }
 
+impl From<BlockNumber> for BlockRange {
+    fn from(value: BlockNumber) -> Self {
+        Self {
+            start: value,
+            end: value,
+        }
+    }
+}
+
 #[derive(cynic::Enum, Debug, Clone, Copy, PartialEq, Eq)]
 #[cynic(graphql_type = "TagOperator")]
 pub enum TagOperator {

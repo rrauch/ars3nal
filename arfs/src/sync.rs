@@ -1,14 +1,15 @@
 use crate::db::{Db, ReadWrite, Transaction, TxScope, Write};
-use crate::types::ArfsEntityId;
 use crate::types::drive::{DriveEntity, DriveId};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
+use crate::types::{ArfsEntity, ArfsEntityId};
 use crate::vfs::{InodeError, InodeId};
 use crate::{FolderId, Inode, Private, Public, SyncLimit, Vfs, resolve};
 use ario_client::Client;
+use ario_client::graphql::BlockRange;
 use ario_core::BlockNumber;
 use ario_core::wallet::WalletAddress;
-use async_stream::stream;
+use async_stream::{stream, try_stream};
 use chrono::{DateTime, Utc};
 use futures_lite::{AsyncReadExt, Stream, StreamExt};
 use std::cmp::{max, min};
@@ -492,6 +493,15 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         let current_drive_config = tx.config().await?;
 
         let current_block_height = self.current_block_height().await?;
+        let last_sync_block_height = tx
+            .last_sync_block_height()
+            .await?
+            .unwrap_or_else(|| BlockNumber::from_inner(0));
+        let block_range = BlockRange {
+            start: last_sync_block_height,
+            end: current_block_height,
+        };
+
         let latest_drive = self
             .find_latest_drive(
                 current_drive_config.drive.id(),
@@ -500,110 +510,95 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
             )
             .await?;
 
-        let mut active: HashSet<ArfsEntityId> = [current_drive_config.drive.id().clone().into()]
-            .into_iter()
-            .collect();
+        let stream = Box::pin(try_stream! {
+            let mut folders_ids = VecDeque::new();
+            folders_ids.push_back(latest_drive.root_folder().clone());
 
-        let mut folders = VecDeque::new();
-        folders.push_back(latest_drive.root_folder().clone());
+            let mut processed_entity_ids = Vec::new();
 
-        loop {
-            let folder = match folders.pop_front() {
-                Some(folder) => folder,
-                None => break,
-            };
+            loop {
+                let parent_folder_id = match folders_ids.pop_front() {
+                    Some(folder) => folder,
+                    None => break,
+                };
 
-            let mut stream = resolve::find_entity_ids_by_parent_folder(
-                &self.client,
-                current_drive_config.drive.id(),
-                owner,
-                private,
-                &folder,
-            );
-            while let Some(entity_id) = stream.try_next().await? {
-                match entity_id {
-                    ArfsEntityId::File(file_id) => {
-                        active.insert(file_id.into());
+                let mut stream = resolve::find_entity_ids_by_parent_folder(
+                    &self.client,
+                    current_drive_config.drive.id(),
+                    owner,
+                    private,
+                    &parent_folder_id,
+                    Some(block_range.clone()),
+                );
+
+                while let Some((entity_id, block)) = stream.try_next().await? {
+                    // entities are processed newest-first
+                    // hence any entity_id we've already seen before is outdated and can be skipped
+                    if processed_entity_ids.contains(&entity_id) {
+                        continue;
                     }
-                    ArfsEntityId::Folder(folder_id) => {
-                        folders.push_back(folder_id);
+                    processed_entity_ids.push(entity_id.clone());
+
+                    match entity_id {
+                        ArfsEntityId::File(file_id) => {
+                            let location = resolve::find_entity_location_by_id_drive::<FileKind>(
+                                &self.client,
+                                &file_id,
+                                current_drive_config.drive.id(),
+                                Some(block),
+                            )
+                            .await?;
+                            let file = resolve::file_entity(
+                                &file_id,
+                                &self.client,
+                                &location,
+                                current_drive_config.drive.id(),
+                                owner,
+                                private,
+                            )
+                            .await?;
+
+                            if file.parent_folder() == &parent_folder_id {
+                                yield ArfsEntity::File(file)
+                            }
+                        }
+                        ArfsEntityId::Folder(folder_id) => {
+                            let location = resolve::find_entity_location_by_id_drive::<FolderKind>(
+                                &self.client,
+                                &folder_id,
+                                current_drive_config.drive.id(),
+                                Some(block),
+                            )
+                            .await?;
+                            let folder = resolve::folder_entity(
+                                &folder_id,
+                                &self.client,
+                                &location,
+                                current_drive_config.drive.id(),
+                                owner,
+                                private,
+                            )
+                            .await?;
+
+                            if folder.parent_folder() == Some(&parent_folder_id) {
+                                if !folder.is_hidden() {
+                                    folders_ids.push_back(folder.id().clone());
+                                }
+                                yield ArfsEntity::Folder(folder)
+                            }
+                        }
+                        _ => {} // ignore
                     }
-                    _ => {} // ignore
                 }
             }
+        });
 
-            active.insert(folder.into());
+        let (updates, insertions, deletions, affected_inode_ids) = tx.sync_update(stream).await?;
+        tx.commit().await?;
+
+        if !affected_inode_ids.is_empty() {
+            self.vfs.invalidate_cache(affected_inode_ids).await;
         }
-
-        let mut obsolete = vec![];
-        let mut present = vec![];
-
-        {
-            let mut conn = self.db.read().await?;
-            let stream = &mut conn.entity_ids().await?;
-            while let Some(id) = stream.try_next().await? {
-                if !active.contains(&id) {
-                    obsolete.push(id);
-                } else {
-                    present.push(id);
-                }
-            }
-        }
-
-        let new = active
-            .into_iter()
-            .filter(|id| !present.contains(id))
-            .collect::<Vec<_>>();
-
-        let mut new_files = vec![];
-        let mut new_folders = vec![];
-
-        for entity_id in new {
-            match entity_id {
-                ArfsEntityId::File(file_id) => {
-                    let location = resolve::find_entity_location_by_id_drive::<FileKind>(
-                        &self.client,
-                        &file_id,
-                        current_drive_config.drive.id(),
-                    )
-                    .await?;
-                    new_files.push(
-                        resolve::file_entity(
-                            &file_id,
-                            &self.client,
-                            &location,
-                            current_drive_config.drive.id(),
-                            owner,
-                            private,
-                        )
-                        .await?,
-                    );
-                }
-                ArfsEntityId::Folder(folder_id) => {
-                    let location = resolve::find_entity_location_by_id_drive::<FolderKind>(
-                        &self.client,
-                        &folder_id,
-                        current_drive_config.drive.id(),
-                    )
-                    .await?;
-                    new_folders.push(
-                        resolve::folder_entity(
-                            &folder_id,
-                            &self.client,
-                            &location,
-                            current_drive_config.drive.id(),
-                            owner,
-                            private,
-                        )
-                        .await?,
-                    );
-                }
-                _ => {} // ignore
-            }
-        }
-
-        let (updates, insertions, deletions) =
-            self.update(obsolete, new_files, new_folders, tx).await?;
 
         Ok(Success {
             updates,
@@ -611,28 +606,6 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
             deletions,
             block: current_block_height,
         })
-    }
-
-    #[tracing::instrument(skip(self, obsolete, new_files, new_folders, tx))]
-    async fn update(
-        &self,
-        obsolete: Vec<ArfsEntityId>,
-        new_files: Vec<FileEntity>,
-        new_folders: Vec<FolderEntity>,
-        mut tx: Transaction<ReadWrite>,
-    ) -> Result<(usize, usize, usize), crate::Error> {
-        // sort new folders to make sure they are inserted in the correct order
-        let new_folders = sort_folders_by_dependency(new_folders);
-
-        let (updates, insertions, deletions, affected_inode_ids) =
-            tx.sync_update(&obsolete, &new_files, &new_folders).await?;
-        tx.commit().await?;
-
-        if !affected_inode_ids.is_empty() {
-            self.vfs.invalidate_cache(affected_inode_ids).await;
-        }
-
-        Ok((updates, insertions, deletions))
     }
 
     #[tracing::instrument(skip(self))]

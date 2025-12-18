@@ -378,7 +378,7 @@ CREATE TABLE vfs_new
 
     FOREIGN KEY (entity) REFERENCES entity (id),
     FOREIGN KEY (wal_entity) REFERENCES wal_entity (id),
-    FOREIGN KEY (parent) REFERENCES vfs_new (id),
+    FOREIGN KEY (parent) REFERENCES vfs_new (id) ON DELETE CASCADE,
     UNIQUE (parent, name),
     CHECK (
         (perm_type = 'P' AND entity IS NOT NULL AND wal_entity IS NULL) OR

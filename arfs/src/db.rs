@@ -6,13 +6,13 @@ use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::snapshot::{SnapshotEntity, SnapshotKind};
 use crate::types::{
-    ArfsEntityId, Entity, HasId, HasName, HasVisibility, Header, Metadata, Model, ParseError,
+    ArfsEntity, ArfsEntityId, Entity, HasId, HasName, Header, Metadata, Model, ParseError,
 };
 use crate::vfs::{
     Directory as VfsDirectory, File as VfsFile, InodeId, Name as VfsName, ROOT_INODE_ID, Stats,
 };
-use crate::wal::{ContentHash, WalFileChunks, WalFileMetadata};
-use crate::{Inode, Privacy, Scope, Timestamp, VfsPath, Visibility, resolve, wal};
+use crate::wal::{ContentHash, WalFileMetadata};
+use crate::{FolderId, Inode, Privacy, Scope, Timestamp, VfsPath, resolve};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
 use ario_core::BlockNumber;
@@ -24,14 +24,14 @@ use chrono::{DateTime, Utc};
 use futures_lite::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_sqlite_jsonb::Error as JsonbError;
+use sqlx::Transaction as SqlxTransaction;
 use sqlx::migrate::MigrateError;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{ConnectOptions, Connection, Error as SqlxError, Pool, Sqlite, SqliteConnection};
-use sqlx::{Transaction as SqlxTransaction, query};
 use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
-use std::ops::{Deref, Range};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -297,6 +297,16 @@ where
 
     pub async fn latest_sync_log_entry(&mut self) -> Result<Option<SyncLogEntry>, Error> {
         get_latest_sync_log_entry(self).await
+    }
+
+    pub async fn last_sync_block_height(&mut self) -> Result<Option<BlockNumber>, Error> {
+        Ok(sqlx::query!(
+            "SELECT MAX(block_height) as block_height FROM sync_log WHERE result = 'S'"
+        )
+        .map(|r| r.block_height.map(|b| BlockNumber::from_inner(b as u64)))
+        .fetch_optional(self.conn())
+        .await?
+        .flatten())
     }
 
     pub async fn config(&mut self) -> Result<Config, Error> {
@@ -626,38 +636,142 @@ where
 
     pub async fn sync_update(
         &mut self,
-        obsolete: &Vec<ArfsEntityId>,
-        new_files: &Vec<FileEntity>,
-        new_folders: &Vec<FolderEntity>,
-    ) -> Result<(usize, usize, usize, Vec<InodeId>), Error> {
-        clear_temp_tables(self).await?;
-        let config = self.config().await?;
-        let root_folder_id =
-            get_id_for_entity_id::<FolderKind, _>(config.drive.root_folder(), self).await?;
+        mut stream: impl Stream<Item = Result<ArfsEntity, crate::Error>> + Unpin,
+    ) -> Result<(usize, usize, usize, Vec<InodeId>), crate::Error> {
+        enum Entry<'a> {
+            New(i64, Option<&'a FolderId>),
+            Updated(
+                i64,
+                &'a str,
+                &'a Timestamp,
+                u64,
+                Option<&'a FolderId>,
+                Vec<i64>,
+            ),
+            Deleted(Vec<i64>),
+        }
 
-        let mut ids = vec![];
-        let deletions = self.delete_entities(obsolete.iter()).await?;
-        for folder in new_folders {
-            let folder_id = insert_entity(folder, self).await?;
-            let parent_entity_id = if let Some(parent_folder) = folder.parent_folder() {
-                Some(get_id_for_entity_id::<FolderKind, _>(&parent_folder, self).await?)
-            } else {
-                None
+        clear_temp_tables(self).await?;
+
+        let mut deleted = 0;
+        let mut updated = 0;
+        let mut inserted = 0;
+
+        let config = self.config().await?;
+
+        while let Some(entity) = stream.try_next().await? {
+            let (entity_id, is_folder, entry) = match entity {
+                ArfsEntity::File(ref file) => {
+                    let (db_id, superseded) = insert_entity(&file, self).await?;
+                    let entry = if file.is_hidden() {
+                        Entry::Deleted(superseded)
+                    } else if superseded.is_empty() {
+                        Entry::New(db_id, Some(file.parent_folder()))
+                    } else {
+                        Entry::Updated(
+                            db_id,
+                            file.name(),
+                            file.last_modified(),
+                            file.size(),
+                            Some(file.parent_folder()),
+                            superseded,
+                        )
+                    };
+                    (db_id, false, entry)
+                }
+                ArfsEntity::Folder(ref folder) => {
+                    let (db_id, superseded) = insert_entity(&folder, self).await?;
+                    let entry = if folder.is_hidden() {
+                        Entry::Deleted(superseded)
+                    } else if superseded.is_empty() {
+                        Entry::New(db_id, folder.parent_folder())
+                    } else {
+                        Entry::Updated(
+                            db_id,
+                            folder.name(),
+                            folder.timestamp(),
+                            0,
+                            folder.parent_folder(),
+                            superseded,
+                        )
+                    };
+                    (db_id, true, entry)
+                }
+                _ => continue,
+            };
+
+            let mut find_parent = async |parent: Option<&FolderId>| -> Result<Option<i64>, Error> {
+                Ok(match parent {
+                    Some(folder_id) if folder_id == config.root_folder.id() => None,
+                    Some(folder_id) => {
+                        let folder_id = folder_id.as_ref();
+                        Some(
+                            sqlx::query!(
+                                "
+                                SELECT id FROM entity
+                                          WHERE entity_type = 'FO'
+                                            AND entity_id = ?
+                                          ORDER BY block DESC
+                                        LIMIT 1
+                                ",
+                                folder_id
+                            )
+                            .map(|r| r.id)
+                            .fetch_one(self.conn())
+                            .await
+                            .map_err(Error::SqlxError)?,
+                        )
+                    }
+                    None => None,
+                })
+            };
+
+            match entry {
+                Entry::New(id, parent) => {
+                    let parent = find_parent(parent).await?;
+                    insert_arfs_inode(&entity, id, parent, self).await?;
+                    inserted += 1;
+                }
+                Entry::Updated(new_id, name, last_modified, size, parent, superseded) => {
+                    let parent = find_parent(parent).await?;
+                    let last_modified = last_modified.timestamp();
+                    let size = size as i64;
+                    for id in superseded {
+                        updated += sqlx::query!(
+                            "
+                               UPDATE vfs SET
+                                              entity = ?,
+                                              name = ?,
+                                              last_modified = ?,
+                                              size = ?,
+                                              parent = ?
+                                          WHERE id = ?
+                            ",
+                            new_id,
+                            name,
+                            last_modified,
+                            size,
+                            parent,
+                            id,
+                        )
+                        .execute(self.conn())
+                        .await
+                        .map_err(Error::SqlxError)?
+                        .rows_affected() as usize;
+                    }
+                }
+                Entry::Deleted(superseded) => {
+                    for id in superseded {
+                        deleted += sqlx::query!("DELETE FROM vfs WHERE entity = ?", id)
+                            .execute(self.conn())
+                            .await
+                            .map_err(Error::SqlxError)?
+                            .rows_affected() as usize;
+                    }
+                }
             }
-            .map(|id| if id == root_folder_id { None } else { Some(id) })
-            .flatten();
-            let (inode_id, path) = insert_inode(folder, folder_id, parent_entity_id, self).await?;
-            ids.push(folder_id);
         }
-        for file in new_files {
-            let file_id = insert_entity(file, self).await?;
-            let parent_entity_id =
-                Some(get_id_for_entity_id::<FolderKind, _>(file.parent_folder(), self).await?)
-                    .map(|id| if id == root_folder_id { None } else { Some(id) })
-                    .flatten();
-            let (inode_id, path) = insert_inode(file, file_id, parent_entity_id, self).await?;
-            ids.push(file_id);
-        }
+
         self.delete_orphaned_entities().await?;
 
         let affected_inode_ids = collect_affected_inode_ids(self)
@@ -668,7 +782,8 @@ where
             })
             .collect::<Result<Vec<_>, Error>>()?;
         clear_temp_tables(self).await?;
-        Ok((0, ids.len(), deletions, affected_inode_ids))
+
+        Ok((updated, inserted, deleted, affected_inode_ids))
     }
 
     async fn delete_entities(
@@ -1091,6 +1206,7 @@ async fn bootstrap(
         client,
         drive_entity.root_folder(),
         &drive_id,
+        None,
     )
     .await?;
 
@@ -1577,6 +1693,22 @@ async fn insert_vfs_row<C: Write>(row: &VfsRow<'_>, tx: &mut C) -> Result<u64, E
     .last_insert_rowid() as u64)
 }
 
+async fn insert_arfs_inode<C: Write>(
+    entity: &ArfsEntity,
+    entity_id: i64,
+    parent_entity_id: Option<i64>,
+    tx: &mut C,
+) -> Result<(u64, String), Error> {
+    match entity {
+        ArfsEntity::File(e) => insert_inode(e, entity_id, parent_entity_id, tx).await,
+        ArfsEntity::Folder(e) => insert_inode(e, entity_id, parent_entity_id, tx).await,
+        _ => Err(DataError::IncorrectEntityType {
+            expected: "File or Folder".into(),
+            actual: "other".into(),
+        })?,
+    }
+}
+
 async fn insert_inode<'a, E: DbEntity, C: Write>(
     entity: &'a Model<E>,
     entity_id: i64,
@@ -1607,7 +1739,10 @@ where
     Ok((id as u64, path))
 }
 
-async fn insert_entity<E: DbEntity, C: Write>(entity: &Model<E>, tx: &mut C) -> Result<i64, Error> {
+async fn insert_entity<E: DbEntity, C: Write>(
+    entity: &Model<E>,
+    tx: &mut C,
+) -> Result<(i64, Vec<i64>), Error> {
     let row = E::to_row(entity)?;
 
     let entity_type = <E as DbEntity>::TYPE;
@@ -1620,7 +1755,7 @@ async fn insert_entity<E: DbEntity, C: Write>(entity: &Model<E>, tx: &mut C) -> 
         .as_ref()
         .map(|data_location| data_location.deref());
 
-    Ok(sqlx::query!(
+    let id = sqlx::query!(
         "
             INSERT INTO entity
                 (entity_type, location, block, entity_id, header, metadata, data_location) VALUES
@@ -1636,7 +1771,21 @@ async fn insert_entity<E: DbEntity, C: Write>(entity: &Model<E>, tx: &mut C) -> 
     )
     .execute(tx.conn())
     .await?
-    .last_insert_rowid())
+    .last_insert_rowid();
+
+    let superseded = sqlx::query!(
+        "
+        SELECT id FROM entity WHERE entity_type = ? AND entity_id = ? AND block < ?
+        ",
+        entity_type,
+        entity_id,
+        row.block,
+    )
+    .map(|r| r.id)
+    .fetch_all(tx.conn())
+    .await?;
+
+    Ok((id, superseded))
 }
 
 async fn get_config<C: Read>(tx: &mut C) -> Result<Option<Config>, Error> {

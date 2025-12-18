@@ -6,13 +6,14 @@ use crate::{EntityError, Error, MetadataError, Privacy, Private};
 use ario_client::Client;
 use ario_client::data_reader::DataReader;
 use ario_client::graphql::{
-    SortOrder, TagFilter, TxQuery, TxQueryFilterCriteria, TxQueryItem, WithTxResponseFields,
+    BlockRange, SortOrder, TagFilter, TxQuery, TxQueryFilterCriteria, TxQueryItem,
+    WithTxResponseFields,
 };
 use ario_client::location::Arl;
 use ario_client::tx::Status as TxStatus;
-use ario_core::JsonValue;
 use ario_core::tag::{Tag, TagsExt};
 use ario_core::wallet::WalletAddress;
+use ario_core::{BlockNumber, JsonValue};
 
 use crate::types::file::{FileEntity, FileHeader, FileId, FileKind};
 use crate::types::snapshot::{SnapshotHeader, SnapshotId, SnapshotKind};
@@ -20,14 +21,14 @@ use futures_lite::{AsyncReadExt, Stream, StreamExt};
 use std::fmt::Display;
 use std::num::NonZeroUsize;
 
-type TagsOnly = WithTxResponseFields<false, false, false, false, false, false, true, false>;
+type TagsBlockOnly = WithTxResponseFields<false, false, false, false, false, false, true, true>;
 
 pub fn find_drive_ids_by_owner<'a>(
     client: &'a Client,
     owner: &'a WalletAddress,
 ) -> impl Stream<Item = Result<(DriveId, TxQueryItem), Error>> + Unpin + 'a {
     client
-        .query_transactions_with_fields::<TagsOnly>(
+        .query_transactions_with_fields::<TagsBlockOnly>(
             TxQuery::builder()
                 .filter_criteria(
                     TxQueryFilterCriteria::builder()
@@ -93,9 +94,10 @@ pub fn find_entity_ids_by_parent_folder<'a>(
     owner: &'a WalletAddress,
     private: Option<&'a Private>,
     parent_folder: &FolderId,
-) -> impl Stream<Item = Result<ArfsEntityId, Error>> + Unpin + 'a {
+    block_range: Option<BlockRange>,
+) -> impl Stream<Item = Result<(ArfsEntityId, BlockNumber), Error>> + Unpin + 'a {
     client
-        .query_transactions_with_fields::<TagsOnly>(
+        .query_transactions_with_fields::<TagsBlockOnly>(
             TxQuery::builder()
                 .filter_criteria(
                     TxQueryFilterCriteria::builder()
@@ -110,13 +112,21 @@ pub fn find_entity_ids_by_parent_folder<'a>(
                                 .values([parent_folder.to_string()])
                                 .build(),
                         ])
+                        .maybe_block_range(block_range)
                         .build(),
                 )
                 .sort_order(SortOrder::HeightDescending)
                 .build(),
         )
         .filter_map(|r| match r {
-            Ok(item) => to_id(&item).transpose(),
+            Ok(item) => match to_id(&item).transpose() {
+                Some(Ok(id)) => match item.block() {
+                    Some(block) => Some(Ok((id, block.height))),
+                    None => None,
+                },
+                Some(Err(err)) => Some(Err(err)),
+                None => None,
+            },
             Err(e) => Some(Err(e.into())),
         })
 }
@@ -138,7 +148,7 @@ async fn _find_drive_by_id_owner(
     owner: &WalletAddress,
 ) -> Result<(DriveId, TxQueryItem), Error> {
     client
-        .query_transactions_with_fields::<TagsOnly>(
+        .query_transactions_with_fields::<TagsBlockOnly>(
             TxQuery::builder()
                 .filter_criteria(
                     TxQueryFilterCriteria::builder()
@@ -178,12 +188,13 @@ pub async fn find_entity_location_by_id_drive<E: Entity + HasId>(
     client: &Client,
     id: &E::Id,
     drive_id: &DriveId,
+    block: Option<BlockNumber>,
 ) -> Result<Arl, Error>
 where
     <E as HasId>::Id: Display,
 {
     let item = client
-        .query_transactions_with_fields::<TagsOnly>(
+        .query_transactions_with_fields::<TagsBlockOnly>(
             TxQuery::builder()
                 .filter_criteria(
                     TxQueryFilterCriteria::builder()
@@ -201,6 +212,7 @@ where
                                 .values([drive_id.to_string()])
                                 .build(),
                         ])
+                        .maybe_block_range(block.map(|b| b.into()))
                         .build(),
                 )
                 .sort_order(SortOrder::HeightDescending)
