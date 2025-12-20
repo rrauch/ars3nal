@@ -1,10 +1,12 @@
-use crate::db::{Db, ReadWrite, Transaction, TxScope, Write};
+mod db;
+
+use crate::db::Db;
 use crate::types::drive::{DriveEntity, DriveId};
-use crate::types::file::{FileEntity, FileKind};
+use crate::types::file::FileKind;
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{ArfsEntity, ArfsEntityId};
 use crate::vfs::{InodeError, InodeId};
-use crate::{FolderId, Inode, Private, Public, State, SyncLimit, Vfs, resolve};
+use crate::{Inode, Private, Public, State, SyncLimit, Vfs, resolve};
 use ario_client::Client;
 use ario_client::graphql::BlockRange;
 use ario_core::BlockNumber;
@@ -13,7 +15,7 @@ use async_stream::{stream, try_stream};
 use chrono::{DateTime, Utc};
 use futures_lite::{AsyncReadExt, Stream, StreamExt};
 use std::cmp::{max, min};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::io::ErrorKind;
 use std::sync::Arc;
 use std::time::Duration;

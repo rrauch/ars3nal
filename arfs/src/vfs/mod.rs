@@ -1,9 +1,11 @@
+mod db;
+
 use crate::db::{DataError, Db, Read, ReadWrite, Transaction, TxScope, Write};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{Entity, Model};
 use crate::wal::{WalDirMetadata, WalFileMetadata, WalNode};
-use crate::{CacheSettings, ContentType, State, db, wal};
+use crate::{CacheSettings, ContentType, State, wal};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
 use ario_core::blob::{Blob, OwnedBlob};
@@ -25,6 +27,8 @@ use std::task::{Context, Poll};
 use thiserror::Error;
 use typed_path::{Utf8Component, Utf8UnixEncoding, Utf8UnixPath, Utf8UnixPathBuf};
 
+pub(crate) use db::{VfsRow, get_vfs_row, insert_arfs_inode, insert_vfs_row};
+
 pub(crate) const ROOT_INODE_ID: InodeId = InodeId(2);
 static ROOT_NAME: LazyLock<Name> =
     LazyLock::new(|| Name::from_str("ROOT").expect("ROOT should be a valid name"));
@@ -42,9 +46,9 @@ pub enum Error {
     #[error(transparent)]
     VfsPathError(#[from] VfsPathError),
     #[error(transparent)]
-    DbError(#[from] db::Error),
+    DbError(#[from] crate::db::Error),
     #[error(transparent)]
-    CachedDbError(Arc<db::Error>),
+    CachedDbError(Arc<crate::db::Error>),
     #[error(transparent)]
     CachedError(Arc<Error>),
     #[error(transparent)]
@@ -261,7 +265,8 @@ impl Vfs {
     }
 
     pub async fn inode_by_id(&self, id: InodeId) -> Result<Option<Inode>, Error> {
-        self._inode_by_id::<db::ReadOnly>(id, None, true).await
+        self._inode_by_id::<crate::db::ReadOnly>(id, None, true)
+            .await
     }
 
     async fn _inode_by_id<C: TxScope>(
@@ -271,7 +276,7 @@ impl Vfs {
         use_cache: bool,
     ) -> Result<Option<Inode>, Error>
     where
-        Transaction<C>: db::Read,
+        Transaction<C>: Read,
     {
         if id == ROOT_INODE_ID {
             return Ok(Some(Inode::Root(self.root())));
@@ -410,7 +415,7 @@ impl Vfs {
         model: &Model<FileKind>,
     ) -> Result<FileHandle<ReadOnly>, crate::Error> {
         let data_location = model.data_location().ok_or_else(|| {
-            db::Error::from(DataError::MissingData(
+            crate::db::Error::from(DataError::MissingData(
                 "data_location not set for file".to_ascii_lowercase(),
             ))
         })?;
@@ -527,7 +532,7 @@ impl Vfs {
                     // create dir
                     let (_, name) = path.split();
                     let name = name.ok_or_else(|| {
-                        db::Error::DataError(DataError::MissingData(
+                        crate::db::Error::DataError(DataError::MissingData(
                             "cannot create directory without name".to_string(),
                         ))
                     })?;
@@ -669,20 +674,20 @@ impl AsyncSeek for FileHandle<ReadOnly> {
 
 #[self_referencing]
 pub struct WriteOnly {
-    tx: Transaction<db::ReadWrite>,
+    tx: Transaction<ReadWrite>,
     path: VfsPath,
     vfs: Vfs,
     last_modified: Option<DateTime<Utc>>,
     affected_inode_ids: Vec<InodeId>,
     #[not_covariant]
     #[borrows(mut tx)]
-    writer: wal::file_writer::FileWriter<'this, db::ReadWrite>,
+    writer: wal::file_writer::FileWriter<'this, ReadWrite>,
 }
 
 impl FileHandle<WriteOnly> {
     pub(crate) async fn new(
         chunk_size: u32,
-        tx: Transaction<db::ReadWrite>,
+        tx: Transaction<ReadWrite>,
         path: VfsPath,
         vfs: Vfs,
         last_modified: Option<DateTime<Utc>>,

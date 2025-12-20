@@ -41,7 +41,6 @@ use std::fmt::{Debug, Display, Formatter};
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use strum::EnumString;

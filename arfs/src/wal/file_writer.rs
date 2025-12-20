@@ -167,7 +167,7 @@ where
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         loop {
             match std::mem::replace(&mut self.state, State::Invalid) {
-                State::Buffering(mut inner) => {
+                State::Buffering(inner) => {
                     if inner.buf.is_full() {
                         // time to flush
                         self.state = State::Committing {
@@ -201,7 +201,7 @@ where
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         loop {
             match std::mem::replace(&mut self.state, State::Invalid) {
-                State::Buffering(mut inner) => {
+                State::Buffering(inner) => {
                     if !inner.buf.is_empty() {
                         // flush remaining data
                         self.state = State::Committing {
