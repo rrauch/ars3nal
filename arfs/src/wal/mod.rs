@@ -5,6 +5,7 @@ use crate::vfs::Variant;
 use crate::{ContentType, Inode, InodeId, Timestamp};
 use ario_core::blob::{Blob, OwnedBlob};
 use ario_core::crypto::hash::Blake3Hash;
+use chrono::{DateTime, Utc};
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
@@ -158,9 +159,20 @@ impl WalFileChunks {
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WalFileMetadata {
+    pub name: String,
+    pub size: u64,
+    pub last_modified: DateTime<Utc>,
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default)]
     pub content_type: Option<ContentType>,
     #[serde(flatten)]
     pub extra: HashMap<String, OwnedBlob>,
+}
+
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WalDirMetadata {
+    pub name: String,
+    pub last_modified: DateTime<Utc>,
 }

@@ -11,7 +11,7 @@ use crate::types::{
 use crate::vfs::{
     Directory as VfsDirectory, File as VfsFile, InodeId, Name as VfsName, ROOT_INODE_ID, Stats,
 };
-use crate::wal::{ContentHash, WalFileMetadata};
+use crate::wal::{ContentHash, WalDirMetadata, WalFileMetadata};
 use crate::{FolderId, Inode, Privacy, Scope, State, Status, Timestamp, VfsPath, resolve};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
@@ -879,7 +879,7 @@ where
     pub async fn new_wal_dir(
         &mut self,
         path: &VfsPath,
-        last_modified: &DateTime<Utc>,
+        metadata: &WalDirMetadata,
     ) -> Result<(InodeId, Vec<InodeId>), Error> {
         clear_temp_tables(self).await?;
         let (parent, name) = path.split();
@@ -901,12 +901,17 @@ where
         let name = name.ok_or_else(|| {
             DataError::MissingData("cannot create directory without name".to_string())
         })?;
-        let last_modified = last_modified.timestamp();
+        let last_modified = metadata.last_modified.timestamp();
 
-        let wal_entity_id = sqlx::query!("INSERT INTO wal_entity (entity_type) VALUES ('FO')")
-            .execute(self.conn())
-            .await?
-            .last_insert_rowid();
+        let metadata = Some(serde_sqlite_jsonb::to_vec(metadata).map_err(DataError::JsonbError)?);
+
+        let wal_entity_id = sqlx::query!(
+            "INSERT INTO wal_entity (entity_type, metadata) VALUES ('FO', ?)",
+            metadata
+        )
+        .execute(self.conn())
+        .await?
+        .last_insert_rowid();
 
         let row = VfsRow {
             id: 0,
@@ -924,6 +929,8 @@ where
         let inode_id = InodeId::try_from(insert_vfs_row(&row, self).await?)
             .map_err(|e| DataError::ConversionError(e.to_string()))?;
 
+        self.wal_create(inode_id, &Utc::now()).await?;
+
         let affected_inode_ids = collect_affected_inode_ids(self)
             .await?
             .map(|id| {
@@ -936,11 +943,8 @@ where
         Ok((inode_id, affected_inode_ids))
     }
 
-    pub async fn new_wal_file(&mut self, metadata: Option<&WalFileMetadata>) -> Result<u64, Error> {
-        let metadata = metadata
-            .map(|m| serde_sqlite_jsonb::to_vec(m))
-            .transpose()
-            .map_err(DataError::JsonbError)?;
+    pub async fn new_wal_file(&mut self, metadata: &WalFileMetadata) -> Result<u64, Error> {
+        let metadata = Some(serde_sqlite_jsonb::to_vec(metadata).map_err(DataError::JsonbError)?);
 
         let id = sqlx::query!(
             "INSERT INTO wal_entity (entity_type, metadata) VALUES ('FI', ?)",
@@ -1219,6 +1223,17 @@ where
               AND id NOT IN (SELECT root_folder_id
                  FROM config)
               AND entity_type = 'FO';
+            "
+        )
+        .execute(self.conn())
+        .await?;
+
+        // wal entries that were already deleted are obsolete
+        sqlx::query!(
+            "
+             DELETE FROM wal
+             WHERE perm_type = 'W'
+             AND wal_entity NOT IN (SELECT wal_entity FROM vfs WHERE wal_entity IS NOT NULL);
             "
         )
         .execute(self.conn())

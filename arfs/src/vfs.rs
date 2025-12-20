@@ -2,8 +2,8 @@ use crate::db::{DataError, Db, Read, ReadWrite, Transaction, TxScope, Write};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{Entity, Model};
-use crate::wal::{WalFileMetadata, WalNode};
-use crate::{CacheSettings, ContentType, State, Status, db, wal};
+use crate::wal::{WalDirMetadata, WalFileMetadata, WalNode};
+use crate::{CacheSettings, ContentType, State, db, wal};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
 use ario_core::blob::{Blob, OwnedBlob};
@@ -472,7 +472,9 @@ impl Vfs {
         let mut affected_inode_ids = vec![];
 
         if create_dirs {
-            let (_, affected) = self.ensure_dir_exists(dir, &mut tx).await?;
+            let (_, affected) = self
+                .ensure_dir_exists(dir, last_modified.as_ref(), &mut tx)
+                .await?;
             affected_inode_ids.extend(affected);
         } else {
             match self
@@ -485,8 +487,12 @@ impl Vfs {
             }
         }
 
-        let last_modified = last_modified.unwrap_or_else(|| Utc::now());
-        let (inode_id, affected) = tx.new_wal_dir(&path, &last_modified).await?;
+        let metadata = WalDirMetadata {
+            name: name.to_string(),
+            last_modified: last_modified.unwrap_or_else(|| Utc::now()),
+        };
+
+        let (inode_id, affected) = tx.new_wal_dir(&path, &metadata).await?;
         affected_inode_ids.extend(affected);
         let created_dir = match self
             ._inode_by_id(inode_id, Some(&mut tx), false)
@@ -506,6 +512,7 @@ impl Vfs {
     async fn ensure_dir_exists<C: TxScope>(
         &self,
         dir: &VfsPath,
+        last_modified: Option<&Timestamp>,
         tx: &mut Transaction<C>,
     ) -> Result<(Inode, Vec<InodeId>), crate::Error>
     where
@@ -518,8 +525,21 @@ impl Vfs {
                 Some(Inode::File(_)) => Err(Error::InodeError(InodeError::IncorrectType))?,
                 None => {
                     // create dir
-                    let now = Utc::now();
-                    let (_, affected) = tx.new_wal_dir(&path, &now).await?;
+                    let (_, name) = path.split();
+                    let name = name.ok_or_else(|| {
+                        db::Error::DataError(DataError::MissingData(
+                            "cannot create directory without name".to_string(),
+                        ))
+                    })?;
+
+                    let metadata = WalDirMetadata {
+                        name: name.to_string(),
+                        last_modified: last_modified
+                            .map(|ts| ts.clone())
+                            .unwrap_or_else(|| Utc::now()),
+                    };
+
+                    let (_, affected) = tx.new_wal_dir(&path, &metadata).await?;
                     affected_inode_ids.extend(affected);
                 }
             }
@@ -550,14 +570,11 @@ impl Vfs {
         let mut tx = self.wal_mode().await?;
 
         let metadata = WalFileMetadata {
+            name: name.to_string(),
+            size: 0,
+            last_modified: last_modified.clone().unwrap_or(Utc::now()),
             content_type,
             extra: extra.unwrap_or_default(),
-        };
-
-        let metadata = if metadata.content_type.is_none() && metadata.extra.is_empty() {
-            None
-        } else {
-            Some(metadata)
         };
 
         let mut affected_inode_ids = vec![];
@@ -565,7 +582,9 @@ impl Vfs {
         let dir = match self._inode_by_path(dir, &mut tx, false).await? {
             Some(inode) => inode,
             None if create_dirs => {
-                let (inode, affected) = self.ensure_dir_exists(dir, &mut tx).await?;
+                let (inode, affected) = self
+                    .ensure_dir_exists(dir, last_modified.as_ref(), &mut tx)
+                    .await?;
                 affected_inode_ids.extend(affected);
                 inode
             }
@@ -667,13 +686,13 @@ impl FileHandle<WriteOnly> {
         path: VfsPath,
         vfs: Vfs,
         last_modified: Option<DateTime<Utc>>,
-        metadata: Option<WalFileMetadata>,
+        metadata: WalFileMetadata,
         affected_inode_ids: Vec<InodeId>,
     ) -> Result<Self, crate::Error> {
         let write_only =
             WriteOnly::try_new_async_send(tx, path, vfs, last_modified, affected_inode_ids, |tx| {
                 Box::pin(async move {
-                    wal::file_writer::FileWriter::new(chunk_size, tx, metadata.as_ref()).await
+                    wal::file_writer::FileWriter::new(chunk_size, tx, &metadata).await
                 })
             })
             .await?;

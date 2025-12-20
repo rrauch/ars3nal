@@ -25,7 +25,7 @@ where
     pub async fn new(
         chunk_size: u32,
         tx: &'tx mut Transaction<C>,
-        metadata: Option<&WalFileMetadata>,
+        metadata: &WalFileMetadata,
     ) -> Result<Self, crate::Error> {
         let buf = HeapCircularBuffer::new(chunk_size as usize);
         let file_id = tx.new_wal_file(metadata).await?;
