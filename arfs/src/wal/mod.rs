@@ -1,5 +1,8 @@
-use crate::ContentType;
-use ario_core::JsonValue;
+use crate::db::{Db, Read, Transaction, TxScope, Write};
+use crate::types::file::FileKind;
+use crate::types::folder::FolderKind;
+use crate::vfs::Variant;
+use crate::{ContentType, Inode, InodeId, Timestamp};
 use ario_core::blob::{Blob, OwnedBlob};
 use ario_core::crypto::hash::Blake3Hash;
 use rangemap::RangeMap;
@@ -33,6 +36,87 @@ pub enum Error {
 pub(crate) enum WalNode {
     File(u64, Option<WalFileMetadata>),
     Directory,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, strum::Display)]
+enum Op {
+    Create,
+    Update,
+    Delete,
+}
+
+impl<C: TxScope> Transaction<C>
+where
+    Self: Write,
+{
+    async fn _new_wal_entry(
+        &mut self,
+        inode_id: InodeId,
+        op: Op,
+        timestamp: &Timestamp,
+    ) -> Result<u64, crate::db::Error> {
+        let inode_id = *inode_id as i64;
+        let r = sqlx::query!(
+            "SELECT perm_type, entity, wal_entity FROM vfs WHERE id = ?",
+            inode_id
+        )
+        .fetch_one(self.conn())
+        .await?;
+
+        let op = match op {
+            Op::Create => "C",
+            Op::Update => "U",
+            Op::Delete => "D",
+        };
+
+        let timestamp = timestamp.timestamp();
+        let id = sqlx::query!(
+            "INSERT INTO wal (timestamp, op_type, perm_type, entity, wal_entity) VALUES (?, ?, ?, ?, ?)",
+            timestamp,
+            op,
+            r.perm_type,
+            r.entity,
+            r.wal_entity,
+        ).execute(self.conn()).await?.last_insert_rowid();
+
+        Ok(id as u64)
+    }
+
+    pub async fn wal_create(
+        &mut self,
+        inode_id: InodeId,
+        timestamp: &Timestamp,
+    ) -> Result<(), crate::db::Error> {
+        self._new_wal_entry(inode_id, Op::Create, timestamp).await?;
+        Ok(())
+    }
+
+    pub async fn wal_update(
+        &mut self,
+        inode_id: InodeId,
+        timestamp: &Timestamp,
+    ) -> Result<(), crate::db::Error> {
+        self._new_wal_entry(inode_id, Op::Update, timestamp).await?;
+        Ok(())
+    }
+
+    pub async fn wal_delete(
+        &mut self,
+        inode_id: InodeId,
+        timestamp: &Timestamp,
+    ) -> Result<(), crate::db::Error> {
+        self._new_wal_entry(inode_id, Op::Delete, timestamp).await?;
+        Ok(())
+    }
+
+    pub async fn uncommitted_wal_entry_count(&mut self) -> Result<usize, crate::db::Error> {
+        Ok(
+            sqlx::query!("SELECT COUNT(*) as uncommitted FROM wal WHERE block_height IS NULL")
+                .map(|r| r.uncommitted as usize)
+                .fetch_one(self.conn())
+                .await?,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

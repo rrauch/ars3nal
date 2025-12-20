@@ -1,9 +1,9 @@
-use crate::db::{DataError, Db, Read, Transaction, TxScope, Write};
+use crate::db::{DataError, Db, Read, ReadWrite, Transaction, TxScope, Write};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{Entity, Model};
 use crate::wal::{WalFileMetadata, WalNode};
-use crate::{CacheSettings, ContentType, db, wal};
+use crate::{CacheSettings, ContentType, State, Status, db, wal};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
 use ario_core::blob::{Blob, OwnedBlob};
@@ -124,6 +124,7 @@ struct VfsInner {
     inode_cache: InodeCache,
     dir_cache: DirCache,
     wal_chunk_size: u32,
+    read_only: bool,
 }
 
 #[derive(Debug)]
@@ -166,6 +167,7 @@ impl Vfs {
         db: Db,
         cache_settings: CacheSettings,
         wal_chunk_size: u32,
+        read_only: bool,
     ) -> Result<Self, crate::Error> {
         let path_cache = Cache::builder()
             .name("path_cache")
@@ -197,37 +199,46 @@ impl Vfs {
             inode_cache,
             dir_cache,
             wal_chunk_size,
+            read_only,
         })))
     }
 
-    pub(crate) async fn invalidate_cache(&self, ids: Vec<InodeId>) {
-        let ids = Arc::new(ids);
-        {
-            let ids = ids.clone();
-            let _ = self
-                .0
-                .path_cache
-                .invalidate_entries_if(move |_, v| match v {
-                    Some(id) => ids.contains(id),
-                    None => true, // invalidate all None-entries
+    pub(crate) async fn invalidate_cache(&self, ids: Option<Vec<InodeId>>) {
+        if let Some(ids) = ids {
+            // invalidate specific cached entries
+            let ids = Arc::new(ids);
+            {
+                let ids = ids.clone();
+                let _ = self
+                    .0
+                    .path_cache
+                    .invalidate_entries_if(move |_, v| match v {
+                        Some(id) => ids.contains(id),
+                        None => true, // invalidate all None-entries
+                    });
+            }
+            {
+                let ids = ids.clone();
+                let _ = self
+                    .0
+                    .inode_cache
+                    .invalidate_entries_if(move |k, _| ids.contains(k));
+            }
+            {
+                let ids = ids.clone();
+                let _ = self.0.dir_cache.invalidate_entries_if(move |k, v| {
+                    if ids.contains(k) {
+                        true
+                    } else {
+                        v.iter().find(|inode| ids.contains(&inode.id())).is_some()
+                    }
                 });
-        }
-        {
-            let ids = ids.clone();
-            let _ = self
-                .0
-                .inode_cache
-                .invalidate_entries_if(move |k, _| ids.contains(k));
-        }
-        {
-            let ids = ids.clone();
-            let _ = self.0.dir_cache.invalidate_entries_if(move |k, v| {
-                if ids.contains(k) {
-                    true
-                } else {
-                    v.iter().find(|inode| ids.contains(&inode.id())).is_some()
-                }
-            });
+            }
+        } else {
+            // invalidate all cached entries
+            self.0.inode_cache.invalidate_all();
+            self.0.dir_cache.invalidate_all();
+            self.0.path_cache.invalidate_all();
         }
 
         let _ = self.reload_root().await; //todo: logging
@@ -407,6 +418,21 @@ impl Vfs {
         Ok(FileHandle(ReadOnly(Box::new(reader))))
     }
 
+    async fn wal_mode(&self) -> Result<Transaction<ReadWrite>, crate::Error> {
+        if self.0.read_only {
+            Err(crate::Error::ReadOnlyFileSystem)?
+        }
+        let mut tx = self.0.db.write().await?;
+        match tx.config().await?.state {
+            State::Permanent => {
+                // change to wal mode
+                tx.initiate_wal_mode().await?;
+            }
+            State::Wal => {} // nothing to do
+        }
+        Ok(tx)
+    }
+
     pub async fn find(
         &self,
         prefix: Option<&str>,
@@ -436,7 +462,7 @@ impl Vfs {
         last_modified: Option<DateTime<Utc>>,
         create_dirs: bool,
     ) -> Result<Directory, crate::Error> {
-        let mut tx = self.0.db.write().await?;
+        let mut tx = self.wal_mode().await?;
         let path = dir.join(name);
 
         if self._inode_by_path(&path, &mut tx, false).await?.is_some() {
@@ -473,7 +499,7 @@ impl Vfs {
 
         tx.commit().await?;
 
-        self.invalidate_cache(affected_inode_ids).await;
+        self.invalidate_cache(Some(affected_inode_ids)).await;
         Ok(created_dir)
     }
 
@@ -521,7 +547,7 @@ impl Vfs {
         overwrite_existing: bool,
         create_dirs: bool,
     ) -> Result<FileHandle<WriteOnly>, crate::Error> {
-        let mut tx = self.0.db.write().await?;
+        let mut tx = self.wal_mode().await?;
 
         let metadata = WalFileMetadata {
             content_type,
@@ -581,10 +607,10 @@ impl Vfs {
         inode_ids: impl Iterator<Item = InodeId>,
         recursive_delete: bool,
     ) -> Result<(), crate::Error> {
-        let mut tx = self.0.db.write().await?;
+        let mut tx = self.wal_mode().await?;
         let affected_ids = tx.delete_inodes(inode_ids, recursive_delete).await?;
         tx.commit().await?;
-        self.invalidate_cache(affected_ids).await;
+        self.invalidate_cache(Some(affected_ids)).await;
         Ok(())
     }
 }
@@ -665,12 +691,18 @@ impl FileHandle<WriteOnly> {
         let mut heads = self.0.into_heads();
         let last_modified = heads.last_modified.unwrap_or_else(|| Utc::now());
         let size = ByteSize::b(bytes_written);
-        let (inode_id, affected) = heads
+        let (inode_id, affected, is_new) = heads
             .tx
             .upsert_vfs_file(&heads.path, &last_modified, size, wal_entity_id)
             .await?;
 
         heads.affected_inode_ids.extend(affected);
+
+        if is_new {
+            heads.tx.wal_create(inode_id, &last_modified).await?;
+        } else {
+            heads.tx.wal_update(inode_id, &last_modified).await?;
+        }
 
         let file = match heads.tx.inode_by_id(inode_id).await? {
             Some(Inode::File(file)) => file,
@@ -681,7 +713,10 @@ impl FileHandle<WriteOnly> {
             ))?,
         };
         heads.tx.commit().await?;
-        heads.vfs.invalidate_cache(heads.affected_inode_ids).await;
+        heads
+            .vfs
+            .invalidate_cache(Some(heads.affected_inode_ids))
+            .await;
 
         Ok(file)
     }

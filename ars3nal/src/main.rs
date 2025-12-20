@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail};
-use arfs::{ArFs, DriveId, Scope, SyncLimit};
+use arfs::{AccessMode, ArFs, DriveId, Scope, SyncLimit};
 use ario_client::{ByteSize, Cache, Client};
 use ario_core::network::Network;
 use ario_core::wallet::WalletAddress;
@@ -162,6 +162,21 @@ where
     Network::from_str(&str).map_err(|e| serde::de::Error::custom(e.to_string()))
 }
 
+fn deserialize_access_mode_option<'de, D>(deserializer: D) -> Result<Option<AccessMode>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_access_mode(deserializer).map(Some)
+}
+
+fn deserialize_access_mode<'de, D>(deserializer: D) -> Result<AccessMode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let str = String::deserialize(deserializer)?;
+    AccessMode::from_str(&str).map_err(|e| serde::de::Error::custom(e.to_string()))
+}
+
 fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
 where
     D: Deserializer<'de>,
@@ -236,6 +251,8 @@ struct TomlPermabucketConfig {
     sync_interval_secs: Option<Duration>,
     #[serde(default, deserialize_with = "deserialize_duration_option")]
     sync_min_initial_wait_secs: Option<Duration>,
+    #[serde(default, deserialize_with = "deserialize_access_mode_option")]
+    access_mode: Option<AccessMode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -291,6 +308,7 @@ struct PermabucketConfig {
     drive_id: DriveId,
     owner: WalletAddress,
     data_dir: PathBuf,
+    access_mode: AccessMode,
     maybe_sync_interval: Option<Duration>,
     maybe_sync_min_initial_wait: Option<Duration>,
 }
@@ -328,6 +346,7 @@ impl Config {
                     drive_id: pb.drive_id,
                     owner: pb.owner,
                     data_dir: pb.data_dir.unwrap_or_else(|| data_dir.clone()),
+                    access_mode: pb.access_mode.unwrap_or(AccessMode::ReadOnly),
                     maybe_sync_interval: pb
                         .sync_interval_secs
                         .map(|s| Some(s))
@@ -522,7 +541,10 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .client(client.clone())
             .drive_id(bucket.drive_id)
             .db_dir(&bucket.data_dir)
-            .scope(Scope::public(bucket.owner))
+            .scope(match bucket.access_mode {
+                AccessMode::ReadOnly => Scope::public(bucket.owner),
+                AccessMode::ReadWrite => Scope::public_rw(bucket.owner),
+            })
             .maybe_sync_interval(bucket.maybe_sync_interval)
             .maybe_sync_min_initial(bucket.maybe_sync_min_initial_wait)
             .maybe_proactive_cache_interval(config.proactive_cache_interval)

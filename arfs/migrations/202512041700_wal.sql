@@ -127,11 +127,13 @@ CREATE TABLE config_new
 
     name           TEXT    NOT NULL CHECK (LENGTH(name) > 0 AND LENGTH(name) < 256),
     owner          BLOB    NOT NULL CHECK (TYPEOF(owner) == 'blob' AND LENGTH(owner) == 32),
-    network_id     TEXT    NOT NULL CHECK (LENGTH(network_id) > 0 AND LENGTH(network_id) < 256)
+    network_id     TEXT    NOT NULL CHECK (LENGTH(network_id) > 0 AND LENGTH(network_id) < 256),
+
+    state          TEXT    NOT NULL CHECK (state IN ('P', 'W'))
 );
 
 INSERT INTO config_new
-SELECT drive_id, signature_id, root_folder_id, name, owner, network_id
+SELECT drive_id, signature_id, root_folder_id, name, owner, network_id, 'P'
 FROM config;
 
 DROP TABLE config;
@@ -622,3 +624,35 @@ CREATE TRIGGER vfs_capture_updated_inode_ids
 BEGIN
     INSERT INTO vfs_affected_inodes (id) VALUES (OLD.id);
 END;
+
+CREATE TABLE vfs_snapshot
+(
+    id            INTEGER PRIMARY KEY                     NOT NULL,
+    inode_type    TEXT CHECK (inode_type IN ('FO', 'FI')) NOT NULL,
+    entity        INTEGER                                 NOT NULL,
+    name          TEXT                                    NOT NULL,
+    size          INTEGER                                 NOT NULL CHECK (size >= 0),
+    last_modified TIMESTAMP                               NOT NULL,
+    parent        INTEGER,
+
+    FOREIGN KEY (entity) REFERENCES entity (id)
+);
+
+CREATE TABLE wal
+(
+    id           INTEGER PRIMARY KEY AUTOINCREMENT          NOT NULL,
+    timestamp    TIMESTAMP                                  NOT NULL,
+    op_type      TEXT CHECK (op_type IN ('C', 'U', 'D')) NOT NULL,
+    perm_type    TEXT CHECK (perm_type IN ('P', 'W'))       NOT NULL,
+    entity       INTEGER,
+    wal_entity   INTEGER,
+    block_height INTEGER CHECK (block_height IS NULL OR (block_height > 0 and block_height < 1000000000)),
+
+    FOREIGN KEY (entity) REFERENCES entity (id),
+    FOREIGN KEY (wal_entity) REFERENCES wal_entity (id),
+
+    CHECK (
+        (perm_type = 'P' AND entity IS NOT NULL AND wal_entity IS NULL) OR
+        (perm_type = 'W' AND wal_entity IS NOT NULL AND entity IS NULL)
+        )
+);

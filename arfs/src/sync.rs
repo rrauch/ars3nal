@@ -4,7 +4,7 @@ use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{ArfsEntity, ArfsEntityId};
 use crate::vfs::{InodeError, InodeId};
-use crate::{FolderId, Inode, Private, Public, SyncLimit, Vfs, resolve};
+use crate::{FolderId, Inode, Private, Public, State, SyncLimit, Vfs, resolve};
 use ario_client::Client;
 use ario_client::graphql::BlockRange;
 use ario_core::BlockNumber;
@@ -260,7 +260,7 @@ trait CacheNow {
 }
 
 trait SyncNow {
-    fn sync(&mut self) -> impl Future<Output = Result<Success, crate::Error>> + Send;
+    fn sync(&mut self) -> impl Future<Output = Result<Option<Success>, crate::Error>> + Send;
 }
 
 struct BackgroundTask<PRIVACY> {
@@ -372,6 +372,11 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
                 }
                 _ = tokio::time::sleep(next_sync_in) => {
                     let start_time = Utc::now();
+                    let previous_activity = match &*self.status_tx.borrow() {
+                        Status::Idle {last_activity, ..} => last_activity.as_ref().map(|a| a.clone()),
+                        _ => None
+                    };
+
                     let _ = self.status_tx.send(Status::Syncing {
                         start_time
                     });
@@ -380,7 +385,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
                     self.next_sync = Utc::now() + self.sync_interval;
 
                     let result = match result {
-                        Ok(success) => {
+                        Ok(Some(success)) => {
                             if success.insertions > 0 || success.deletions > 0 || success.updates > 0 {
                                 // vfs modified
                                 if self.proactive_cache_interval.is_some() {
@@ -389,26 +394,35 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
                                 }
                             }
                             tracing::debug!(start_time = %start_time, duration_ms = duration.as_millis(), "sync ok");
-                            SyncResult::OK(success)
+                            Some(SyncResult::OK(success))
                         },
+                        Ok(None) => {
+                            tracing::info!("syncing currently unavailable");
+                            None
+                        }
                         Err(err) => {
                             tracing::error!(error = %err, start_time = %start_time, duration_ms = duration.as_millis(), "sync error");
-                            SyncResult::Error(Some(err.to_string()))
+                            Some(SyncResult::Error(Some(err.to_string())))
                         }
                     };
 
-                    let log_entry = LogEntry {
-                        start_time,
-                        duration,
-                        result,
+                    let last_activity = if let Some(result) = result {
+                        let log_entry = LogEntry {
+                            start_time,
+                            duration,
+                            result,
+                        };
+
+                        if let Err(err) = self.update_log(&log_entry).await {
+                            tracing::error!(error= %err, "update_log failed");
+                        }
+                        Some(Activity::Sync { log_entry })
+                    } else {
+                        previous_activity
                     };
 
-                    if let Err(err) = self.update_log(&log_entry).await {
-                        tracing::error!(error= %err, "update_log failed");
-                    }
-
                     let _ = self.status_tx.send(Status::Idle {
-                        last_activity: Some(Activity::Sync { log_entry }),
+                        last_activity,
                         next_activity: min(self.next_sync, self.next_cache),
                     });
                 }
@@ -452,14 +466,14 @@ impl CacheNow for BackgroundTask<Private> {
 
 impl SyncNow for BackgroundTask<Public> {
     #[tracing::instrument(name = "background_sync_public", skip(self))]
-    async fn sync(&mut self) -> Result<Success, crate::Error> {
+    async fn sync(&mut self) -> Result<Option<Success>, crate::Error> {
         self._sync(&self.privacy.owner, None).await
     }
 }
 
 impl SyncNow for BackgroundTask<Private> {
     #[tracing::instrument(name = "background_sync_private", skip(self))]
-    async fn sync(&mut self) -> Result<Success, crate::Error> {
+    async fn sync(&mut self) -> Result<Option<Success>, crate::Error> {
         Err(Error::UnsupportedMode(
             "private drives are not yet supported".to_string(),
         ))?
@@ -477,7 +491,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         &self,
         owner: &WalletAddress,
         private: Option<&Private>,
-    ) -> Result<Success, crate::Error> {
+    ) -> Result<Option<Success>, crate::Error> {
         tracing::debug!("waiting for sync permit");
         let _permit = self.sync_limit.acquire_permit().await?;
 
@@ -488,6 +502,23 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
             .timeout(Duration::from_secs(60))
             .await
             .map_err(|_| Error::TxAcquisitionTimeout)??;
+
+        let mut invalidate_all_caches = false;
+
+        if tx.config().await?.state == State::Wal {
+            // check if all wal entries have been made permanent
+            let uncommitted_cnt = tx.uncommitted_wal_entry_count().await?;
+            if uncommitted_cnt > 0 {
+                tracing::info!(
+                    uncommitted_cnt,
+                    "cannot sync now due to uncommitted wal entries"
+                );
+                return Ok(None);
+            }
+            tracing::debug!("discarding wal changes prior to syncing");
+            tx.discard_wal_changes().await?;
+            invalidate_all_caches = true;
+        }
 
         tracing::debug!("starting sync");
         let current_drive_config = tx.config().await?;
@@ -596,16 +627,18 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         let (updates, insertions, deletions, affected_inode_ids) = tx.sync_update(stream).await?;
         tx.commit().await?;
 
-        if !affected_inode_ids.is_empty() {
-            self.vfs.invalidate_cache(affected_inode_ids).await;
+        if invalidate_all_caches {
+            self.vfs.invalidate_cache(None).await;
+        } else if !affected_inode_ids.is_empty() {
+            self.vfs.invalidate_cache(Some(affected_inode_ids)).await;
         }
 
-        Ok(Success {
+        Ok(Some(Success {
             updates,
             insertions,
             deletions,
             block: current_block_height,
-        })
+        }))
     }
 
     #[tracing::instrument(skip(self))]

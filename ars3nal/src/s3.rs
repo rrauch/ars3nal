@@ -9,20 +9,21 @@ use s3s::auth::Credentials;
 use s3s::checksum::ChecksumHasher;
 use s3s::crypto::{Checksum, Md5};
 use s3s::dto::{
-    AbortMultipartUploadInput, AbortMultipartUploadOutput, Bucket, BucketName, ChecksumAlgorithm,
-    ChecksumCRC32, ChecksumCRC32C, ChecksumCRC64NVME, ChecksumSHA1, ChecksumSHA256, CommonPrefix,
-    CompleteMultipartUploadInput, CompleteMultipartUploadOutput, ContentMD5, ContentType,
-    CreateMultipartUploadInput, CreateMultipartUploadOutput, DeleteObjectInput, DeleteObjectOutput,
-    DeleteObjectsInput, DeleteObjectsOutput, DeletedObject, DeletedObjects, ETag,
-    GetBucketLocationInput, GetBucketLocationOutput, GetObjectInput, GetObjectOutput,
+    AbortMultipartUploadInput, AbortMultipartUploadOutput, Bucket, BucketName,
+    BucketVersioningStatus, ChecksumAlgorithm, ChecksumCRC32, ChecksumCRC32C, ChecksumCRC64NVME,
+    ChecksumSHA1, ChecksumSHA256, CommonPrefix, CompleteMultipartUploadInput,
+    CompleteMultipartUploadOutput, ContentMD5, ContentType, CreateMultipartUploadInput,
+    CreateMultipartUploadOutput, DeleteObjectInput, DeleteObjectOutput, DeleteObjectsInput,
+    DeleteObjectsOutput, DeletedObject, ETag, GetBucketLocationInput, GetBucketLocationOutput,
+    GetBucketVersioningInput, GetBucketVersioningOutput, GetObjectInput, GetObjectOutput,
     HeadBucketInput, HeadBucketOutput, HeadObjectInput, HeadObjectOutput, KeyCount, LastModified,
-    ListBucketsInput, ListBucketsOutput, ListObjectsInput, ListObjectsOutput, ListObjectsV2Input,
-    ListObjectsV2Output, MaxKeys, Metadata, MultipartUploadId, Object, ObjectKey,
-    ObjectStorageClass, Owner, PartNumber, PutObjectInput, PutObjectOutput, Size, StorageClass,
-    StreamingBlob, UploadPartInput, UploadPartOutput,
+    ListBucketsInput, ListBucketsOutput, ListObjectVersionsInput, ListObjectVersionsOutput,
+    ListObjectsInput, ListObjectsOutput, ListObjectsV2Input, ListObjectsV2Output, MaxKeys,
+    Metadata, MultipartUploadId, Object, ObjectKey, ObjectStorageClass, ObjectVersion,
+    ObjectVersionId, Owner, PartNumber, PutObjectInput, PutObjectOutput, RestoreObjectInput,
+    RestoreObjectOutput, Size, StorageClass, StreamingBlob, UploadPartInput, UploadPartOutput,
 };
 use s3s::{S3, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, TrailingHeaders, s3_error};
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::iter;
@@ -40,6 +41,8 @@ use uuid::Uuid;
 const MAX_UPLOAD_SIZE: u64 = 1024 * 1024 * 1024 * 5; // 5GiB
 const MAX_PART_NUMBER: i32 = 10000;
 const MULTIPART_MAX_INACTIVITY: Duration = Duration::from_secs(60);
+
+const REVERT_CHANGES_OBJECT_KEY: &'static str = "_ArS3nal_Pending_Changes";
 
 #[repr(transparent)]
 pub struct ArS3 {
@@ -314,7 +317,7 @@ impl ArS3 {
         let key = key_str.strip_prefix("/").unwrap_or(key_str);
         let mut etag = None;
         let mut owner = None;
-        let mut size = None;
+        let size;
 
         match inode {
             Inode::File(file) => {
@@ -438,12 +441,13 @@ impl ArS3 {
                 Option<&'input str>,
                 Option<&'input LastModified>,
                 Option<&'input Size>,
+                Option<&'input ObjectVersionId>,
             ),
         >,
     ) -> S3Result<Vec<(InodeId, &'input ObjectKey)>> {
         let mut inode_ids = vec![];
 
-        for (key, etag, last_modified, size) in iter {
+        for (key, etag, last_modified, size, version_id) in iter {
             let (object, inode) = match self.get_object(arfs, &key, None, None).await {
                 Ok(res) => res,
                 Err(err) if err.code() == &S3ErrorCode::NoSuchKey => continue,
@@ -477,6 +481,15 @@ impl ArS3 {
                     } else {
                         Err(S3Error::new(S3ErrorCode::PreconditionFailed))?
                     }
+                }
+            }
+
+            if let Some(_) = version_id {
+                // deleting specific version not supported
+                if SKIP_PRECONDITION_FAILURE {
+                    continue;
+                } else {
+                    Err(S3Error::new(S3ErrorCode::PreconditionFailed))?
                 }
             }
 
@@ -770,8 +783,210 @@ fn update_checksum_values(
     Ok(())
 }
 
+async fn revert_bucket_changes(
+    arfs: &ArFs,
+    key: &ObjectKey,
+    version: &ObjectVersionId,
+    version_is_latest: bool,
+) -> S3Result<()> {
+    if key.as_str() != REVERT_CHANGES_OBJECT_KEY {
+        Err(S3Error::with_message(
+            S3ErrorCode::UnsupportedArgument,
+            "only full bucket restore is supported",
+        ))?
+    }
+
+    let status = arfs.status().await.map_err(S3Error::internal_error)?;
+
+    let ts = if version_is_latest {
+        status
+            .last_wal_modification
+            .ok_or_else(|| S3Error::with_message(S3ErrorCode::NoSuchVersion, "nothing to revert"))?
+            .timestamp()
+            .to_string()
+    } else {
+        status.last_sync.timestamp().to_string()
+    };
+
+    if ts.as_str() != version {
+        Err(S3Error::with_message(
+            S3ErrorCode::NoSuchVersion,
+            "only latest synced version supported",
+        ))?
+    }
+
+    arfs.discard_changes()
+        .await
+        .map_err(S3Error::internal_error)?;
+
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl S3 for ArS3 {
+    async fn abort_multipart_upload(
+        &self,
+        req: S3Request<AbortMultipartUploadInput>,
+    ) -> S3Result<S3Response<AbortMultipartUploadOutput>> {
+        let input = req.input;
+        let bucket = self.bucket(&input.bucket, req.credentials.as_ref())?;
+        bucket
+            .abort_multipart_upload(&input.upload_id, req.credentials.as_ref())
+            .await?;
+        let output = AbortMultipartUploadOutput {
+            request_charged: None,
+        };
+        Ok(S3Response::new(output))
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        req: S3Request<CompleteMultipartUploadInput>,
+    ) -> S3Result<S3Response<CompleteMultipartUploadOutput>> {
+        let input = req.input;
+        let bucket = self.bucket(&input.bucket, req.credentials.as_ref())?;
+        let (file, object_key) = bucket
+            .finalize_multipart_upload(&input.upload_id, req.credentials.as_ref())
+            .await?;
+
+        let inode = Inode::File(file);
+        let object = self.as_object(&bucket.arfs, &inode);
+
+        Ok(S3Response::new(CompleteMultipartUploadOutput {
+            bucket: Some(bucket.name.clone()),
+            key: Some(object_key),
+            e_tag: object.e_tag,
+            ..Default::default()
+        }))
+    }
+
+    async fn create_multipart_upload(
+        &self,
+        req: S3Request<CreateMultipartUploadInput>,
+    ) -> S3Result<S3Response<CreateMultipartUploadOutput>> {
+        let input = req.input;
+        check_storage_class(input.storage_class.as_ref())?;
+        let bucket = self.bucket(&input.bucket, req.credentials.as_ref())?;
+        let fh = begin_write_file(
+            &bucket.arfs,
+            &input.key,
+            input.content_type.as_ref(),
+            input.metadata,
+        )
+        .await?;
+
+        let upload_id =
+            bucket.create_multipart_upload(fh, input.key.clone(), req.credentials.as_ref())?;
+
+        let output = CreateMultipartUploadOutput {
+            bucket: Some(input.bucket),
+            key: Some(input.key),
+            upload_id: Some(upload_id),
+            ..Default::default()
+        };
+
+        Ok(S3Response::new(output))
+    }
+
+    async fn delete_object(
+        &self,
+        req: S3Request<DeleteObjectInput>,
+    ) -> S3Result<S3Response<DeleteObjectOutput>> {
+        let input = req.input;
+        let arfs = &self.bucket(&input.bucket, req.credentials.as_ref())?.arfs;
+
+        if let Some(version) = input.version_id.as_ref()
+            && input.key.as_str() == REVERT_CHANGES_OBJECT_KEY
+        {
+            revert_bucket_changes(arfs, &input.key, version, true).await?;
+            return Ok(S3Response::new(DeleteObjectOutput {
+                version_id: Some(version.clone()),
+                ..Default::default()
+            }));
+        }
+
+        let inode_ids = self
+            .delete_precheck::<false>(
+                arfs,
+                iter::once((
+                    &input.key,
+                    input.if_match.as_ref().map(|ifm| ifm.as_str()),
+                    input.if_match_last_modified_time.as_ref(),
+                    input.if_match_size.as_ref(),
+                    input.version_id.as_ref(),
+                )),
+            )
+            .await?;
+        if !inode_ids.is_empty() {
+            arfs.vfs()
+                .delete(inode_ids.into_iter().map(|(inode_id, _)| inode_id), false)
+                .await
+                .map_err(S3Error::internal_error)?;
+        }
+        let output = DeleteObjectOutput::default();
+        Ok(S3Response::new(output))
+    }
+
+    async fn delete_objects(
+        &self,
+        req: S3Request<DeleteObjectsInput>,
+    ) -> S3Result<S3Response<DeleteObjectsOutput>> {
+        let input = req.input;
+        let arfs = &self.bucket(&input.bucket, req.credentials.as_ref())?.arfs;
+
+        if input.delete.objects.len() == 1
+            && let Some(object) = input.delete.objects.get(0)
+        {
+            if let Some(version) = object.version_id.as_ref()
+                && object.key.as_str() == REVERT_CHANGES_OBJECT_KEY
+            {
+                revert_bucket_changes(arfs, &object.key, version, true).await?;
+                return Ok(S3Response::new(DeleteObjectsOutput {
+                    deleted: Some(vec![DeletedObject {
+                        key: Some(object.key.clone()),
+                        version_id: Some(version.clone()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }));
+            }
+        }
+
+        let (inode_ids, keys): (Vec<InodeId>, Vec<&ObjectKey>) = self
+            .delete_precheck::<true>(
+                arfs,
+                input.delete.objects.iter().map(|o| {
+                    (
+                        &o.key,
+                        o.e_tag.as_ref().map(|etag| etag.value()),
+                        o.last_modified_time.as_ref(),
+                        o.size.as_ref(),
+                        o.version_id.as_ref(),
+                    )
+                }),
+            )
+            .await?
+            .into_iter()
+            .unzip();
+
+        arfs.vfs()
+            .delete(inode_ids.clone().into_iter(), false)
+            .await
+            .map_err(S3Error::internal_error)?;
+        let mut output = DeleteObjectsOutput::default();
+        if !input.delete.objects.is_empty() {
+            output.deleted = Some(
+                keys.into_iter()
+                    .map(|key| DeletedObject {
+                        key: Some(key.clone()),
+                        ..Default::default()
+                    })
+                    .collect(),
+            );
+        }
+        Ok(S3Response::new(output))
+    }
+
     async fn get_bucket_location(
         &self,
         req: S3Request<GetBucketLocationInput>,
@@ -780,6 +995,21 @@ impl S3 for ArS3 {
         let _ = self.bucket(&input.bucket, req.credentials.as_ref())?;
         Ok(S3Response::new(GetBucketLocationOutput {
             location_constraint: None,
+        }))
+    }
+
+    async fn get_bucket_versioning(
+        &self,
+        req: S3Request<GetBucketVersioningInput>,
+    ) -> S3Result<S3Response<GetBucketVersioningOutput>> {
+        let input = req.input;
+        _ = &self.bucket(&input.bucket, req.credentials.as_ref())?.arfs;
+
+        Ok(S3Response::new(GetBucketVersioningOutput {
+            status: Some(BucketVersioningStatus::from_static(
+                BucketVersioningStatus::ENABLED,
+            )),
+            ..Default::default()
         }))
     }
 
@@ -934,6 +1164,58 @@ impl S3 for ArS3 {
         Ok(S3Response::new(output))
     }
 
+    async fn list_object_versions(
+        &self,
+        req: S3Request<ListObjectVersionsInput>,
+    ) -> S3Result<S3Response<ListObjectVersionsOutput>> {
+        let input = req.input;
+        let arfs = &self.bucket(&input.bucket, req.credentials.as_ref())?.arfs;
+
+        if input.prefix.as_ref().map(|p| p.as_str()) != Some(REVERT_CHANGES_OBJECT_KEY) {
+            Err(S3Error::with_message(
+                S3ErrorCode::UnsupportedArgument,
+                "only bucket root is supported",
+            ))?
+        }
+
+        let status = arfs.status().await.map_err(S3Error::internal_error)?;
+
+        let mut versions = Vec::with_capacity(2);
+        versions.push(ObjectVersion {
+            is_latest: Some(status.last_wal_modification.is_none()),
+            key: Some(REVERT_CHANGES_OBJECT_KEY.to_string()),
+            last_modified: Some(SystemTime::from(status.last_sync).into()),
+            owner: input.expected_bucket_owner.as_ref().map(|id| Owner {
+                display_name: None,
+                id: Some(id.clone()),
+            }),
+            version_id: Some(status.last_sync.timestamp().to_string()),
+            ..Default::default()
+        });
+
+        if let Some(modified) = status.last_wal_modification {
+            versions.push(ObjectVersion {
+                is_latest: Some(true),
+                key: Some(REVERT_CHANGES_OBJECT_KEY.to_string()),
+                last_modified: Some(SystemTime::from(modified).into()),
+                owner: input.expected_bucket_owner.map(|id| Owner {
+                    display_name: None,
+                    id: Some(id),
+                }),
+                version_id: Some(modified.timestamp().to_string()),
+                ..Default::default()
+            });
+        }
+
+        Ok(S3Response::new(ListObjectVersionsOutput {
+            is_truncated: Some(false),
+            name: Some(arfs.name().to_string()),
+            prefix: Some(REVERT_CHANGES_OBJECT_KEY.to_string()),
+            versions: Some(versions),
+            ..Default::default()
+        }))
+    }
+
     async fn list_objects(
         &self,
         mut req: S3Request<ListObjectsInput>,
@@ -1075,7 +1357,7 @@ impl S3 for ArS3 {
                 .map_err(|e| S3Error::internal_error(e))?;
 
             let (dir, name) = match path.split() {
-                ((dir), Some(name)) => (dir, name),
+                (dir, Some(name)) => (dir, name),
                 _ => Err(S3Error::with_message(
                     S3ErrorCode::InvalidArgument,
                     "multipart_upload part_number invalid",
@@ -1104,68 +1386,23 @@ impl S3 for ArS3 {
         }
     }
 
-    async fn abort_multipart_upload(
+    async fn restore_object(
         &self,
-        req: S3Request<AbortMultipartUploadInput>,
-    ) -> S3Result<S3Response<AbortMultipartUploadOutput>> {
+        req: S3Request<RestoreObjectInput>,
+    ) -> S3Result<S3Response<RestoreObjectOutput>> {
         let input = req.input;
-        let bucket = self.bucket(&input.bucket, req.credentials.as_ref())?;
-        bucket
-            .abort_multipart_upload(&input.upload_id, req.credentials.as_ref())
-            .await?;
-        let output = AbortMultipartUploadOutput {
-            request_charged: None,
-        };
-        Ok(S3Response::new(output))
-    }
+        let arfs = &self.bucket(&input.bucket, req.credentials.as_ref())?.arfs;
 
-    async fn complete_multipart_upload(
-        &self,
-        req: S3Request<CompleteMultipartUploadInput>,
-    ) -> S3Result<S3Response<CompleteMultipartUploadOutput>> {
-        let input = req.input;
-        let bucket = self.bucket(&input.bucket, req.credentials.as_ref())?;
-        let (file, object_key) = bucket
-            .finalize_multipart_upload(&input.upload_id, req.credentials.as_ref())
-            .await?;
+        let version_id = input.version_id.ok_or_else(|| {
+            S3Error::with_message(S3ErrorCode::InvalidArgument, "version_id is missing")
+        })?;
 
-        let inode = Inode::File(file);
-        let object = self.as_object(&bucket.arfs, &inode);
+        revert_bucket_changes(arfs, &input.key, &version_id, false).await?;
 
-        Ok(S3Response::new(CompleteMultipartUploadOutput {
-            bucket: Some(bucket.name.clone()),
-            key: Some(object_key),
-            e_tag: object.e_tag,
+        Ok(S3Response::new(RestoreObjectOutput {
+            restore_output_path: Some(REVERT_CHANGES_OBJECT_KEY.to_string()),
             ..Default::default()
         }))
-    }
-
-    async fn create_multipart_upload(
-        &self,
-        req: S3Request<CreateMultipartUploadInput>,
-    ) -> S3Result<S3Response<CreateMultipartUploadOutput>> {
-        let input = req.input;
-        check_storage_class(input.storage_class.as_ref())?;
-        let bucket = self.bucket(&input.bucket, req.credentials.as_ref())?;
-        let fh = begin_write_file(
-            &bucket.arfs,
-            &input.key,
-            input.content_type.as_ref(),
-            input.metadata,
-        )
-        .await?;
-
-        let upload_id =
-            bucket.create_multipart_upload(fh, input.key.clone(), req.credentials.as_ref())?;
-
-        let output = CreateMultipartUploadOutput {
-            bucket: Some(input.bucket),
-            key: Some(input.key),
-            upload_id: Some(upload_id),
-            ..Default::default()
-        };
-
-        Ok(S3Response::new(output))
     }
 
     async fn upload_part(
@@ -1212,74 +1449,6 @@ impl S3 for ArS3 {
 
         let output = UploadPartOutput::default();
 
-        Ok(S3Response::new(output))
-    }
-
-    async fn delete_object(
-        &self,
-        req: S3Request<DeleteObjectInput>,
-    ) -> S3Result<S3Response<DeleteObjectOutput>> {
-        let input = req.input;
-        let arfs = &self.bucket(&input.bucket, req.credentials.as_ref())?.arfs;
-        let inode_ids = self
-            .delete_precheck::<false>(
-                arfs,
-                iter::once((
-                    &input.key,
-                    input.if_match.as_ref().map(|ifm| ifm.as_str()),
-                    input.if_match_last_modified_time.as_ref(),
-                    input.if_match_size.as_ref(),
-                )),
-            )
-            .await?;
-        if !inode_ids.is_empty() {
-            arfs.vfs()
-                .delete(inode_ids.into_iter().map(|(inode_id, _)| inode_id), false)
-                .await
-                .map_err(S3Error::internal_error)?;
-        }
-        let output = DeleteObjectOutput::default();
-        Ok(S3Response::new(output))
-    }
-
-    async fn delete_objects(
-        &self,
-        req: S3Request<DeleteObjectsInput>,
-    ) -> S3Result<S3Response<DeleteObjectsOutput>> {
-        let input = req.input;
-        let arfs = &self.bucket(&input.bucket, req.credentials.as_ref())?.arfs;
-
-        let (inode_ids, keys): (Vec<InodeId>, Vec<&ObjectKey>) = self
-            .delete_precheck::<true>(
-                arfs,
-                input.delete.objects.iter().map(|o| {
-                    (
-                        &o.key,
-                        o.e_tag.as_ref().map(|etag| etag.value()),
-                        o.last_modified_time.as_ref(),
-                        o.size.as_ref(),
-                    )
-                }),
-            )
-            .await?
-            .into_iter()
-            .unzip();
-
-        arfs.vfs()
-            .delete(inode_ids.clone().into_iter(), false)
-            .await
-            .map_err(S3Error::internal_error)?;
-        let mut output = DeleteObjectsOutput::default();
-        if !input.delete.objects.is_empty() {
-            output.deleted = Some(
-                keys.into_iter()
-                    .map(|key| DeletedObject {
-                        key: Some(key.clone()),
-                        ..Default::default()
-                    })
-                    .collect(),
-            );
-        }
         Ok(S3Response::new(output))
     }
 }

@@ -16,9 +16,9 @@ pub use vfs::{
     Directory, File, Inode, InodeId, Name, ReadHandle, Timestamp, Vfs, VfsPath, WriteHandle,
 };
 
-use crate::db::Db;
 use crate::db::Error as DbError;
 use crate::db::{Config as DriveConfig, PageSize};
+use crate::db::{Db, Transaction};
 use crate::sync::{SyncResult, Syncer};
 use crate::types::AuthMode;
 use crate::vfs::Error as VfsError;
@@ -41,6 +41,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use strum::EnumString;
@@ -64,6 +65,8 @@ pub enum Error {
     WalError(#[from] WalError),
     #[error(transparent)]
     SyncError(#[from] sync::Error),
+    #[error("read-only file system")]
+    ReadOnlyFileSystem,
 }
 
 #[derive(Error, Debug)]
@@ -209,7 +212,14 @@ impl ArFs {
             proactive_cache_interval,
         };
 
-        let vfs = Vfs::new(client.clone(), db.clone(), cache_settings, wal_chunk_size).await?;
+        let vfs = Vfs::new(
+            client.clone(),
+            db.clone(),
+            cache_settings,
+            wal_chunk_size,
+            scope.read_only(),
+        )
+        .await?;
 
         Ok(Self(Arc::new(
             ErasedArFs::new(client, db, vfs, sync_settings, drive_config, scope).await?,
@@ -311,11 +321,52 @@ impl ArFs {
             ErasedArFs::PrivateRW(inner) => &inner.vfs,
         }
     }
+
+    pub async fn status(&self) -> Result<Status, crate::Error> {
+        let mut tx = self.read().await?;
+        Ok(tx.status().await?)
+    }
+
+    pub async fn discard_changes(&self) -> Result<(), crate::Error> {
+        let mut tx = self.write().await?;
+        if tx.config().await?.state == State::Permanent {
+            // nothing to do
+            return Ok(());
+        }
+        tx.discard_wal_changes().await?;
+        tx.commit().await?;
+        self.vfs().invalidate_cache(None).await;
+        Ok(())
+    }
+
+    #[inline]
+    async fn read(&self) -> Result<Transaction<db::ReadOnly>, Error> {
+        Ok(match self.0.as_ref() {
+            ErasedArFs::PublicRO(inner) => &inner.db,
+            ErasedArFs::PublicRW(inner) => &inner.db,
+            ErasedArFs::PrivateRO(inner) => &inner.db,
+            ErasedArFs::PrivateRW(inner) => &inner.db,
+        }
+        .read()
+        .await?)
+    }
+
+    #[inline]
+    async fn write(&self) -> Result<Transaction<db::ReadWrite>, Error> {
+        match self.0.as_ref() {
+            ErasedArFs::PublicRO(_) => Err(Error::ReadOnlyFileSystem),
+            ErasedArFs::PublicRW(inner) => Ok(inner.db.write().await?),
+            ErasedArFs::PrivateRO(_) => Err(Error::ReadOnlyFileSystem),
+            ErasedArFs::PrivateRW(inner) => Ok(inner.db.write().await?),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, EnumString, strum::Display)]
 pub enum AccessMode {
+    #[strum(serialize = "read_only", serialize = "readonly", serialize = "ro")]
     ReadOnly,
+    #[strum(serialize = "read_write", serialize = "readwrite", serialize = "rw")]
     ReadWrite,
 }
 
@@ -325,9 +376,21 @@ pub enum Visibility {
     Hidden,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, strum::Display)]
+pub enum State {
+    Permanent,
+    Wal,
+}
+
+pub struct Status {
+    pub wal_state: State,
+    pub last_sync: Timestamp,
+    pub last_wal_modification: Option<Timestamp>,
+}
+
 #[derive(Debug)]
 pub enum Scope {
-    Public(Access<WalletAddress, Wallet>),
+    Public(Access<WalletAddress, WalletAddress>), // todo: change to <WalletAddress, Wallet>
     Private(Access<Credentials, Credentials>),
 }
 
@@ -336,8 +399,8 @@ impl Scope {
         Scope::Public(Access::ReadOnly(owner))
     }
 
-    pub fn public_rw(wallet: Wallet) -> Self {
-        Scope::Public(Access::ReadWrite(wallet))
+    pub fn public_rw(owner: WalletAddress) -> Self {
+        Scope::Public(Access::ReadWrite(owner))
     }
 
     pub fn private(credentials: Credentials) -> Self {
@@ -352,7 +415,8 @@ impl Scope {
         match self {
             Self::Public(public) => match public {
                 Access::ReadOnly(owner) => owner.into(),
-                Access::ReadWrite(wallet) => wallet.address().into(),
+                //todo: Access::ReadWrite(wallet) => wallet.address().into(),
+                Access::ReadWrite(owner) => owner.into(),
             },
             Self::Private(private) => match private {
                 Access::ReadOnly(creds) | Access::ReadWrite(creds) => {
@@ -375,6 +439,13 @@ impl Scope {
             Self::Private(private) => match private {
                 Access::ReadOnly(creds) | Access::ReadWrite(creds) => Some(&creds.0),
             },
+        }
+    }
+
+    fn read_only(&self) -> bool {
+        match self {
+            Self::Public(Access::ReadOnly(_)) | Self::Private(Access::ReadOnly(_)) => true,
+            _ => false,
         }
     }
 }
@@ -401,7 +472,7 @@ impl Credentials {
 
 #[derive(Debug, Display)]
 enum ErasedArFs {
-    PublicRW(ArFsInner<Public, ReadWrite<Wallet>>),
+    PublicRW(ArFsInner<Public, ReadWrite<WalletAddress>>), //todo: change to ReadWrite<Wallet>
     PublicRO(ArFsInner<Public, ReadOnly>),
     PrivateRW(ArFsInner<Private, ReadWrite>),
     PrivateRO(ArFsInner<Private, ReadOnly>),
@@ -422,8 +493,8 @@ impl ErasedArFs {
                     ArFsInner::new_public_ro(client, db, vfs, sync_settings, drive_config, owner)
                         .await?,
                 ),
-                Access::ReadWrite(wallet) => Self::PublicRW(
-                    ArFsInner::new_public_rw(client, db, vfs, sync_settings, drive_config, wallet)
+                Access::ReadWrite(owner) => Self::PublicRW(
+                    ArFsInner::new_public_rw(client, db, vfs, sync_settings, drive_config, owner)
                         .await?,
                 ),
             },
@@ -474,17 +545,17 @@ impl ArFsInner<Public, ReadOnly> {
     }
 }
 
-impl ArFsInner<Public, ReadWrite<Wallet>> {
+impl ArFsInner<Public, ReadWrite<WalletAddress>> {
     async fn new_public_rw(
         client: Client,
         db: Db,
         vfs: Vfs,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
-        wallet: Wallet,
+        owner: WalletAddress, // todo: change to wallet: Wallet,
     ) -> Result<Self, Error> {
         let privacy = Arc::new(Public {
-            owner: wallet.address(),
+            owner: owner.clone(), // todo: change to wallet.address(),
         });
         let syncer = Syncer::new(
             client.clone(),
@@ -504,7 +575,7 @@ impl ArFsInner<Public, ReadWrite<Wallet>> {
             syncer,
             drive_config,
             privacy,
-            mode: ReadWrite(wallet),
+            mode: ReadWrite(owner),
         })
     }
 }

@@ -12,7 +12,7 @@ use crate::vfs::{
     Directory as VfsDirectory, File as VfsFile, InodeId, Name as VfsName, ROOT_INODE_ID, Stats,
 };
 use crate::wal::{ContentHash, WalFileMetadata};
-use crate::{FolderId, Inode, Privacy, Scope, Timestamp, VfsPath, resolve};
+use crate::{FolderId, Inode, Privacy, Scope, State, Status, Timestamp, VfsPath, resolve};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
 use ario_core::BlockNumber;
@@ -75,6 +75,10 @@ pub enum DbStateError {
     },
     #[error("invalid page size: '{0}'")]
     InvalidPageSize(String),
+    #[error("database not in 'permanent' state")]
+    NotInPermanentState,
+    #[error("database not in 'wal' state")]
+    NotInWalState,
 }
 
 #[derive(Error, Debug)]
@@ -311,6 +315,32 @@ where
 
     pub async fn config(&mut self) -> Result<Config, Error> {
         get_config(self).await?.ok_or(DbStateError::NoConfig.into())
+    }
+
+    pub async fn status(&mut self) -> Result<Status, Error> {
+        let wal_state = self.config().await?.state;
+
+        let last_sync = sqlx::query!(
+            "SELECT MAX(start_time) AS \"max_start_time: i64\" FROM sync_log WHERE result = 'S'"
+        )
+        .map(|r| r.max_start_time.map(|ts| DateTime::from_timestamp(ts, 0)))
+        .fetch_one(self.conn())
+        .await?
+        .flatten()
+        .ok_or_else(|| DataError::MissingData("sync_log start_time missing".to_string()))?;
+
+        let last_wal_modification =
+            sqlx::query!("SELECT MAX(timestamp) as \"last_mod: i64\" FROM wal")
+                .map(|r| r.last_mod.map(|ts| DateTime::from_timestamp(ts, 0)))
+                .fetch_one(self.conn())
+                .await?
+                .flatten();
+
+        Ok(Status {
+            wal_state,
+            last_sync,
+            last_wal_modification,
+        })
     }
 
     pub async fn entity_ids(
@@ -920,9 +950,11 @@ where
         last_modified: &DateTime<Utc>,
         size: ByteSize,
         wal_entity_id: u64,
-    ) -> Result<(InodeId, Vec<InodeId>), Error> {
+    ) -> Result<(InodeId, Vec<InodeId>, bool), Error> {
         clear_temp_tables(self).await?;
-        let inode_id = if let Some(inode_id) = self.inode_id_by_path(path.as_ref()).await? {
+        let ((inode_id, is_new)) = if let Some(inode_id) =
+            self.inode_id_by_path(path.as_ref()).await?
+        {
             // existing vfs entry
             let vfs_row = get_vfs_row(*inode_id.deref() as i64, self)
                 .await?
@@ -962,7 +994,7 @@ where
             .execute(self.conn())
             .await?;
             self.delete_orphaned_entities().await?;
-            Ok::<_, Error>(inode_id)
+            Ok::<_, Error>((inode_id, false))
         } else {
             // new vfs entry
             let (parent, name) = path.split();
@@ -994,8 +1026,11 @@ where
                 path: None,
             };
 
-            Ok(InodeId::try_from(insert_vfs_row(&row, self).await?)
-                .map_err(|e| DataError::ConversionError(e.to_string()))?)
+            Ok((
+                InodeId::try_from(insert_vfs_row(&row, self).await?)
+                    .map_err(|e| DataError::ConversionError(e.to_string()))?,
+                true,
+            ))
         }?;
 
         let affected_inode_ids = collect_affected_inode_ids(self)
@@ -1007,7 +1042,7 @@ where
             .collect::<Result<Vec<_>, Error>>()?;
         clear_temp_tables(self).await?;
 
-        Ok((inode_id, affected_inode_ids))
+        Ok((inode_id, affected_inode_ids, is_new))
     }
 
     pub async fn insert_wal_content(
@@ -1058,6 +1093,8 @@ where
     ) -> Result<Vec<InodeId>, Error> {
         clear_temp_tables(self).await?;
         for inode_id in inode_ids {
+            let now = Utc::now();
+            self.wal_delete(inode_id, &now).await?;
             self.delete_inode(inode_id, recursive_delete).await?;
         }
         self.delete_orphaned_entities().await?;
@@ -1154,6 +1191,8 @@ where
               WHERE id NOT IN (SELECT entity
                  FROM vfs
                  WHERE entity IS NOT NULL)
+              AND id NOT IN (SELECT entity FROM vfs_snapshot)
+              AND id NOT IN (SELECT entity FROM wal)
               AND entity_type = 'FI';
             "
         )
@@ -1166,6 +1205,8 @@ where
               WHERE id NOT IN (SELECT entity
                  FROM vfs
                  WHERE entity IS NOT NULL)
+              AND id NOT IN (SELECT entity FROM vfs_snapshot)
+              AND id NOT IN (SELECT entity FROM wal)
               AND id NOT IN (SELECT root_folder_id
                  FROM config)
               AND entity_type = 'FO';
@@ -1181,12 +1222,78 @@ where
                 SELECT wal_entity
                   FROM vfs
                   WHERE wal_entity IS NOT NULL
-              );
+              )
+              AND id NOT IN (SELECT wal_entity FROM wal);
             "
         )
         .execute(self.conn())
         .await?;
 
+        Ok(())
+    }
+
+    pub async fn initiate_wal_mode(&mut self) -> Result<(), Error> {
+        let can_snapshot = sqlx::query!(
+            "SELECT (NOT EXISTS(SELECT 1 FROM vfs_snapshot)
+        AND NOT EXISTS(SELECT 1 FROM vfs WHERE perm_type != 'P')) as can_snapshot",
+        )
+        .map(|r| r.can_snapshot != 0)
+        .fetch_one(self.conn())
+        .await?;
+
+        if !can_snapshot {
+            Err(Error::DbStateError(DbStateError::NotInPermanentState))?
+        }
+
+        // create new vfs snapshot
+        sqlx::query(
+            "INSERT INTO vfs_snapshot (id, inode_type, entity, name, size, last_modified, parent)
+     SELECT id, inode_type, entity, name, size, last_modified, parent
+     FROM vfs",
+        )
+        .execute(self.conn())
+        .await?;
+
+        sqlx::query!("UPDATE config SET state = 'W'")
+            .execute(self.conn())
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn discard_wal_changes(&mut self) -> Result<(), Error> {
+        if self.config().await?.state != State::Wal {
+            Err(Error::DbStateError(DbStateError::NotInWalState))?
+        }
+
+        sqlx::query!("DELETE FROM vfs;")
+            .execute(self.conn())
+            .await?;
+
+        sqlx::query!(
+            "
+            INSERT INTO vfs (id, inode_type, perm_type, entity, name, size, last_modified, parent)
+SELECT id, inode_type, 'P', entity, name, size, last_modified, parent
+FROM vfs_snapshot;
+            "
+        )
+        .execute(self.conn())
+        .await?;
+
+        sqlx::query!("DELETE FROM vfs_snapshot;")
+            .execute(self.conn())
+            .await?;
+
+        sqlx::query!("DELETE FROM wal;")
+            .execute(self.conn())
+            .await?;
+
+        sqlx::query!("UPDATE config SET state = 'P';")
+            .execute(self.conn())
+            .await?;
+
+        self.delete_orphaned_entities().await?;
+        clear_temp_tables(self).await?;
         Ok(())
     }
 }
@@ -1231,6 +1338,7 @@ async fn bootstrap(
         None,
         owner.into_owned(),
         client.network().id().clone(),
+        State::Permanent,
     );
     insert_config(&config, None, &mut tx).await?;
     tx.commit().await?;
@@ -1265,14 +1373,20 @@ async fn insert_config<C: Write>(
     .await?
     .id;
 
+    let state = match config.state {
+        State::Permanent => "P",
+        State::Wal => "W",
+    };
+
     sqlx::query!(
-        "INSERT INTO config (drive_id, root_folder_id, signature_id, name, owner, network_id) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO config (drive_id, root_folder_id, signature_id, name, owner, network_id, state) VALUES (?, ?, ?, ?, ?, ?, ?)",
         drive_id,
         root_folder_id,
         signature_id,
         name,
         owner,
         network_id,
+        state,
     )
         .execute(conn.conn())
         .await?;
@@ -1450,6 +1564,7 @@ struct ConfigRow {
     name: String,
     owner: Vec<u8>,
     network_id: String,
+    state: String,
 }
 
 struct VfsRow<'a> {
@@ -1791,7 +1906,7 @@ async fn insert_entity<E: DbEntity, C: Write>(
 async fn get_config<C: Read>(tx: &mut C) -> Result<Option<Config>, Error> {
     let config_row: ConfigRow = match sqlx::query_as!(
         ConfigRow,
-        "SELECT drive_id, root_folder_id, signature_id, name, owner, network_id FROM config"
+        "SELECT drive_id, root_folder_id, signature_id, name, owner, network_id, state FROM config"
     )
     .fetch_optional(tx.conn())
     .await?
@@ -1866,6 +1981,7 @@ pub struct Config {
     pub signature: Option<DriveSignatureEntity>,
     pub owner: WalletAddress,
     pub network_id: NetworkIdentifier,
+    pub state: State,
 }
 
 impl Config {
@@ -1880,12 +1996,19 @@ impl Config {
         let network_id = NetworkIdentifier::try_from(config_row.network_id)
             .map_err(|e| DataError::ConversionError(e.to_string()))?;
 
+        let state = match config_row.state.as_str() {
+            "P" => State::Permanent,
+            "W" => State::Wal,
+            other => Err(DataError::InvalidPermType(other.to_string()))?,
+        };
+
         Ok(Self {
             drive,
             root_folder,
             signature,
             owner,
             network_id,
+            state,
         })
     }
 }
@@ -1897,6 +2020,7 @@ impl Config {
         signature: Option<DriveSignatureEntity>,
         owner: WalletAddress,
         network_id: NetworkIdentifier,
+        state: State,
     ) -> Self {
         Self {
             drive,
@@ -1904,6 +2028,7 @@ impl Config {
             signature,
             owner,
             network_id,
+            state,
         }
     }
 }
