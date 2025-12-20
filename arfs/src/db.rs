@@ -320,14 +320,11 @@ where
     pub async fn status(&mut self) -> Result<Status, Error> {
         let wal_state = self.config().await?.state;
 
-        let last_sync = sqlx::query!(
-            "SELECT MAX(start_time) AS \"max_start_time: i64\" FROM sync_log WHERE result = 'S'"
-        )
-        .map(|r| r.max_start_time.map(|ts| DateTime::from_timestamp(ts, 0)))
-        .fetch_one(self.conn())
-        .await?
-        .flatten()
-        .ok_or_else(|| DataError::MissingData("sync_log start_time missing".to_string()))?;
+        let last_sync = sqlx::query!("SELECT last_sync AS \"last_sync: i64\" FROM config")
+            .map(|r| DateTime::from_timestamp(r.last_sync, 0))
+            .fetch_one(self.conn())
+            .await?
+            .ok_or_else(|| DataError::MissingData("config last_sync missing".to_string()))?;
 
         let last_wal_modification =
             sqlx::query!("SELECT MAX(timestamp) as \"last_mod: i64\" FROM wal")
@@ -661,7 +658,19 @@ where
     Self: Write,
 {
     pub async fn sync_log_entry(&mut self, log_entry: &SyncLogEntry) -> Result<(), Error> {
-        insert_sync_log_entry(log_entry, self).await
+        insert_sync_log_entry(log_entry, self).await?;
+        if let SyncResult::OK(success) = &log_entry.result {
+            let block_height = *success.block as i64;
+            let last_sync = (log_entry.start_time + log_entry.duration).timestamp();
+            sqlx::query!(
+                "UPDATE config SET last_sync = ?, block_height = ?",
+                last_sync,
+                block_height
+            )
+            .execute(self.conn())
+            .await;
+        }
+        Ok(())
     }
 
     pub async fn sync_update(
@@ -1378,8 +1387,10 @@ async fn insert_config<C: Write>(
         State::Wal => "W",
     };
 
+    let last_sync = Utc::now().timestamp();
+
     sqlx::query!(
-        "INSERT INTO config (drive_id, root_folder_id, signature_id, name, owner, network_id, state) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO config (drive_id, root_folder_id, signature_id, name, owner, network_id, state, last_sync, block_height) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
         drive_id,
         root_folder_id,
         signature_id,
@@ -1387,6 +1398,7 @@ async fn insert_config<C: Write>(
         owner,
         network_id,
         state,
+        last_sync,
     )
         .execute(conn.conn())
         .await?;

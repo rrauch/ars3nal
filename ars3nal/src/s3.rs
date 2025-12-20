@@ -42,7 +42,7 @@ const MAX_UPLOAD_SIZE: u64 = 1024 * 1024 * 1024 * 5; // 5GiB
 const MAX_PART_NUMBER: i32 = 10000;
 const MULTIPART_MAX_INACTIVITY: Duration = Duration::from_secs(60);
 
-const REVERT_CHANGES_OBJECT_KEY: &'static str = "_ArS3nal_Pending_Changes";
+const REVERT_CHANGES_OBJECT_KEY: &'static str = "__ARS3NAL_PENDING_CHANGES";
 
 #[repr(transparent)]
 pub struct ArS3 {

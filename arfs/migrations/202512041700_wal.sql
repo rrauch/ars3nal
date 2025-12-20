@@ -121,19 +121,29 @@ WHERE EXISTS (SELECT 1
 
 CREATE TABLE config_new
 (
-    drive_id       INTEGER NOT NULL REFERENCES entity (id),
+    drive_id       INTEGER   NOT NULL REFERENCES entity (id),
     signature_id   INTEGER REFERENCES entity (id),
-    root_folder_id INTEGER NOT NULL REFERENCES entity (id),
+    root_folder_id INTEGER   NOT NULL REFERENCES entity (id),
 
-    name           TEXT    NOT NULL CHECK (LENGTH(name) > 0 AND LENGTH(name) < 256),
-    owner          BLOB    NOT NULL CHECK (TYPEOF(owner) == 'blob' AND LENGTH(owner) == 32),
-    network_id     TEXT    NOT NULL CHECK (LENGTH(network_id) > 0 AND LENGTH(network_id) < 256),
+    name           TEXT      NOT NULL CHECK (LENGTH(name) > 0 AND LENGTH(name) < 256),
+    owner          BLOB      NOT NULL CHECK (TYPEOF(owner) == 'blob' AND LENGTH(owner) == 32),
+    network_id     TEXT      NOT NULL CHECK (LENGTH(network_id) > 0 AND LENGTH(network_id) < 256),
 
-    state          TEXT    NOT NULL CHECK (state IN ('P', 'W'))
+    state          TEXT      NOT NULL CHECK (state IN ('P', 'W')),
+    last_sync      TIMESTAMP NOT NULL CHECK (last_sync >= 1577836800 AND last_sync < 4733510400),
+    block_height   INTEGER   NOT NULL CHECK (block_height >= 0 and block_height < 1000000000)
 );
 
 INSERT INTO config_new
-SELECT drive_id, signature_id, root_folder_id, name, owner, network_id, 'P'
+SELECT drive_id,
+       signature_id,
+       root_folder_id,
+       name,
+       owner,
+       network_id,
+       'P',
+       COALESCE((SELECT MAX(start_time) FROM sync_log WHERE result = 'S'), unixepoch()),
+       COALESCE((SELECT MAX(block_height) FROM sync_log WHERE result = 'S'), 0)
 FROM config;
 
 DROP TABLE config;
@@ -640,10 +650,10 @@ CREATE TABLE vfs_snapshot
 
 CREATE TABLE wal
 (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT          NOT NULL,
-    timestamp    TIMESTAMP                                  NOT NULL,
+    id           INTEGER PRIMARY KEY AUTOINCREMENT       NOT NULL,
+    timestamp    TIMESTAMP                               NOT NULL,
     op_type      TEXT CHECK (op_type IN ('C', 'U', 'D')) NOT NULL,
-    perm_type    TEXT CHECK (perm_type IN ('P', 'W'))       NOT NULL,
+    perm_type    TEXT CHECK (perm_type IN ('P', 'W'))    NOT NULL,
     entity       INTEGER,
     wal_entity   INTEGER,
     block_height INTEGER CHECK (block_height IS NULL OR (block_height > 0 and block_height < 1000000000)),
