@@ -1,5 +1,5 @@
 use anyhow::bail;
-use arfs::{ArFs, File, Inode, InodeId, VfsPath, WriteHandle};
+use arfs::{ArFs, Error, File, Inode, InodeId, VfsError, VfsPath, WriteHandle};
 use ario_core::base64::{FromBase64, ToBase64};
 use ario_core::crypto::hash::Blake3;
 use ct_codecs::{Base64, Decoder};
@@ -182,9 +182,7 @@ impl ArBucket {
             S3Error::with_message(S3ErrorCode::InternalError, "write handle gone")
         })?;
         Ok((
-            fh.finalize()
-                .await
-                .map_err(|e| S3Error::internal_error(e))?,
+            fh.finalize().await.map_err(to_s3_error)?,
             handle.object_key.clone(),
         ))
     }
@@ -402,13 +400,13 @@ impl ArS3 {
         known_last_modified: Option<&LastModified>,
     ) -> Result<(Object, Inode), S3Error> {
         let path = VfsPath::try_from(format!("/{}", key.as_str()).as_str())
-            .map_err(|e| S3Error::internal_error(e))?;
+            .map_err(|e| to_s3_error(VfsError::from(e)))?;
 
         let inode = arfs
             .vfs()
             .inode_by_path(&path)
             .await
-            .map_err(|e| S3Error::internal_error(e))?
+            .map_err(to_s3_error)?
             .ok_or_else(|| S3Error::new(S3ErrorCode::NoSuchKey))?;
 
         let object = self.as_object(arfs, &inode);
@@ -530,9 +528,7 @@ impl ArS3 {
         {
             md5_hasher.update(bytes.as_ref());
             checksum_hasher.update(bytes.as_ref());
-            fh.write_all(bytes.as_ref())
-                .await
-                .map_err(|e| S3Error::internal_error(e))?;
+            fh.write_all(bytes.as_ref()).await.map_err(to_s3_error)?;
             actual_content_len += bytes.len() as u64;
 
             if actual_content_len > MAX_UPLOAD_SIZE {
@@ -598,11 +594,7 @@ impl ArS3 {
         )
         .await?;
 
-        let inode = Inode::File(
-            fh.finalize()
-                .await
-                .map_err(|e| S3Error::internal_error(e))?,
-        );
+        let inode = Inode::File(fh.finalize().await.map_err(to_s3_error)?);
 
         let object = self.as_object(arfs, &inode);
 
@@ -621,7 +613,7 @@ async fn begin_write_file(
     metadata: Option<Metadata>,
 ) -> Result<WriteHandle, S3Error> {
     let path = VfsPath::try_from(format!("/{}", key.as_str()).as_str())
-        .map_err(|e| S3Error::internal_error(e))?;
+        .map_err(|e| to_s3_error(VfsError::from(e)))?;
 
     let (dir, name) = match path.split() {
         (dir, Some(name)) => (dir, name),
@@ -643,7 +635,7 @@ async fn begin_write_file(
         .vfs()
         .create_file(&dir, &name, None, content_type, metadata, true, true)
         .await
-        .map_err(|e| S3Error::internal_error(e))?)
+        .map_err(to_s3_error)?)
 }
 
 fn fmt_content_range(start: u64, end_inclusive: u64, size: u64) -> String {
@@ -796,7 +788,7 @@ async fn revert_bucket_changes(
         ))?
     }
 
-    let status = arfs.status().await.map_err(S3Error::internal_error)?;
+    let status = arfs.status().await.map_err(to_s3_error)?;
 
     let ts = if version_is_latest {
         status
@@ -815,15 +807,14 @@ async fn revert_bucket_changes(
         ))?
     }
 
-    arfs.discard_changes()
-        .await
-        .map_err(S3Error::internal_error)?;
+    arfs.discard_changes().await.map_err(to_s3_error)?;
 
     Ok(())
 }
 
 #[async_trait::async_trait]
 impl S3 for ArS3 {
+    #[tracing::instrument(skip_all)]
     async fn abort_multipart_upload(
         &self,
         req: S3Request<AbortMultipartUploadInput>,
@@ -839,6 +830,7 @@ impl S3 for ArS3 {
         Ok(S3Response::new(output))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn complete_multipart_upload(
         &self,
         req: S3Request<CompleteMultipartUploadInput>,
@@ -860,6 +852,7 @@ impl S3 for ArS3 {
         }))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn create_multipart_upload(
         &self,
         req: S3Request<CreateMultipartUploadInput>,
@@ -888,6 +881,7 @@ impl S3 for ArS3 {
         Ok(S3Response::new(output))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn delete_object(
         &self,
         req: S3Request<DeleteObjectInput>,
@@ -921,12 +915,13 @@ impl S3 for ArS3 {
             arfs.vfs()
                 .delete(inode_ids.into_iter().map(|(inode_id, _)| inode_id), false)
                 .await
-                .map_err(S3Error::internal_error)?;
+                .map_err(to_s3_error)?;
         }
         let output = DeleteObjectOutput::default();
         Ok(S3Response::new(output))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn delete_objects(
         &self,
         req: S3Request<DeleteObjectsInput>,
@@ -972,7 +967,7 @@ impl S3 for ArS3 {
         arfs.vfs()
             .delete(inode_ids.clone().into_iter(), false)
             .await
-            .map_err(S3Error::internal_error)?;
+            .map_err(to_s3_error)?;
         let mut output = DeleteObjectsOutput::default();
         if !input.delete.objects.is_empty() {
             output.deleted = Some(
@@ -987,6 +982,7 @@ impl S3 for ArS3 {
         Ok(S3Response::new(output))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_bucket_location(
         &self,
         req: S3Request<GetBucketLocationInput>,
@@ -998,6 +994,7 @@ impl S3 for ArS3 {
         }))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_bucket_versioning(
         &self,
         req: S3Request<GetBucketVersioningInput>,
@@ -1013,6 +1010,7 @@ impl S3 for ArS3 {
         }))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_object(
         &self,
         req: S3Request<GetObjectInput>,
@@ -1052,15 +1050,12 @@ impl S3 for ArS3 {
                     }
                 };
 
-                let mut reader = arfs.vfs().read_file(&file).await.map_err(|e| {
-                    tracing::error!(error = %e);
-                    S3Error::internal_error(e)
-                })?;
+                let mut reader = arfs.vfs().read_file(&file).await.map_err(to_s3_error)?;
 
                 reader
                     .seek(SeekFrom::Start(seek_pos))
                     .await
-                    .map_err(|e| S3Error::internal_error(e))?;
+                    .map_err(to_s3_error)?;
 
                 let reader = reader.take(content_length);
 
@@ -1092,6 +1087,7 @@ impl S3 for ArS3 {
         Ok(S3Response::new(output))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn head_bucket(
         &self,
         req: S3Request<HeadBucketInput>,
@@ -1102,6 +1098,7 @@ impl S3 for ArS3 {
         Ok(S3Response::new(HeadBucketOutput::default()))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn head_object(
         &self,
         req: S3Request<HeadObjectInput>,
@@ -1142,6 +1139,7 @@ impl S3 for ArS3 {
         Ok(S3Response::new(output))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn list_buckets(
         &self,
         _req: S3Request<ListBucketsInput>,
@@ -1164,6 +1162,7 @@ impl S3 for ArS3 {
         Ok(S3Response::new(output))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn list_object_versions(
         &self,
         req: S3Request<ListObjectVersionsInput>,
@@ -1178,7 +1177,7 @@ impl S3 for ArS3 {
             ))?
         }
 
-        let status = arfs.status().await.map_err(S3Error::internal_error)?;
+        let status = arfs.status().await.map_err(to_s3_error)?;
 
         let mut versions = Vec::with_capacity(2);
         versions.push(ObjectVersion {
@@ -1216,6 +1215,7 @@ impl S3 for ArS3 {
         }))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn list_objects(
         &self,
         mut req: S3Request<ListObjectsInput>,
@@ -1241,6 +1241,7 @@ impl S3 for ArS3 {
         }))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn list_objects_v2(
         &self,
         req: S3Request<ListObjectsV2Input>,
@@ -1272,7 +1273,7 @@ impl S3 for ArS3 {
                 max_keys,
             )
             .await
-            .map_err(|e| S3Error::internal_error(e))?;
+            .map_err(to_s3_error)?;
 
         let (contents, common_prefixes): (Vec<_>, Vec<_>) =
             inodes.into_iter().partition_map(|inode| match inode {
@@ -1329,6 +1330,7 @@ impl S3 for ArS3 {
         Ok(S3Response::new(output))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn put_object(
         &self,
         req: S3Request<PutObjectInput>,
@@ -1354,7 +1356,7 @@ impl S3 for ArS3 {
                 ));
             }
             let path = VfsPath::try_from(format!("/{}", input.key.as_str()).as_str())
-                .map_err(|e| S3Error::internal_error(e))?;
+                .map_err(|e| to_s3_error(VfsError::from(e)))?;
 
             let (dir, name) = match path.split() {
                 (dir, Some(name)) => (dir, name),
@@ -1368,7 +1370,7 @@ impl S3 for ArS3 {
                 arfs.vfs()
                     .create_dir(&dir, &name, None, true)
                     .await
-                    .map_err(S3Error::internal_error)?,
+                    .map_err(to_s3_error)?,
             );
 
             let object = self.as_object(arfs, &inode);
@@ -1386,6 +1388,7 @@ impl S3 for ArS3 {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     async fn restore_object(
         &self,
         req: S3Request<RestoreObjectInput>,
@@ -1405,6 +1408,7 @@ impl S3 for ArS3 {
         }))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn upload_part(
         &self,
         req: S3Request<UploadPartInput>,
@@ -1450,5 +1454,17 @@ impl S3 for ArS3 {
         let output = UploadPartOutput::default();
 
         Ok(S3Response::new(output))
+    }
+}
+
+fn to_s3_error<E: Into<arfs::Error>>(err: E) -> S3Error {
+    let err = err.into();
+    tracing::error!(error = %err);
+    match err {
+        Error::ReadOnlyFileSystem => S3Error::with_message(
+            S3ErrorCode::InvalidBucketState,
+            "Bucket is read-only, write operations unsupported",
+        ),
+        _ => S3Error::with_message(S3ErrorCode::InternalError, err.to_string()),
     }
 }

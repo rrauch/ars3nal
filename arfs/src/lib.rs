@@ -8,6 +8,10 @@ pub(crate) mod types;
 mod vfs;
 mod wal;
 
+pub use crate::db::Error as DbError;
+pub use crate::vfs::Error as VfsError;
+pub use crate::wal::Error as WalError;
+pub use ario_client::Error as ClientError;
 pub use ario_core::bundle::Owner as BundleOwner;
 pub use ario_core::tx::Owner as TxOwner;
 pub use sync::Status as SyncStatus;
@@ -16,16 +20,12 @@ pub use vfs::{
     Directory, File, Inode, InodeId, Name, ReadHandle, Timestamp, Vfs, VfsPath, WriteHandle,
 };
 
-use crate::db::Error as DbError;
 use crate::db::{Config as DriveConfig, PageSize};
 use crate::db::{Db, Transaction};
 use crate::sync::{SyncResult, Syncer};
 use crate::types::AuthMode;
-use crate::vfs::Error as VfsError;
-use crate::wal::Error as WalError;
 
 use ario_client::Client;
-use ario_client::Error as ClientError;
 use ario_core::MaybeOwned;
 use ario_core::confidential::{Confidential, NewSecretExt};
 use ario_core::tx::TxId;
