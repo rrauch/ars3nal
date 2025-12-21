@@ -228,8 +228,8 @@ impl Client {
             match {
                 let mut retry_delay = Duration::from_millis(250);
 
-                let mut proof2_attempts: u8 = 10;
-                let mut proof_attempts: u8 = 10;
+                let mut proof2_attempts: u8 = 20;
+                let mut proof_attempts: u8 = 20;
                 loop {
                     if proof2_attempts > 0 {
                         proof2_attempts = proof2_attempts.saturating_sub(1);
