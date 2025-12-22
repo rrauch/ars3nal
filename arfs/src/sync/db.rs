@@ -95,17 +95,23 @@ where
 {
     pub async fn sync_log_entry(&mut self, log_entry: &LogEntry) -> Result<(), Error> {
         insert_sync_log_entry(log_entry, self).await?;
-        if let SyncResult::OK(success) = &log_entry.result {
-            let block_height = *success.block as i64;
-            let last_sync = (log_entry.start_time + log_entry.duration).timestamp();
-            sqlx::query!(
-                "UPDATE config SET last_sync = ?, block_height = ?",
-                last_sync,
-                block_height
-            )
-            .execute(self.conn())
-            .await?;
-        }
+        Ok(())
+    }
+
+    pub(super) async fn set_synced_state(
+        &mut self,
+        last_sync: DateTime<Utc>,
+        block_height: BlockNumber,
+    ) -> Result<(), Error> {
+        let block_height = *block_height as i64;
+        let last_sync = last_sync.timestamp();
+        sqlx::query!(
+            "UPDATE config SET state = 'P', last_sync = ?, block_height = ?",
+            last_sync,
+            block_height
+        )
+        .execute(self.conn())
+        .await?;
         Ok(())
     }
 

@@ -41,7 +41,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use strum::EnumString;
 use thiserror::Error;
@@ -66,6 +66,8 @@ pub enum Error {
     SyncError(#[from] sync::Error),
     #[error("read-only file system")]
     ReadOnlyFileSystem,
+    #[error("file system not synchronized")]
+    FileSystemNotSynchronized,
 }
 
 #[derive(Error, Debug)]
@@ -200,7 +202,7 @@ impl ArFs {
             &scope,
             db_page_size,
         )
-        .await?;
+            .await?;
 
         let drive_config = db.read().await?.config().await?;
 
@@ -211,17 +213,20 @@ impl ArFs {
             proactive_cache_interval,
         };
 
+        let status = Arc::new(Mutex::new(Arc::new(db.read().await?.status().await?)));
+
         let vfs = Vfs::new(
             client.clone(),
             db.clone(),
+            status.clone(),
             cache_settings,
             wal_chunk_size,
             scope.read_only(),
         )
-        .await?;
+            .await?;
 
         Ok(Self(Arc::new(
-            ErasedArFs::new(client, db, vfs, sync_settings, drive_config, scope).await?,
+            ErasedArFs::new(client, db, vfs, status, sync_settings, drive_config, scope).await?,
         )))
     }
 
@@ -292,7 +297,7 @@ impl ArFs {
     }
 
     #[inline]
-    pub fn sync_status(&self) -> impl Stream<Item = SyncStatus> + Send + Unpin {
+    pub fn sync_status(&self) -> impl Stream<Item=SyncStatus> + Send + Unpin {
         self.syncer().status()
     }
 
@@ -321,33 +326,36 @@ impl ArFs {
         }
     }
 
-    pub async fn status(&self) -> Result<Status, crate::Error> {
-        let mut tx = self.read().await?;
-        Ok(tx.status().await?)
+    pub fn status(&self) -> Arc<Status> {
+        let status = match self.0.as_ref() {
+            ErasedArFs::PublicRO(inner) => &inner.status,
+            ErasedArFs::PublicRW(inner) => &inner.status,
+            ErasedArFs::PrivateRO(inner) => &inner.status,
+            ErasedArFs::PrivateRW(inner) => &inner.status,
+        }
+            .lock()
+            .expect("lock not to be poisoned");
+
+        status.clone()
     }
 
     pub async fn discard_changes(&self) -> Result<(), crate::Error> {
         let mut tx = self.write().await?;
-        if tx.config().await?.state == State::Permanent {
-            // nothing to do
-            return Ok(());
+        match tx.status().await?.state() {
+            Some(State::Permanent) => {
+                // nothing to do
+                Ok(())
+            }
+            Some(State::Wal) => {
+                tx.discard_wal_changes().await?;
+                tx.commit().await?;
+                self.vfs().invalidate_cache(None).await;
+                Ok(())
+            }
+            None => {
+                Err(Error::FileSystemNotSynchronized)
+            }
         }
-        tx.discard_wal_changes().await?;
-        tx.commit().await?;
-        self.vfs().invalidate_cache(None).await;
-        Ok(())
-    }
-
-    #[inline]
-    async fn read(&self) -> Result<Transaction<db::ReadOnly>, Error> {
-        Ok(match self.0.as_ref() {
-            ErasedArFs::PublicRO(inner) => &inner.db,
-            ErasedArFs::PublicRW(inner) => &inner.db,
-            ErasedArFs::PrivateRO(inner) => &inner.db,
-            ErasedArFs::PrivateRW(inner) => &inner.db,
-        }
-        .read()
-        .await?)
     }
 
     #[inline]
@@ -381,10 +389,26 @@ pub enum State {
     Wal,
 }
 
-pub struct Status {
-    pub wal_state: State,
-    pub last_sync: Timestamp,
-    pub last_wal_modification: Option<Timestamp>,
+#[derive(Debug)]
+pub enum Status {
+    Initial,
+    Synchronized {
+        last_sync: Timestamp,
+    },
+    Wal {
+        last_sync: Timestamp,
+        last_wal_modification: Timestamp,
+    },
+}
+
+impl Status {
+    pub fn state(&self) -> Option<State> {
+        match self {
+            Self::Initial => None,
+            Self::Synchronized { .. } => Some(State::Permanent),
+            Self::Wal { .. } => Some(State::Wal),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -482,6 +506,7 @@ impl ErasedArFs {
         client: Client,
         db: Db,
         vfs: Vfs,
+        status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
         scope: Scope,
@@ -489,21 +514,53 @@ impl ErasedArFs {
         Ok(match scope {
             Scope::Public(public) => match public {
                 Access::ReadOnly(owner) => Self::PublicRO(
-                    ArFsInner::new_public_ro(client, db, vfs, sync_settings, drive_config, owner)
+                    ArFsInner::new_public_ro(
+                        client,
+                        db,
+                        vfs,
+                        status,
+                        sync_settings,
+                        drive_config,
+                        owner,
+                    )
                         .await?,
                 ),
                 Access::ReadWrite(owner) => Self::PublicRW(
-                    ArFsInner::new_public_rw(client, db, vfs, sync_settings, drive_config, owner)
+                    ArFsInner::new_public_rw(
+                        client,
+                        db,
+                        vfs,
+                        status,
+                        sync_settings,
+                        drive_config,
+                        owner,
+                    )
                         .await?,
                 ),
             },
             Scope::Private(private) => match private {
                 Access::ReadOnly(creds) => Self::PrivateRO(
-                    ArFsInner::new_private_ro(client, db, vfs, sync_settings, drive_config, creds)
+                    ArFsInner::new_private_ro(
+                        client,
+                        db,
+                        vfs,
+                        status,
+                        sync_settings,
+                        drive_config,
+                        creds,
+                    )
                         .await?,
                 ),
                 Access::ReadWrite(creds) => Self::PrivateRW(
-                    ArFsInner::new_private_rw(client, db, vfs, sync_settings, drive_config, creds)
+                    ArFsInner::new_private_rw(
+                        client,
+                        db,
+                        vfs,
+                        status,
+                        sync_settings,
+                        drive_config,
+                        creds,
+                    )
                         .await?,
                 ),
             },
@@ -516,6 +573,7 @@ impl ArFsInner<Public, ReadOnly> {
         client: Client,
         db: Db,
         vfs: Vfs,
+        status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
         owner: WalletAddress,
@@ -531,11 +589,12 @@ impl ArFsInner<Public, ReadOnly> {
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
         )
-        .await?;
+            .await?;
         Ok(ArFsInner {
             client,
             db,
             vfs,
+            status,
             syncer,
             drive_config,
             privacy,
@@ -549,6 +608,7 @@ impl ArFsInner<Public, ReadWrite<WalletAddress>> {
         client: Client,
         db: Db,
         vfs: Vfs,
+        status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
         owner: WalletAddress, // todo: change to wallet: Wallet,
@@ -566,11 +626,12 @@ impl ArFsInner<Public, ReadWrite<WalletAddress>> {
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
         )
-        .await?;
+            .await?;
         Ok(ArFsInner {
             client,
             db,
             vfs,
+            status,
             syncer,
             drive_config,
             privacy,
@@ -584,6 +645,7 @@ impl ArFsInner<Private, ReadOnly> {
         client: Client,
         db: Db,
         vfs: Vfs,
+        status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
         credentials: Credentials,
@@ -599,11 +661,12 @@ impl ArFsInner<Private, ReadOnly> {
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
         )
-        .await?;
+            .await?;
         Ok(ArFsInner {
             client,
             db,
             vfs,
+            status,
             syncer,
             drive_config,
             privacy,
@@ -617,6 +680,7 @@ impl ArFsInner<Private, ReadWrite> {
         client: Client,
         db: Db,
         vfs: Vfs,
+        status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
         credentials: Credentials,
@@ -632,11 +696,12 @@ impl ArFsInner<Private, ReadWrite> {
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
         )
-        .await?;
+            .await?;
         Ok(ArFsInner {
             client,
             db,
             vfs,
+            status,
             syncer,
             drive_config,
             privacy,
@@ -699,6 +764,7 @@ struct ArFsInner<PRIVACY, MODE> {
     client: Client,
     db: Db,
     vfs: Vfs,
+    status: Arc<Mutex<Arc<Status>>>,
     syncer: Syncer,
     drive_config: DriveConfig,
     privacy: Arc<PRIVACY>,

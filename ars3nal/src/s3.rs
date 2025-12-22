@@ -1,5 +1,5 @@
 use anyhow::bail;
-use arfs::{ArFs, Error, File, Inode, InodeId, VfsError, VfsPath, WriteHandle};
+use arfs::{ArFs, Error, File, Inode, InodeId, Status, VfsError, VfsPath, WriteHandle};
 use ario_core::base64::{FromBase64, ToBase64};
 use ario_core::crypto::hash::Blake3;
 use ct_codecs::{Base64, Decoder};
@@ -788,16 +788,27 @@ async fn revert_bucket_changes(
         ))?
     }
 
-    let status = arfs.status().await.map_err(to_s3_error)?;
+    let status = arfs.status();
+
+    let (last_sync, last_wal_modification) = match status.as_ref() {
+        Status::Wal {
+            last_sync,
+            last_wal_modification,
+        } => (last_sync, Some(last_wal_modification)),
+        Status::Synchronized { last_sync } => (last_sync, None),
+        Status::Initial => Err(S3Error::with_message(
+            S3ErrorCode::InvalidBucketState,
+            "bucket not ready yet",
+        ))?,
+    };
 
     let ts = if version_is_latest {
-        status
-            .last_wal_modification
+        last_wal_modification
             .ok_or_else(|| S3Error::with_message(S3ErrorCode::NoSuchVersion, "nothing to revert"))?
             .timestamp()
             .to_string()
     } else {
-        status.last_sync.timestamp().to_string()
+        last_sync.timestamp().to_string()
     };
 
     if ts.as_str() != version {
@@ -1177,26 +1188,37 @@ impl S3 for ArS3 {
             ))?
         }
 
-        let status = arfs.status().await.map_err(to_s3_error)?;
+        let status = arfs.status();
+        let (last_sync, last_wal_modification) = match status.as_ref() {
+            Status::Synchronized { last_sync } => (last_sync, None),
+            Status::Wal {
+                last_sync,
+                last_wal_modification,
+            } => (last_sync, Some(last_wal_modification)),
+            Status::Initial => Err(S3Error::with_message(
+                S3ErrorCode::InvalidBucketState,
+                "bucket not ready yet",
+            ))?,
+        };
 
         let mut versions = Vec::with_capacity(2);
         versions.push(ObjectVersion {
-            is_latest: Some(status.last_wal_modification.is_none()),
+            is_latest: Some(last_wal_modification.is_none()),
             key: Some(REVERT_CHANGES_OBJECT_KEY.to_string()),
-            last_modified: Some(SystemTime::from(status.last_sync).into()),
+            last_modified: Some(SystemTime::from(last_sync.clone()).into()),
             owner: input.expected_bucket_owner.as_ref().map(|id| Owner {
                 display_name: None,
                 id: Some(id.clone()),
             }),
-            version_id: Some(status.last_sync.timestamp().to_string()),
+            version_id: Some(last_sync.timestamp().to_string()),
             ..Default::default()
         });
 
-        if let Some(modified) = status.last_wal_modification {
+        if let Some(modified) = last_wal_modification {
             versions.push(ObjectVersion {
                 is_latest: Some(true),
                 key: Some(REVERT_CHANGES_OBJECT_KEY.to_string()),
-                last_modified: Some(SystemTime::from(modified).into()),
+                last_modified: Some(SystemTime::from(modified.clone()).into()),
                 owner: input.expected_bucket_owner.map(|id| Owner {
                     display_name: None,
                     id: Some(id),
@@ -1464,6 +1486,10 @@ fn to_s3_error<E: Into<arfs::Error>>(err: E) -> S3Error {
         Error::ReadOnlyFileSystem => S3Error::with_message(
             S3ErrorCode::InvalidBucketState,
             "Bucket is read-only, write operations unsupported",
+        ),
+        Error::FileSystemNotSynchronized => S3Error::with_message(
+            S3ErrorCode::ServiceUnavailable,
+            "Bucket not synchronized, try again later",
         ),
         _ => S3Error::with_message(S3ErrorCode::InternalError, err.to_string()),
     }

@@ -73,6 +73,8 @@ pub enum DbStateError {
     NotInPermanentState,
     #[error("database not in 'wal' state")]
     NotInWalState,
+    #[error("database state is invalid")]
+    InvalidState,
 }
 
 #[derive(Error, Debug)]
@@ -287,25 +289,43 @@ where
     }
 
     pub async fn status(&mut self) -> Result<Status, Error> {
-        let wal_state = self.config().await?.state;
-
-        let last_sync = sqlx::query!("SELECT last_sync AS \"last_sync: i64\" FROM config")
-            .map(|r| DateTime::from_timestamp(r.last_sync, 0))
-            .fetch_one(self.conn())
-            .await?
-            .ok_or_else(|| DataError::MissingData("config last_sync missing".to_string()))?;
+        let (wal_state, last_sync) =
+            sqlx::query!("SELECT state, last_sync AS \"last_sync:i64\" FROM config")
+                .map(|r| {
+                    (
+                        r.state
+                            .map(|state| match state.as_str() {
+                                "P" => Some(State::Permanent),
+                                "W" => Some(State::Wal),
+                                _ => None,
+                            })
+                            .flatten(),
+                        r.last_sync
+                            .map(|ts| DateTime::from_timestamp(ts, 0))
+                            .flatten(),
+                    )
+                })
+                .fetch_one(self.conn())
+                .await?;
 
         let last_wal_modification =
             sqlx::query!("SELECT MAX(timestamp) as \"last_mod: i64\" FROM wal")
-                .map(|r| r.last_mod.map(|ts| DateTime::from_timestamp(ts, 0)))
+                .map(|r| {
+                    r.last_mod
+                        .map(|ts| DateTime::from_timestamp(ts, 0))
+                        .flatten()
+                })
                 .fetch_one(self.conn())
-                .await?
-                .flatten();
+                .await?;
 
-        Ok(Status {
-            wal_state,
-            last_sync,
-            last_wal_modification,
+        Ok(match (wal_state, last_sync, last_wal_modification) {
+            (Some(State::Wal), Some(last_sync), Some(last_wal_modification)) => Status::Wal {
+                last_sync,
+                last_wal_modification,
+            },
+            (Some(State::Permanent), Some(last_sync), _) => Status::Synchronized { last_sync },
+            (None, _, _) => Status::Initial,
+            _ => Err(DbStateError::InvalidState)?,
         })
     }
 
@@ -523,7 +543,6 @@ async fn bootstrap(
         None,
         owner.into_owned(),
         client.network().id().clone(),
-        State::Permanent,
     );
     insert_config(&config, None, &mut tx).await?;
     tx.commit().await?;
@@ -558,23 +577,14 @@ async fn insert_config<C: Write>(
     .await?
     .id;
 
-    let state = match config.state {
-        State::Permanent => "P",
-        State::Wal => "W",
-    };
-
-    let last_sync = Utc::now().timestamp();
-
     sqlx::query!(
-        "INSERT INTO config (drive_id, root_folder_id, signature_id, name, owner, network_id, state, last_sync, block_height) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+        "INSERT INTO config (drive_id, root_folder_id, signature_id, name, owner, network_id, state, last_sync, block_height) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)",
         drive_id,
         root_folder_id,
         signature_id,
         name,
         owner,
         network_id,
-        state,
-        last_sync,
     )
         .execute(conn.conn())
         .await?;
@@ -623,7 +633,6 @@ struct ConfigRow {
     name: String,
     owner: Vec<u8>,
     network_id: String,
-    state: String,
 }
 
 struct EntityRow<'a> {
@@ -725,7 +734,7 @@ pub(crate) async fn insert_entity<E: DbEntity, C: Write>(
 async fn get_config<C: Read>(tx: &mut C) -> Result<Option<Config>, Error> {
     let config_row: ConfigRow = match sqlx::query_as!(
         ConfigRow,
-        "SELECT drive_id, root_folder_id, signature_id, name, owner, network_id, state FROM config"
+        "SELECT drive_id, root_folder_id, signature_id, name, owner, network_id FROM config"
     )
     .fetch_optional(tx.conn())
     .await?
@@ -776,7 +785,6 @@ pub struct Config {
     pub signature: Option<DriveSignatureEntity>,
     pub owner: WalletAddress,
     pub network_id: NetworkIdentifier,
-    pub state: State,
 }
 
 impl Config {
@@ -791,19 +799,12 @@ impl Config {
         let network_id = NetworkIdentifier::try_from(config_row.network_id)
             .map_err(|e| DataError::ConversionError(e.to_string()))?;
 
-        let state = match config_row.state.as_str() {
-            "P" => State::Permanent,
-            "W" => State::Wal,
-            other => Err(DataError::InvalidPermType(other.to_string()))?,
-        };
-
         Ok(Self {
             drive,
             root_folder,
             signature,
             owner,
             network_id,
-            state,
         })
     }
 }
@@ -815,7 +816,6 @@ impl Config {
         signature: Option<DriveSignatureEntity>,
         owner: WalletAddress,
         network_id: NetworkIdentifier,
-        state: State,
     ) -> Self {
         Self {
             drive,
@@ -823,7 +823,6 @@ impl Config {
             signature,
             owner,
             network_id,
-            state,
         }
     }
 }

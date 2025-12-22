@@ -3,12 +3,12 @@ use crate::db::{
     collect_affected_inode_ids,
 };
 use crate::types::file::FileKind;
+use crate::vfs::{VfsRow, get_vfs_row, insert_vfs_row};
 use crate::wal::{ContentHash, Op, WalDirMetadata, WalFileMetadata};
 use crate::{InodeId, State, Timestamp, VfsPath};
 use ario_client::ByteSize;
 use chrono::{DateTime, Utc};
 use std::ops::Deref;
-use crate::vfs::{get_vfs_row, insert_vfs_row, VfsRow};
 
 impl<C: TxScope> Transaction<C>
 where
@@ -236,7 +236,7 @@ where
     }
 
     pub async fn discard_wal_changes(&mut self) -> Result<(), Error> {
-        if self.config().await?.state != State::Wal {
+        if self.status().await?.state() != Some(State::Wal) {
             Err(Error::DbStateError(DbStateError::NotInWalState))?
         }
 

@@ -121,17 +121,17 @@ WHERE EXISTS (SELECT 1
 
 CREATE TABLE config_new
 (
-    drive_id       INTEGER   NOT NULL REFERENCES entity (id),
+    drive_id       INTEGER NOT NULL REFERENCES entity (id),
     signature_id   INTEGER REFERENCES entity (id),
-    root_folder_id INTEGER   NOT NULL REFERENCES entity (id),
+    root_folder_id INTEGER NOT NULL REFERENCES entity (id),
 
-    name           TEXT      NOT NULL CHECK (LENGTH(name) > 0 AND LENGTH(name) < 256),
-    owner          BLOB      NOT NULL CHECK (TYPEOF(owner) == 'blob' AND LENGTH(owner) == 32),
-    network_id     TEXT      NOT NULL CHECK (LENGTH(network_id) > 0 AND LENGTH(network_id) < 256),
+    name           TEXT    NOT NULL CHECK (LENGTH(name) > 0 AND LENGTH(name) < 256),
+    owner          BLOB    NOT NULL CHECK (TYPEOF(owner) == 'blob' AND LENGTH(owner) == 32),
+    network_id     TEXT    NOT NULL CHECK (LENGTH(network_id) > 0 AND LENGTH(network_id) < 256),
 
-    state          TEXT      NOT NULL CHECK (state IN ('P', 'W')),
-    last_sync      TIMESTAMP NOT NULL CHECK (last_sync >= 1577836800 AND last_sync < 4733510400),
-    block_height   INTEGER   NOT NULL CHECK (block_height >= 0 and block_height < 1000000000)
+    state          TEXT CHECK (state IS NULL OR (state IN ('P', 'W'))),
+    last_sync      TIMESTAMP CHECK (last_sync IS NULL OR (last_sync >= 1577836800 AND last_sync < 4733510400)),
+    block_height   INTEGER CHECK (block_height IS NULL OR (block_height > 0 and block_height < 1000000000))
 );
 
 INSERT INTO config_new
@@ -142,8 +142,8 @@ SELECT drive_id,
        owner,
        network_id,
        'P',
-       COALESCE((SELECT MAX(start_time) FROM sync_log WHERE result = 'S'), unixepoch()),
-       COALESCE((SELECT MAX(block_height) FROM sync_log WHERE result = 'S'), 0)
+       (SELECT MAX(start_time) FROM sync_log WHERE result = 'S'),
+       (SELECT MAX(block_height) FROM sync_log WHERE result = 'S')
 FROM config;
 
 DROP TABLE config;

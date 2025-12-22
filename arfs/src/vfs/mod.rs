@@ -5,7 +5,7 @@ use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{Entity, Model};
 use crate::wal::{WalDirMetadata, WalFileMetadata, WalNode};
-use crate::{CacheSettings, ContentType, State, wal};
+use crate::{CacheSettings, ContentType, State, Status, wal};
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
 use ario_core::blob::{Blob, OwnedBlob};
@@ -124,6 +124,7 @@ struct VfsInner {
     db: Db,
     stats: Arc<Stats>,
     root: Mutex<Root>,
+    status: Arc<Mutex<Arc<Status>>>,
     path_cache: PathCache,
     inode_cache: InodeCache,
     dir_cache: DirCache,
@@ -169,6 +170,7 @@ impl Vfs {
     pub(super) async fn new(
         client: Client,
         db: Db,
+        status: Arc<Mutex<Arc<Status>>>,
         cache_settings: CacheSettings,
         wal_chunk_size: u32,
         read_only: bool,
@@ -197,6 +199,7 @@ impl Vfs {
         Ok(Self(Arc::new(VfsInner {
             client,
             db,
+            status,
             stats: Arc::new(stats),
             root: Mutex::new(root),
             path_cache,
@@ -246,6 +249,14 @@ impl Vfs {
         }
 
         let _ = self.reload_root().await; //todo: logging
+        let _ = self.reload_status().await;
+    }
+
+    async fn reload_status(&self) -> Result<(), crate::Error> {
+        let status = Arc::new(self.0.db.read().await?.status().await?);
+        let mut lock = self.0.status.lock().expect("lock not to be poisoned");
+        *lock = status;
+        Ok(())
     }
 
     async fn reload_root(&self) -> Result<(), crate::Error> {
@@ -264,9 +275,11 @@ impl Vfs {
         self.0.root.lock().expect("to acquire lock").clone()
     }
 
-    pub async fn inode_by_id(&self, id: InodeId) -> Result<Option<Inode>, Error> {
-        self._inode_by_id::<crate::db::ReadOnly>(id, None, true)
-            .await
+    pub async fn inode_by_id(&self, id: InodeId) -> Result<Option<Inode>, crate::Error> {
+        self.check_status()?;
+        Ok(self
+            ._inode_by_id::<crate::db::ReadOnly>(id, None, true)
+            .await?)
     }
 
     async fn _inode_by_id<C: TxScope>(
@@ -315,9 +328,10 @@ impl Vfs {
             .map_err(Error::CachedDbError)?)
     }
 
-    pub async fn inode_by_path(&self, path: &VfsPath) -> Result<Option<Inode>, Error> {
+    pub async fn inode_by_path(&self, path: &VfsPath) -> Result<Option<Inode>, crate::Error> {
+        self.check_status()?;
         let conn = self.0.db.read().await?;
-        self._inode_by_path(path, conn, true).await
+        Ok(self._inode_by_path(path, conn, true).await?)
     }
 
     async fn _inode_by_path<'tx, C: TxScope>(
@@ -365,7 +379,8 @@ impl Vfs {
     pub async fn list<'a>(
         &'a self,
         inode: &'a Inode,
-    ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin + 'a, Error> {
+    ) -> Result<impl Stream<Item = Result<Inode, Error>> + Send + Unpin + 'a, crate::Error> {
+        self.check_status()?;
         Ok(match inode {
             Inode::Root(root) => Box::pin(self._list(root, self.0.db.read().await?, true).await?)
                 as Pin<Box<dyn Stream<Item = Result<Inode, Error>> + Send + Unpin>>,
@@ -379,6 +394,7 @@ impl Vfs {
     }
 
     pub async fn read_file(&self, file: &File) -> Result<FileHandle<ReadOnly>, crate::Error> {
+        self.check_status()?;
         match &file.0.inner {
             Variant::Permanent(model) => self.open_perma_file(model).await,
             Variant::Wal(wal_node) => self.open_wal_file(wal_node, file.size()).await,
@@ -428,12 +444,13 @@ impl Vfs {
             Err(crate::Error::ReadOnlyFileSystem)?
         }
         let mut tx = self.0.db.write().await?;
-        match tx.config().await?.state {
-            State::Permanent => {
+        match tx.status().await?.state() {
+            Some(State::Permanent) => {
                 // change to wal mode
                 tx.initiate_wal_mode().await?;
             }
-            State::Wal => {} // nothing to do
+            Some(State::Wal) => {} // nothing to do
+            None => Err(crate::Error::FileSystemNotSynchronized)?,
         }
         Ok(tx)
     }
@@ -445,6 +462,7 @@ impl Vfs {
         start_after: Option<&str>,
         max_keys: usize,
     ) -> Result<(Vec<Inode>, bool), crate::Error> {
+        self.check_status()?;
         let mut conn = self.0.db.read().await?;
         let (ids, has_more) = conn
             .find_inodes(prefix, delimiter, start_after, max_keys)
@@ -467,6 +485,7 @@ impl Vfs {
         last_modified: Option<DateTime<Utc>>,
         create_dirs: bool,
     ) -> Result<Directory, crate::Error> {
+        self.check_status()?;
         let mut tx = self.wal_mode().await?;
         let path = dir.join(name);
 
@@ -572,6 +591,7 @@ impl Vfs {
         overwrite_existing: bool,
         create_dirs: bool,
     ) -> Result<FileHandle<WriteOnly>, crate::Error> {
+        self.check_status()?;
         let mut tx = self.wal_mode().await?;
 
         let metadata = WalFileMetadata {
@@ -631,11 +651,21 @@ impl Vfs {
         inode_ids: impl Iterator<Item = InodeId>,
         recursive_delete: bool,
     ) -> Result<(), crate::Error> {
+        self.check_status()?;
         let mut tx = self.wal_mode().await?;
         let affected_ids = tx.delete_inodes(inode_ids, recursive_delete).await?;
         tx.commit().await?;
         self.invalidate_cache(Some(affected_ids)).await;
         Ok(())
+    }
+
+    fn check_status(&self) -> Result<(), crate::Error> {
+        let lock = self.0.status.lock().expect("lock to not be poisoned");
+        if let &Status::Initial = lock.as_ref() {
+            Err(crate::Error::FileSystemNotSynchronized)
+        } else {
+            Ok(())
+        }
     }
 }
 

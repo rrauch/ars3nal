@@ -507,7 +507,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
 
         let mut invalidate_all_caches = false;
 
-        if tx.config().await?.state == State::Wal {
+        if tx.status().await?.state() == Some(State::Wal) {
             // check if all wal entries have been made permanent
             let uncommitted_cnt = tx.uncommitted_wal_entry_count().await?;
             if uncommitted_cnt > 0 {
@@ -526,6 +526,10 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         let current_drive_config = tx.config().await?;
 
         let current_block_height = self.current_block_height().await?;
+
+        tx.set_synced_state(Utc::now(), current_block_height)
+            .await?;
+
         let last_sync_block_height = tx
             .last_sync_block_height()
             .await?
