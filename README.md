@@ -1,6 +1,6 @@
 # ArS3nal
 
-[![Status](https://img.shields.io/badge/status-first_release-yellow)](https://github.com/rrauch/ars3nal)
+[![Status](https://img.shields.io/badge/latest_release-0.3.0-green)](https://github.com/rrauch/ars3nal)
 [![License](https://img.shields.io/badge/License-Apache_2.0_and_MIT-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ArS3nal (pronounced *arsenal*) is an S3-compatible gateway for the [AR.IO network](https://ar.io), distributed as a
@@ -21,17 +21,17 @@ designed to solve this "impedance mismatch" with a local-first architecture:
 3. **Local Caching:** Frequently accessed objects are cached locally to provide fast reads for hot data and reduce
    load on the network.
 
-## Project Status: First working release
+## Project Status: Third release
 
-After an intense initial development phase, we are happy to announce the first working release of ArS3nal! Although
-it's still early days, ArS3nal **is ready** to be tried out and tested - albeit still in a limited fashion.
+ArS3nal has seen its **third release** at this point and **is ready** to be tried out and tested - albeit still in a
+limited fashion.
 
 Check back frequently to follow the project progress.
 
 ### What works?
 
 From a user's point of view, ArS3nal allows *read-only* access to any *public* ArFs file system via the well-established
-S3 protocol.
+S3 protocol. It also comes with *limited read/write* support.
 Multiple **Permabuckets** can be made available on the same instance, each getting their own friendly, configurable
 path.
 
@@ -47,7 +47,8 @@ path.
 - [x] Support for multiple, configurable Gateways and automatic route optimization
 - [x] Ready-to-use Docker image available
 - [x] `systemd` integration (Linux only)
-- [ ] Instant Write support
+- [x] Instant Write support
+- [x] On-demand rollback of uncommitted changes
 - [ ] Automatic uploading of changed data in the background
 - [ ] Encryption support for *private* ArFs file systems.
 - [ ] S3 compatible access control
@@ -260,6 +261,8 @@ max_concurrent_syncs = 1
 name = "bucket1"
 drive_id = "<<drive-uuid>>"
 owner = "<<owner address>>"
+# Can be either 'ro' (read-only, default) or 'rw' (read-write) 
+access_mode = "ro"
 ```
 
 ## Logging
