@@ -621,7 +621,7 @@ async fn begin_write_file(
     };
 
     let content_type = content_type
-        .map(|c| arfs::ContentType::from_str(c.essence_str()))
+        .map(|c| arfs::ContentType::from_str(c))
         .transpose()
         .map_err(|e| S3Error::internal_error(e))?;
 
@@ -915,7 +915,11 @@ impl S3 for ArS3 {
                 arfs,
                 iter::once((
                     &input.key,
-                    input.if_match.as_ref().map(|ifm| ifm.as_str()),
+                    input
+                        .if_match
+                        .as_ref()
+                        .map(|ifm| ifm.as_etag().map(|etag| etag.value()))
+                        .flatten(),
                     input.if_match_last_modified_time.as_ref(),
                     input.if_match_size.as_ref(),
                     input.version_id.as_ref(),
@@ -1034,12 +1038,7 @@ impl S3 for ArS3 {
             .get_object(
                 arfs,
                 &input.key,
-                input
-                    .if_none_match
-                    .as_ref()
-                    .map(|s| ETag::parse_http_header(s.as_bytes()).ok())
-                    .flatten()
-                    .as_ref(),
+                input.if_none_match.as_ref().map(|s| s.as_etag()).flatten(),
                 input.if_modified_since.as_ref(),
             )
             .await?;
@@ -1122,12 +1121,7 @@ impl S3 for ArS3 {
             .get_object(
                 arfs,
                 &input.key,
-                input
-                    .if_none_match
-                    .as_ref()
-                    .map(|s| ETag::parse_http_header(s.as_bytes()).ok())
-                    .flatten()
-                    .as_ref(),
+                input.if_none_match.as_ref().map(|s| s.as_etag()).flatten(),
                 input.if_modified_since.as_ref(),
             )
             .await?;
