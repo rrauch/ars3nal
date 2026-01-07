@@ -768,6 +768,20 @@ pub(crate) async fn clear_temp_tables<C: Write>(tx: &mut C) -> Result<(), Error>
     Ok(())
 }
 
+pub(crate) async fn reset_state_if_empty_wal<C: Write>(tx: &mut C) -> Result<(), Error> {
+    sqlx::query!(
+        "UPDATE config SET state = 'P' WHERE state = 'W' AND (SELECT Count(*) FROM wal) = 0 AND NOT EXISTS(SELECT 1 FROM vfs WHERE perm_type != 'P')"
+    )
+    .execute(tx.conn())
+    .await?;
+    sqlx::query!(
+        "DELETE FROM vfs_snapshot WHERE (SELECT Count(*) FROM wal) = 0 AND NOT EXISTS(SELECT 1 FROM vfs WHERE perm_type != 'P')"
+    )
+        .execute(tx.conn())
+        .await?;
+    Ok(())
+}
+
 pub(crate) async fn collect_affected_inode_ids<C: Write>(
     tx: &mut C,
 ) -> Result<impl Iterator<Item = i64>, Error> {
@@ -869,6 +883,7 @@ async fn db_init(
     let pool = SqlitePool { writer, reader };
 
     let mut tx = pool.write().await?;
+    reset_state_if_empty_wal(&mut tx).await?;
     clear_temp_tables(&mut tx).await?;
     tx.commit().await?;
 
