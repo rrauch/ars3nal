@@ -49,9 +49,9 @@ path.
 - [x] `systemd` integration (Linux only)
 - [x] Instant Write support
 - [x] On-demand rollback of uncommitted changes
+- [x] S3 compatible access control
 - [ ] Automatic uploading of changed data in the background
 - [ ] Encryption support for *private* ArFs file systems.
-- [ ] S3 compatible access control
 
 ## Technical Details
 
@@ -215,6 +215,25 @@ out-of-the-box.
 [general]
 # Stores SQLite databases containing ArFS state
 data_dir = "/path/to/persistent/state"
+policy = '''
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowBasicReading",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": [
+        "s3:ListAllMyBuckets",
+        "s3:ListBucket",
+        "s3:GetObject",
+        "s3:GetObjectAttributes"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+'''
 
 # Host & Port to listen on
 [server]
@@ -254,6 +273,13 @@ min_initial_wait_secs = 30
 # Setting this too high can easily lead to being rate-limited by the Gateway
 max_concurrent_syncs = 1
 
+# Users can be configured here. Use one `[[user]]` section per user 
+
+[[user]]
+access_key = "12345"
+secret_key = "67890"
+principal = "arn:aws:iam::123456789012:user/john-doe"
+
 # Permabuckets are configured below. Use one `[[permabucket]]` per ArFs drive. 
 
 [[permabucket]]
@@ -264,6 +290,34 @@ owner = "<<owner address>>"
 # Can be either 'ro' (read-only, default) or 'rw' (read-write) 
 access_mode = "ro"
 ```
+
+## Access Control
+
+### Policy
+
+ArS3nal supports S3-style bucket policies. Policies can be set in the config file using the `policy` parameter, either
+in the `general` section (for server-wide effect) or on a per-bucket basis within a `[[permabucket]]` section.
+
+**Warning:** If no policies are defined, ArS3nal uses a built-in default that allows basic reading for anyone (similar
+to the example policy in the configuration section above). If this is not the desired behavior, set a more restrictive
+policy for your instance.
+
+ArS3nal follows the same approach AWS uses when evaluating policy rules:
+
+**[explicit deny] > [explicit allow] > [implicit deny]**
+
+Limitations:
+
+* Only `s3:` actions are supported
+* Only `AWS` and `*` principal types are supported (service types are not)
+* Omitting the principal is treated as a wildcard
+* `Conditions` are not supported
+
+### Users
+
+Users are configured using `[[user]]` sections in the config file. The `access_key` and `secret_key` fields authenticate
+signed requests. The `principal` field can be set to any arbitrary value (ARN format is not enforced) and is matched
+against policy rules during authorization.
 
 ## Logging
 
