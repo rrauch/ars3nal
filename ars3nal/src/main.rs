@@ -9,6 +9,7 @@ use clap::Parser;
 use directories::ProjectDirs;
 use foyer_cache::{FoyerChunkCache, FoyerMetadataCache};
 use futures_lite::StreamExt;
+use s3s::auth::SecretKey;
 use serde::{Deserialize, Deserializer};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -239,6 +240,13 @@ impl Default for TomlServerConfig {
 }
 
 #[derive(Debug, Deserialize)]
+struct TomlUserConfig {
+    access_key: String,
+    secret_key: SecretKey,
+    principal: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct TomlPermabucketConfig {
     name: String,
     #[serde(deserialize_with = "deserialize_drive_id")]
@@ -253,17 +261,24 @@ struct TomlPermabucketConfig {
     sync_min_initial_wait_secs: Option<Duration>,
     #[serde(default, deserialize_with = "deserialize_access_mode_option")]
     access_mode: Option<AccessMode>,
+    #[serde(default)]
+    policy: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TomlGeneralConfig {
     #[serde(default)]
     data_dir: Option<PathBuf>,
+    #[serde(default)]
+    policy: Option<String>,
 }
 
 impl Default for TomlGeneralConfig {
     fn default() -> Self {
-        Self { data_dir: None }
+        Self {
+            data_dir: None,
+            policy: None,
+        }
     }
 }
 
@@ -281,6 +296,8 @@ struct TomlConfig {
     syncing: TomlSyncingConfig,
     #[serde(default, rename = "permabucket")]
     permabuckets: Vec<TomlPermabucketConfig>,
+    #[serde(default, rename = "user")]
+    users: Vec<TomlUserConfig>,
 }
 
 #[derive(Debug)]
@@ -300,6 +317,8 @@ struct Config {
     permabuckets: Vec<PermabucketConfig>,
     max_sync_concurrency: NonZeroUsize,
     proactive_cache_interval: Option<Duration>,
+    users: Vec<UserConfig>,
+    policy: Option<String>,
 }
 
 #[derive(Debug)]
@@ -311,6 +330,24 @@ struct PermabucketConfig {
     access_mode: AccessMode,
     maybe_sync_interval: Option<Duration>,
     maybe_sync_min_initial_wait: Option<Duration>,
+    policy: Option<String>,
+}
+
+#[derive(Debug)]
+struct UserConfig {
+    access_key: String,
+    secret_key: SecretKey,
+    principal: String,
+}
+
+impl From<TomlUserConfig> for UserConfig {
+    fn from(value: TomlUserConfig) -> Self {
+        Self {
+            access_key: value.access_key,
+            secret_key: value.secret_key,
+            principal: value.principal,
+        }
+    }
 }
 
 impl Config {
@@ -355,9 +392,16 @@ impl Config {
                         .sync_min_initial_wait_secs
                         .map(|s| Some(s))
                         .unwrap_or_else(|| default_min_sync_wait.clone()),
+                    policy: pb.policy,
                 })
             })
             .collect::<Result<_, anyhow::Error>>()?;
+
+        let users = toml
+            .users
+            .into_iter()
+            .map(|user| user.into())
+            .collect::<Vec<UserConfig>>();
 
         Ok(Self {
             listen_host,
@@ -373,6 +417,8 @@ impl Config {
             chunk_l2_cache_dir,
             chunk_l2_cache_size,
             permabuckets,
+            users,
+            policy: toml.general.policy,
             max_sync_concurrency: toml
                 .syncing
                 .max_concurrent_syncs
@@ -552,7 +598,18 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .build()
             .await?;
 
-        server.insert_bucket(bucket.name, arfs)?;
+        server.insert_bucket(&bucket.name, arfs)?;
+        if let Some(policy) = bucket.policy {
+            server.insert_bucket_policy(&bucket.name, policy)?;
+        }
+    }
+
+    if let Some(policy) = config.policy {
+        server.set_default_policy(policy)?;
+    }
+
+    for user in config.users {
+        server.insert_user(user.access_key, user.secret_key, user.principal)?;
     }
 
     let handle = server.serve();

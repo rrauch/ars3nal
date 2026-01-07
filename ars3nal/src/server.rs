@@ -1,3 +1,4 @@
+use crate::auth::Auth;
 use crate::s3::ArS3;
 use arfs::ArFs;
 use async_stream::stream;
@@ -5,6 +6,7 @@ use futures_lite::Stream;
 use http::{Extensions, HeaderMap, Method, Uri};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
+use s3s::auth::SecretKey;
 use s3s::route::S3Route;
 use s3s::service::S3ServiceBuilder;
 use s3s::{Body, S3Request, S3Response, S3Result};
@@ -17,6 +19,7 @@ use tower::Service;
 pub struct Server {
     listener: TcpListener,
     ars3s: ArS3,
+    auth: Auth,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -77,11 +80,34 @@ impl Server {
         Ok(Self {
             listener,
             ars3s: ArS3::new(),
+            auth: Auth::new(),
         })
     }
 
     pub fn insert_bucket(&mut self, name: impl AsRef<str>, arfs: ArFs) -> anyhow::Result<()> {
         self.ars3s.insert(name, arfs)
+    }
+
+    pub fn insert_bucket_policy(
+        &self,
+        bucket_name: impl AsRef<str>,
+        policy: impl AsRef<str>,
+    ) -> anyhow::Result<()> {
+        self.auth.insert_bucket_policy(bucket_name, policy)
+    }
+
+    pub fn set_default_policy(&self, policy: impl AsRef<str>) -> anyhow::Result<()> {
+        self.auth.set_default_policy(policy)
+    }
+
+    pub fn insert_user(
+        &self,
+        access_key: impl ToString,
+        secret_key: impl Into<SecretKey>,
+        principal: impl ToString,
+    ) -> anyhow::Result<()> {
+        self.auth.insert_user(access_key, secret_key, principal);
+        Ok(())
     }
 
     pub fn serve(self) -> Handle {
@@ -123,7 +149,8 @@ impl Server {
     async fn run(self, ct: CancellationToken) -> anyhow::Result<()> {
         let mut builder = S3ServiceBuilder::new(self.ars3s);
         builder.set_route(CustomRoute::build());
-        //builder.set_auth(SimpleAuth::from_single("dummy", "dummy"));
+        builder.set_auth(self.auth.clone());
+        builder.set_access(self.auth);
         let service = builder.build();
 
         let http_server = ConnBuilder::new(TokioExecutor::new());
