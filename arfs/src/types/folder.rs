@@ -8,6 +8,8 @@ use crate::{ContentType, Timestamp};
 use ario_core::blob::{Blob, OwnedBlob};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_with::base64::{Base64, UrlSafe};
+use serde_with::formats::Unpadded;
 use serde_with::{serde_as, skip_serializing_none};
 use uuid::Uuid;
 
@@ -20,6 +22,7 @@ impl Entity for FolderKind {
     type Header = FolderHeader;
     type Metadata = FolderMetadata;
     type Extra = ();
+    type MetadataCryptor<'a> = ();
 }
 
 impl HasId for FolderKind {
@@ -80,20 +83,6 @@ impl HasName for FolderKind {
     }
 }
 
-impl MaybeHasCipher for FolderKind {
-    fn cipher(entity: &Model<Self>) -> Option<(Cipher, Option<Blob<'_>>)>
-    where
-        Self: Entity + Sized,
-    {
-        entity.header.inner.cipher.as_ref().map(|c| {
-            (
-                *c,
-                entity.header.inner.cipher_iv.as_ref().map(|iv| iv.borrow()),
-            )
-        })
-    }
-}
-
 impl HasDriveId for FolderKind {
     fn drive_id(entity: &Model<Self>) -> &DriveId
     where
@@ -124,6 +113,7 @@ pub(crate) struct FolderHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Cipher")]
     pub cipher: Option<Cipher>,
+    #[serde_as(as = "Option<Chain<(BytesToStr, Base64<UrlSafe, Unpadded>)>>")]
     #[serde(rename = "Cipher-IV")]
     pub cipher_iv: Option<OwnedBlob>,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
@@ -141,6 +131,14 @@ pub(crate) struct FolderHeader {
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
     #[serde(rename = "Unix-Time")]
     pub time: DateTime<Utc>,
+}
+
+impl MaybeHasCipher for FolderHeader {
+    fn cipher(&self) -> Option<(Cipher, Option<Blob<'_>>)> {
+        self.cipher
+            .as_ref()
+            .map(|c| (*c, self.cipher_iv.as_ref().map(|b| b.borrow())))
+    }
 }
 
 #[serde_as]

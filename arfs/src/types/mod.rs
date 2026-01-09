@@ -4,6 +4,7 @@ pub mod file;
 pub mod folder;
 pub mod snapshot;
 
+use crate::crypto::MetadataCryptor;
 use crate::serde_tag::{BytesToStr, Chain, ToFromStr};
 use crate::types::drive::{DriveEntity, DriveId};
 use crate::types::drive_signature::DriveSignatureEntity;
@@ -121,6 +122,18 @@ pub(crate) trait Entity {
     type Header: Debug + Clone + PartialEq;
     type Metadata: Debug + Clone + PartialEq;
     type Extra: Default + Debug + Clone + PartialEq;
+    type MetadataCryptor<'a>: MetadataCryptor<'a>;
+
+    fn maybe_metadata_cryptor(
+        header: &Self::Header,
+    ) -> Option<
+        Result<
+            Self::MetadataCryptor<'_>,
+            <Self::MetadataCryptor<'_> as MetadataCryptor<'_>>::DecryptionError,
+        >,
+    > {
+        None
+    }
 }
 
 pub(crate) trait HasId {
@@ -157,9 +170,7 @@ pub(crate) trait HasName {
 }
 
 pub(crate) trait MaybeHasCipher {
-    fn cipher(entity: &Model<Self>) -> Option<(Cipher, Option<Blob<'_>>)>
-    where
-        Self: Entity + Sized;
+    fn cipher(&self) -> Option<(Cipher, Option<Blob<'_>>)>;
 }
 
 pub(crate) trait HasDriveId {
@@ -270,10 +281,10 @@ where
 
 impl<E: Entity> Model<E>
 where
-    E: MaybeHasCipher,
+    E::Header: MaybeHasCipher,
 {
     pub fn cipher(&self) -> Option<(Cipher, Option<Blob<'_>>)> {
-        E::cipher(self)
+        self.header.inner.cipher()
     }
 }
 
@@ -459,9 +470,11 @@ fn unsupported_signature_format_err(s: &str) -> ParseError {
     parse_err_ty = ParseError,
     serialize_all = "snake_case"
 )]
-enum SignatureFormat {
+pub enum SignatureFormat {
     #[strum(serialize = "1")]
     V1,
+    #[strum(serialize = "2")]
+    V2,
 }
 
 fn unsupported_privacy_err(s: &str) -> ParseError {
@@ -529,7 +542,7 @@ fn unsupported_cipher_err(s: &str) -> ParseError {
     parse_err_fn = unsupported_cipher_err,
     parse_err_ty = ParseError
 )]
-enum Cipher {
+pub(crate) enum Cipher {
     #[strum(serialize = "AES256-GCM")]
     Aes256Gcm,
     #[strum(serialize = "AES256-CTR")]

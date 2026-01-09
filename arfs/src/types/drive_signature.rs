@@ -1,8 +1,11 @@
 use crate::types::{
-    ArfsEntity, BytesToStr, Chain, Cipher, DisplayFromStr, Entity, Model, SignatureFormat,
+    ArfsEntity, BytesToStr, Chain, Cipher, DisplayFromStr, Entity, MaybeHasCipher, Model,
+    SignatureFormat,
 };
 use ario_core::blob::{Blob, OwnedBlob};
 use serde::{Deserialize, Serialize};
+use serde_with::base64::{Base64, UrlSafe};
+use serde_with::formats::Unpadded;
 use serde_with::{serde_as, skip_serializing_none};
 
 #[derive(Debug)]
@@ -13,6 +16,7 @@ impl Entity for DriveSignatureKind {
     type Header = DriveSignatureHeader;
     type Metadata = ();
     type Extra = ();
+    type MetadataCryptor<'a> = ();
 }
 
 pub(crate) type DriveSignatureEntity = Model<DriveSignatureKind>;
@@ -20,14 +24,6 @@ pub(crate) type DriveSignatureEntity = Model<DriveSignatureKind>;
 impl DriveSignatureEntity {
     pub fn signature_format(&self) -> SignatureFormat {
         self.header.inner.signature_format
-    }
-
-    pub fn cipher(&self) -> Option<Cipher> {
-        self.header.inner.cipher
-    }
-
-    pub fn cipher_iv(&self) -> Blob<'_> {
-        self.header.inner.cipher_iv.borrow()
     }
 }
 
@@ -47,9 +43,18 @@ pub(crate) struct DriveSignatureHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Cipher")]
     cipher: Option<Cipher>,
+    #[serde_as(as = "Chain<(BytesToStr, Base64<UrlSafe, Unpadded>)>")]
     #[serde(rename = "Cipher-IV")]
     cipher_iv: OwnedBlob,
     //data: Blob<'a>,
+}
+
+impl MaybeHasCipher for DriveSignatureHeader {
+    fn cipher(&self) -> Option<(Cipher, Option<Blob<'_>>)> {
+        self.cipher
+            .as_ref()
+            .map(|c| (*c, Some(self.cipher_iv.borrow())))
+    }
 }
 
 #[cfg(test)]

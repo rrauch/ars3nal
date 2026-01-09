@@ -3,7 +3,7 @@ use ::aes::cipher::typenum::Unsigned;
 use hybrid_array::{Array, ArraySize};
 use serde::{Deserialize, Serialize};
 
-mod aes;
+pub mod aes;
 pub mod ec;
 pub mod edwards;
 pub mod encryption;

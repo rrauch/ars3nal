@@ -1,5 +1,6 @@
 extern crate core;
 
+mod crypto;
 mod db;
 pub(crate) mod resolve;
 pub(crate) mod serde_tag;
@@ -27,15 +28,19 @@ use crate::types::AuthMode;
 
 use ario_client::Client;
 use ario_core::MaybeOwned;
-use ario_core::confidential::{Confidential, NewSecretExt};
+use ario_core::confidential::{Confidential, NewSecretExt, RevealExt, RevealMutExt};
 use ario_core::tx::TxId;
 use ario_core::wallet::{Wallet, WalletAddress};
 
 use crate::types::file::FileId;
+use ario_core::crypto::encryption::DecryptionExt;
+use ario_core::crypto::hash::Hasher;
 use bon::Builder;
 use core::fmt;
 use derive_more::Display;
 use futures_lite::Stream;
+use rsa::rand_core::{CryptoRng, RngCore};
+use rsa::signature::hazmat::RandomizedPrehashSigner;
 use serde_json::Error as JsonError;
 use std::fmt::{Debug, Display, Formatter};
 use std::num::NonZeroUsize;
@@ -47,6 +52,8 @@ use strum::EnumString;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zeroize::Zeroize;
+
+pub use crypto::DriveKey;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -101,6 +108,10 @@ pub enum EntityError {
     FileMismatch { expected: FileId, actual: FileId },
     #[error("drive mismatch, expected '{expected}' but found '{actual}'")]
     DriveMismatch { expected: DriveId, actual: DriveId },
+    #[error("entity is encrypted")]
+    Encrypted,
+    #[error("entity decryption failed: {0}")]
+    DecryptionError(String),
 }
 
 #[derive(Error, Debug)]
@@ -202,7 +213,7 @@ impl ArFs {
             &scope,
             db_page_size,
         )
-            .await?;
+        .await?;
 
         let drive_config = db.read().await?.config().await?;
 
@@ -223,7 +234,7 @@ impl ArFs {
             wal_chunk_size,
             scope.read_only(),
         )
-            .await?;
+        .await?;
 
         Ok(Self(Arc::new(
             ErasedArFs::new(client, db, vfs, status, sync_settings, drive_config, scope).await?,
@@ -297,7 +308,7 @@ impl ArFs {
     }
 
     #[inline]
-    pub fn sync_status(&self) -> impl Stream<Item=SyncStatus> + Send + Unpin {
+    pub fn sync_status(&self) -> impl Stream<Item = SyncStatus> + Send + Unpin {
         self.syncer().status()
     }
 
@@ -333,8 +344,8 @@ impl ArFs {
             ErasedArFs::PrivateRO(inner) => &inner.status,
             ErasedArFs::PrivateRW(inner) => &inner.status,
         }
-            .lock()
-            .expect("lock not to be poisoned");
+        .lock()
+        .expect("lock not to be poisoned");
 
         status.clone()
     }
@@ -352,9 +363,7 @@ impl ArFs {
                 self.vfs().invalidate_cache(None).await;
                 Ok(())
             }
-            None => {
-                Err(Error::FileSystemNotSynchronized)
-            }
+            None => Err(Error::FileSystemNotSynchronized),
         }
     }
 
@@ -413,8 +422,8 @@ impl Status {
 
 #[derive(Debug)]
 pub enum Scope {
-    Public(Access<WalletAddress, WalletAddress>), // todo: change to <WalletAddress, Wallet>
-    Private(Access<Credentials, Credentials>),
+    Public(Access<WalletAddress, Wallet>),
+    Private(Access<(WalletAddress, DriveKey), (Wallet, DriveKey)>),
 }
 
 impl Scope {
@@ -422,29 +431,27 @@ impl Scope {
         Scope::Public(Access::ReadOnly(owner))
     }
 
-    pub fn public_rw(owner: WalletAddress) -> Self {
-        Scope::Public(Access::ReadWrite(owner))
+    pub fn public_rw(wallet: Wallet) -> Self {
+        Scope::Public(Access::ReadWrite(wallet))
     }
 
-    pub fn private(credentials: Credentials) -> Self {
-        Scope::Private(Access::ReadOnly(credentials))
+    pub fn private(wallet: Wallet, drive_key: DriveKey) -> Self {
+        Scope::Private(Access::ReadOnly((wallet.address(), drive_key)))
     }
 
-    pub fn private_rw(credentials: Credentials) -> Self {
-        Scope::Private(Access::ReadWrite(credentials))
+    pub fn private_rw(wallet: Wallet, drive_key: DriveKey) -> Self {
+        Scope::Private(Access::ReadWrite((wallet, drive_key)))
     }
 
     fn owner(&self) -> MaybeOwned<'_, WalletAddress> {
         match self {
             Self::Public(public) => match public {
                 Access::ReadOnly(owner) => owner.into(),
-                //todo: Access::ReadWrite(wallet) => wallet.address().into(),
-                Access::ReadWrite(owner) => owner.into(),
+                Access::ReadWrite(wallet) => wallet.address().into(),
             },
             Self::Private(private) => match private {
-                Access::ReadOnly(creds) | Access::ReadWrite(creds) => {
-                    (&creds.0.wallet_address).into()
-                }
+                Access::ReadOnly((owner, _)) => owner.into(),
+                Access::ReadWrite((wallet, _)) => wallet.address().into(),
             },
         }
     }
@@ -456,12 +463,11 @@ impl Scope {
         }
     }
 
-    fn as_private(&self) -> Option<&Private> {
+    fn drive_key(&self) -> Option<&DriveKey> {
         match self {
             Self::Public(_) => None,
-            Self::Private(private) => match private {
-                Access::ReadOnly(creds) | Access::ReadWrite(creds) => Some(&creds.0),
-            },
+            Self::Private(Access::ReadOnly((_, drive_key)))
+            | Self::Private(Access::ReadWrite((_, drive_key))) => Some(drive_key),
         }
     }
 
@@ -479,23 +485,9 @@ pub enum Access<R, W> {
     ReadWrite(W),
 }
 
-#[derive(Debug)]
-#[repr(transparent)]
-pub struct Credentials(Private);
-
-impl Credentials {
-    pub fn with_password<P: Into<Password>>(wallet: Wallet, password: P) -> Self {
-        Self(Private {
-            wallet_address: wallet.address(),
-            wallet,
-            auth: password.into().into(),
-        })
-    }
-}
-
 #[derive(Debug, Display)]
 enum ErasedArFs {
-    PublicRW(ArFsInner<Public, ReadWrite<WalletAddress>>), //todo: change to ReadWrite<Wallet>
+    PublicRW(ArFsInner<Public, ReadWrite>),
     PublicRO(ArFsInner<Public, ReadOnly>),
     PrivateRW(ArFsInner<Private, ReadWrite>),
     PrivateRO(ArFsInner<Private, ReadOnly>),
@@ -523,9 +515,9 @@ impl ErasedArFs {
                         drive_config,
                         owner,
                     )
-                        .await?,
+                    .await?,
                 ),
-                Access::ReadWrite(owner) => Self::PublicRW(
+                Access::ReadWrite(wallet) => Self::PublicRW(
                     ArFsInner::new_public_rw(
                         client,
                         db,
@@ -533,13 +525,13 @@ impl ErasedArFs {
                         status,
                         sync_settings,
                         drive_config,
-                        owner,
+                        wallet,
                     )
-                        .await?,
+                    .await?,
                 ),
             },
             Scope::Private(private) => match private {
-                Access::ReadOnly(creds) => Self::PrivateRO(
+                Access::ReadOnly((_, drive_key)) => Self::PrivateRO(
                     ArFsInner::new_private_ro(
                         client,
                         db,
@@ -547,11 +539,11 @@ impl ErasedArFs {
                         status,
                         sync_settings,
                         drive_config,
-                        creds,
+                        drive_key,
                     )
-                        .await?,
+                    .await?,
                 ),
-                Access::ReadWrite(creds) => Self::PrivateRW(
+                Access::ReadWrite((wallet, drive_key)) => Self::PrivateRW(
                     ArFsInner::new_private_rw(
                         client,
                         db,
@@ -559,9 +551,10 @@ impl ErasedArFs {
                         status,
                         sync_settings,
                         drive_config,
-                        creds,
+                        drive_key,
+                        wallet,
                     )
-                        .await?,
+                    .await?,
                 ),
             },
         })
@@ -589,7 +582,7 @@ impl ArFsInner<Public, ReadOnly> {
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
         )
-            .await?;
+        .await?;
         Ok(ArFsInner {
             client,
             db,
@@ -603,7 +596,7 @@ impl ArFsInner<Public, ReadOnly> {
     }
 }
 
-impl ArFsInner<Public, ReadWrite<WalletAddress>> {
+impl ArFsInner<Public, ReadWrite> {
     async fn new_public_rw(
         client: Client,
         db: Db,
@@ -611,10 +604,10 @@ impl ArFsInner<Public, ReadWrite<WalletAddress>> {
         status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
-        owner: WalletAddress, // todo: change to wallet: Wallet,
+        wallet: Wallet,
     ) -> Result<Self, Error> {
         let privacy = Arc::new(Public {
-            owner: owner.clone(), // todo: change to wallet.address(),
+            owner: wallet.address(),
         });
         let syncer = Syncer::new(
             client.clone(),
@@ -626,7 +619,7 @@ impl ArFsInner<Public, ReadWrite<WalletAddress>> {
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
         )
-            .await?;
+        .await?;
         Ok(ArFsInner {
             client,
             db,
@@ -635,7 +628,7 @@ impl ArFsInner<Public, ReadWrite<WalletAddress>> {
             syncer,
             drive_config,
             privacy,
-            mode: ReadWrite(owner),
+            mode: ReadWrite(wallet),
         })
     }
 }
@@ -648,9 +641,9 @@ impl ArFsInner<Private, ReadOnly> {
         status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
-        credentials: Credentials,
+        drive_key: DriveKey,
     ) -> Result<Self, Error> {
-        let privacy = Arc::new(credentials.0);
+        let privacy = Arc::new(Private::new(drive_config.owner.clone(), drive_key));
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
@@ -661,7 +654,7 @@ impl ArFsInner<Private, ReadOnly> {
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
         )
-            .await?;
+        .await?;
         Ok(ArFsInner {
             client,
             db,
@@ -683,9 +676,10 @@ impl ArFsInner<Private, ReadWrite> {
         status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
-        credentials: Credentials,
+        drive_key: DriveKey,
+        wallet: Wallet,
     ) -> Result<Self, Error> {
-        let privacy = Arc::new(credentials.0);
+        let privacy = Arc::new(Private::new(drive_config.owner.clone(), drive_key));
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
@@ -696,7 +690,7 @@ impl ArFsInner<Private, ReadWrite> {
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
         )
-            .await?;
+        .await?;
         Ok(ArFsInner {
             client,
             db,
@@ -705,7 +699,7 @@ impl ArFsInner<Private, ReadWrite> {
             syncer,
             drive_config,
             privacy,
-            mode: ReadWrite::default(),
+            mode: ReadWrite(wallet),
         })
     }
 }
@@ -748,13 +742,7 @@ impl<PRIVACY, MODE> ArFsInner<PRIVACY, MODE> {
 }
 
 #[derive(Debug)]
-struct ReadWrite<C = ()>(C);
-
-impl Default for ReadWrite {
-    fn default() -> Self {
-        Self(())
-    }
-}
+struct ReadWrite(Wallet);
 
 #[derive(Debug)]
 struct ReadOnly;
@@ -792,7 +780,7 @@ impl Display for ArFsInner<Public, ReadOnly> {
     }
 }
 
-impl<C> Display for ArFsInner<Public, ReadWrite<C>> {
+impl Display for ArFsInner<Public, ReadWrite> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         self.display_public(f, "Read/Write")
     }
@@ -828,6 +816,13 @@ impl From<String> for Password {
     }
 }
 
+impl From<Confidential<String>> for Password {
+    fn from(value: Confidential<String>) -> Self {
+        //todo: convert directly
+        value.reveal().to_string().into()
+    }
+}
+
 #[derive(Debug)]
 enum AuthCredentials {
     Password(Password),
@@ -849,52 +844,38 @@ impl From<Password> for AuthCredentials {
 
 #[derive(Debug)]
 struct Private {
-    wallet: Wallet,
-    wallet_address: WalletAddress,
-    auth: AuthCredentials,
+    owner: WalletAddress,
+    drive_key: DriveKey,
 }
 
 impl Private {
-    fn new(wallet: Wallet, auth: AuthCredentials) -> Self {
-        let wallet_address = wallet.address();
-        Self {
-            wallet,
-            wallet_address,
-            auth,
-        }
+    fn new(owner: WalletAddress, drive_key: DriveKey) -> Self {
+        Self { owner, drive_key }
     }
 }
 
 impl<Mode> ArFsInner<Private, Mode> {
     pub fn owner(&self) -> &WalletAddress {
-        &self.privacy.wallet_address
-    }
-
-    fn display_private(&self, f: &mut fmt::Formatter<'_>, mode: &'static str) -> fmt::Result {
-        match self.privacy.auth {
-            AuthCredentials::Password(_) => {
-                self.display(f, "Private (Password)", mode, self.owner())
-            }
-        }
+        &self.privacy.owner
     }
 }
 
 impl Display for ArFsInner<Private, ReadOnly> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.display_private(f, "Read Only")
+        write!(f, "Private, Read Only")
     }
 }
 
 impl Display for ArFsInner<Private, ReadWrite> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.display_private(f, "Read/Write")
+        write!(f, "Private, Read/Write")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::types::drive::DriveId;
-    use crate::{ArFs, Credentials, Inode, Scope, SyncStatus, VfsPath, resolve};
+    use crate::{ArFs, DriveKey, Inode, Scope, SyncStatus, VfsPath, resolve};
     use ario_client::Client;
     use ario_core::Gateway;
     use ario_core::jwk::Jwk;
@@ -944,18 +925,19 @@ mod tests {
     async fn builder() -> anyhow::Result<()> {
         let (client, wallet) = init().await?;
         let drive_owner = wallet.address();
-        let credentials = Credentials::with_password(wallet, "foo".to_string());
 
         let (drive_id, _) = resolve::find_drive_ids_by_owner(&client, &drive_owner)
             .try_next()
             .await?
             .unwrap();
 
+        let drive_key = DriveKey::derive_from(&drive_id, &wallet, "foo".to_string())?;
+
         let arfs = ArFs::builder()
             .client(client.clone())
             .db_dir(&PathBuf::from_str("/tmp/foo/")?)
+            .scope(Scope::private_rw(wallet, drive_key))
             .drive_id(drive_id)
-            .scope(Scope::private_rw(credentials))
             .build()
             .await?;
 

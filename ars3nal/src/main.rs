@@ -1,8 +1,11 @@
 use anyhow::{anyhow, bail};
-use arfs::{AccessMode, ArFs, DriveId, Scope, SyncLimit};
+use arfs::{AccessMode, ArFs, DriveId, DriveKey, Scope, SyncLimit};
 use ario_client::{ByteSize, Cache, Client};
+use ario_core::confidential::Confidential;
+use ario_core::crypto::keys::KeyType;
+use ario_core::jwk::Jwk;
 use ario_core::network::Network;
-use ario_core::wallet::WalletAddress;
+use ario_core::wallet::{Wallet, WalletAddress};
 use ario_core::{Gateway, GatewayError};
 use ars3nal::{Server, ServerHandle, ServerStatus};
 use clap::Parser;
@@ -11,6 +14,7 @@ use foyer_cache::{FoyerChunkCache, FoyerMetadataCache};
 use futures_lite::StreamExt;
 use s3s::auth::SecretKey;
 use serde::{Deserialize, Deserializer};
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -224,6 +228,30 @@ where
     WalletAddress::from_str(&str).map_err(|e| serde::de::Error::custom(e.to_string()))
 }
 
+fn deserialize_wallet_address_option<'de, D>(
+    deserializer: D,
+) -> Result<Option<WalletAddress>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_wallet_address(deserializer).map(Some)
+}
+
+fn deserialize_key_type<'de, D>(deserializer: D) -> Result<KeyType, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let str = String::deserialize(deserializer)?;
+    KeyType::from_str(&str).map_err(|e| serde::de::Error::custom(e.to_string()))
+}
+
+fn deserialize_key_type_option<'de, D>(deserializer: D) -> Result<Option<KeyType>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_key_type(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize)]
 struct TomlServerConfig {
     host: Option<String>,
@@ -247,12 +275,56 @@ struct TomlUserConfig {
 }
 
 #[derive(Debug, Deserialize)]
+struct TomlWalletConfig {
+    name: String,
+    #[serde(default)]
+    jwk: Option<PathBuf>,
+    #[serde(default)]
+    mnemonic: Option<Confidential<String>>,
+    #[serde(default)]
+    passphrase: Option<Confidential<String>>,
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "deserialize_key_type_option"
+    )]
+    key_type: Option<KeyType>,
+}
+
+impl TomlWalletConfig {
+    async fn try_into_wallet(self) -> anyhow::Result<Wallet> {
+        if let Some(jwk) = self.jwk {
+            let bytes = tokio::fs::read(jwk).await?;
+            let jwk = Jwk::from_json(&bytes)?;
+            return Ok(Wallet::from_jwk(&jwk)?);
+        }
+        if let Some(mnemonic) = self.mnemonic {
+            let key_type = self.key_type.unwrap_or(KeyType::Rsa);
+            return Ok(Wallet::from_mnemonic(
+                &mnemonic,
+                self.passphrase.as_ref(),
+                key_type,
+            )?);
+        }
+        // invalid config
+        bail!(
+            "invalid configuration for wallet [{}], check settings",
+            self.name
+        )
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct TomlPermabucketConfig {
     name: String,
     #[serde(deserialize_with = "deserialize_drive_id")]
     drive_id: DriveId,
-    #[serde(deserialize_with = "deserialize_wallet_address")]
-    owner: WalletAddress,
+    #[serde(default, deserialize_with = "deserialize_wallet_address_option")]
+    owner: Option<WalletAddress>,
+    #[serde(default)]
+    wallet: Option<String>,
+    #[serde(default)]
+    drive_password: Option<Confidential<String>>,
     #[serde(default)]
     data_dir: Option<PathBuf>,
     #[serde(default, deserialize_with = "deserialize_duration_option")]
@@ -298,6 +370,8 @@ struct TomlConfig {
     permabuckets: Vec<TomlPermabucketConfig>,
     #[serde(default, rename = "user")]
     users: Vec<TomlUserConfig>,
+    #[serde(default, rename = "wallet")]
+    wallets: Vec<TomlWalletConfig>,
 }
 
 #[derive(Debug)]
@@ -325,9 +399,8 @@ struct Config {
 struct PermabucketConfig {
     name: String,
     drive_id: DriveId,
-    owner: WalletAddress,
+    scope: Scope,
     data_dir: PathBuf,
-    access_mode: AccessMode,
     maybe_sync_interval: Option<Duration>,
     maybe_sync_min_initial_wait: Option<Duration>,
     policy: Option<String>,
@@ -351,7 +424,7 @@ impl From<TomlUserConfig> for UserConfig {
 }
 
 impl Config {
-    fn new(toml: TomlConfig, arguments: Arguments) -> anyhow::Result<Self> {
+    async fn new(toml: TomlConfig, arguments: Arguments) -> anyhow::Result<Self> {
         let listen_host = toml.server.host.unwrap_or_else(|| arguments.host);
         let listen_port = toml.server.port.unwrap_or_else(|| arguments.port);
 
@@ -374,16 +447,73 @@ impl Config {
         let default_sync_interval = toml.syncing.interval_secs;
         let default_min_sync_wait = toml.syncing.min_initial_wait_secs;
 
+        let mut wallets = HashMap::with_capacity(toml.wallets.len());
+        for conf in toml.wallets {
+            let name = conf.name.clone();
+            let wallet = conf.try_into_wallet().await?;
+            wallets.insert(name, wallet);
+        }
+
         let permabuckets = toml
             .permabuckets
             .into_iter()
-            .map(|pb| {
+            .map(|pb| -> anyhow::Result<PermabucketConfig> {
+                // determine scope first
+                let wallet = if let Some(wallet_name) = &pb.wallet {
+                    Some(
+                        wallets
+                            .get(wallet_name)
+                            .ok_or_else(|| anyhow!("wallet {} not configured", wallet_name))?,
+                    )
+                } else {
+                    None
+                };
+                let scope = match (
+                    pb.access_mode,
+                    wallet,
+                    pb.owner,
+                    pb.drive_password,
+                ) {
+                    (
+                        Some(AccessMode::ReadOnly) | None,
+                        None,
+                        Some(owner),
+                        None,
+                    ) => Scope::public(owner),
+                    (
+                        Some(AccessMode::ReadOnly) | None,
+                        Some(wallet),
+                        None,
+                        None,
+                    ) => Scope::public(wallet.address()),
+                    (Some(AccessMode::ReadWrite), Some(wallet), None, None) => {
+                        Scope::public_rw(wallet.clone())
+                    }
+                    (
+                        Some(AccessMode::ReadOnly) | None,
+                        Some(wallet),
+                        None,
+                        Some(password),
+                    ) => {
+                        let drive_key = DriveKey::derive_from(&pb.drive_id, wallet, password)?;
+                        Scope::private(wallet.clone(), drive_key)
+                    },
+                    (
+                        Some(AccessMode::ReadWrite),
+                        Some(wallet),
+                        None,
+                        Some(password),
+                    ) => {
+                        let drive_key = DriveKey::derive_from(&pb.drive_id, wallet, password)?;
+                        Scope::private_rw(wallet.clone(), drive_key)
+                    },
+                    _ => bail!("config error in bucket [{}]: invalid scope related settings, check access_mode, owner, wallet ...", pb.name),
+                };
                 Ok(PermabucketConfig {
                     name: pb.name,
                     drive_id: pb.drive_id,
-                    owner: pb.owner,
+                    scope,
                     data_dir: pb.data_dir.unwrap_or_else(|| data_dir.clone()),
-                    access_mode: pb.access_mode.unwrap_or(AccessMode::ReadOnly),
                     maybe_sync_interval: pb
                         .sync_interval_secs
                         .map(|s| Some(s))
@@ -525,13 +655,14 @@ fn main() -> anyhow::Result<()> {
         TomlConfig::default()
     });
 
-    let config = Config::new(toml_config, arguments)?;
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_io()
         .enable_time()
         .build()?;
-    rt.block_on(run(config))?;
+    rt.block_on(async move {
+        let config = Config::new(toml_config, arguments).await?;
+        run(config).await
+    })?;
     Ok(())
 }
 
@@ -587,10 +718,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .client(client.clone())
             .drive_id(bucket.drive_id)
             .db_dir(&bucket.data_dir)
-            .scope(match bucket.access_mode {
-                AccessMode::ReadOnly => Scope::public(bucket.owner),
-                AccessMode::ReadWrite => Scope::public_rw(bucket.owner),
-            })
+            .scope(bucket.scope)
             .maybe_sync_interval(bucket.maybe_sync_interval)
             .maybe_sync_min_initial(bucket.maybe_sync_min_initial_wait)
             .maybe_proactive_cache_interval(config.proactive_cache_interval)

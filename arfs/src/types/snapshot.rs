@@ -18,6 +18,7 @@ impl Entity for SnapshotKind {
     type Header = SnapshotHeader;
     type Metadata = ();
     type Extra = ();
+    type MetadataCryptor<'a> = ();
 }
 
 impl HasId for SnapshotKind {

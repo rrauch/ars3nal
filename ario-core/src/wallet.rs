@@ -84,7 +84,7 @@ impl Wallet {
                 EcSecretKey::derive_key_from_seed(&seed).map_err(KeyError::EcError)?,
             )),
             KeyType::Ed25519 => {
-                todo!()
+                todo!("ed25519 mnemonic key derivation not yet supported")
             }
             unsupported => {
                 return Err(KeyError::UnsupportedKeyType(unsupported))?;
@@ -158,6 +158,36 @@ impl Debug for Wallet {
                 WalletInner::MultiAptos(_) => "MultiAptos",
             }
         ))
+    }
+}
+
+#[cfg(feature = "hazmat")]
+pub mod hazmat {
+    use crate::crypto::ec::EcSecretKey;
+    use crate::crypto::edwards::Ed25519SigningKey;
+    use crate::crypto::edwards::multi_aptos::MultiAptosSigningKey;
+    use crate::crypto::rsa::RsaPrivateKey;
+    use crate::wallet::{WalletInner, WalletSk};
+    use k256::Secp256k1;
+
+    pub enum SigningKey<'a> {
+        Rsa4096(&'a WalletSk<RsaPrivateKey<4096>>),
+        Rsa2048(&'a WalletSk<RsaPrivateKey<2048>>),
+        Secp256k1(&'a WalletSk<EcSecretKey<Secp256k1>>),
+        Ed25519(&'a WalletSk<Ed25519SigningKey>),
+        MultiAptos(&'a WalletSk<MultiAptosSigningKey>),
+    }
+
+    impl super::Wallet {
+        pub fn danger_expose_signing_key(&self) -> SigningKey<'_> {
+            match self.0.as_ref() {
+                WalletInner::Rsa4096(sk) => SigningKey::Rsa4096(sk),
+                WalletInner::Rsa2048(sk) => SigningKey::Rsa2048(sk),
+                WalletInner::Secp256k1(sk) => SigningKey::Secp256k1(sk),
+                WalletInner::Ed25519(sk) => SigningKey::Ed25519(sk),
+                WalletInner::MultiAptos(sk) => SigningKey::MultiAptos(sk),
+            }
+        }
     }
 }
 

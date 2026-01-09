@@ -1,4 +1,4 @@
-use crate::types::drive::DriveId;
+use crate::types::drive::{DriveHeader, DriveId};
 use crate::types::folder::FolderId;
 use crate::types::{
     ArfsEntity, ArfsEntityId, BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType,
@@ -26,6 +26,7 @@ impl Entity for FileKind {
     type Header = FileHeader;
     type Metadata = FileMetadata;
     type Extra = FileExtra;
+    type MetadataCryptor<'a> = ();
 }
 
 impl HasId for FileKind {
@@ -89,20 +90,6 @@ impl HasName for FileKind {
     }
 }
 
-impl MaybeHasCipher for FileKind {
-    fn cipher(entity: &Model<Self>) -> Option<(Cipher, Option<Blob<'_>>)>
-    where
-        Self: Entity + Sized,
-    {
-        entity.header.inner.cipher.as_ref().map(|c| {
-            (
-                *c,
-                entity.header.inner.cipher_iv.as_ref().map(|iv| iv.borrow()),
-            )
-        })
-    }
-}
-
 impl HasDriveId for FileKind {
     fn drive_id(entity: &Model<Self>) -> &DriveId
     where
@@ -159,6 +146,7 @@ pub(crate) struct FileHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Cipher")]
     pub cipher: Option<Cipher>,
+    #[serde_as(as = "Option<Chain<(BytesToStr, Base64<UrlSafe, Unpadded>)>>")]
     #[serde(rename = "Cipher-IV")]
     pub cipher_iv: Option<OwnedBlob>,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
@@ -176,6 +164,14 @@ pub(crate) struct FileHeader {
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
     #[serde(rename = "Unix-Time")]
     pub time: DateTime<Utc>,
+}
+
+impl MaybeHasCipher for FileHeader {
+    fn cipher(&self) -> Option<(Cipher, Option<Blob<'_>>)> {
+        self.cipher
+            .as_ref()
+            .map(|c| (*c, self.cipher_iv.as_ref().map(|b| b.borrow())))
+    }
 }
 
 #[serde_as]

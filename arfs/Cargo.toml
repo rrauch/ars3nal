@@ -13,10 +13,12 @@ chrono = { workspace = true }
 derive_more = { workspace = true, features = ["full"] }
 derive-where = { workspace = true }
 futures-lite = { workspace = true }
+hkdf = { workspace = true }
 maybe-owned = { workspace = true }
 moka = { workspace = true, features = ["future"] }
 ouroboros = "0.18"
 rangemap = { workspace = true }
+rsa = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = "0.11"
 serde-content = { version = "0.1", features = ["default"] }

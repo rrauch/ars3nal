@@ -13,6 +13,7 @@ use hybrid_array::ArraySize;
 use hybrid_array::typenum::Unsigned;
 use serde::Serialize;
 use std::fmt::{Debug, Display, Formatter};
+use std::str::FromStr;
 use thiserror::Error;
 
 pub type TypedSecretKey<T, SK: SecretKey> = Typed<T, SK>;
@@ -115,6 +116,12 @@ pub enum KeyType {
     MultiAptos,
 }
 
+#[derive(Error, Debug)]
+pub enum KeyTypeError {
+    #[error("unknown key type: '{0}'")]
+    UnknownKeyType(String),
+}
+
 impl Display for KeyType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -123,6 +130,24 @@ impl Display for KeyType {
             Self::Ed25519 => "Ed25519",
             Self::MultiAptos => "MultiAptos",
         })
+    }
+}
+
+impl FromStr for KeyType {
+    type Err = KeyTypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("RSA") {
+            Ok(Self::Rsa)
+        } else if s.eq_ignore_ascii_case("Secp256k1") {
+            Ok(Self::Secp256k1)
+        } else if s.eq_ignore_ascii_case("Ed25519") {
+            Ok(Self::Ed25519)
+        } else if s.eq_ignore_ascii_case("MultiAptos") {
+            Ok(Self::MultiAptos)
+        } else {
+            Err(KeyTypeError::UnknownKeyType(s.to_string()))
+        }
     }
 }
 

@@ -15,6 +15,7 @@ use sha3::Keccak256;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 pub type Sha256 = sha2::Sha256;
 pub type Sha256Hash = Digest<Sha256>;
@@ -79,6 +80,15 @@ impl<H: Hasher> Display for Digest<H> {
 impl<H: Hasher> Debug for Digest<H> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0.to_base64().as_str())
+    }
+}
+
+impl<H: Hasher> Zeroize for Digest<H>
+where
+    H::Output: Zeroize,
+{
+    fn zeroize(&mut self) {
+        self.0.zeroize()
     }
 }
 

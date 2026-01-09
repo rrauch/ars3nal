@@ -33,7 +33,7 @@ where
 pub type KeySize<const BIT: usize> =
     <<Aes<BIT> as AesCipher>::Cipher as aes::cipher::KeySizeUser>::KeySize;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[repr(transparent)]
 pub struct AesKey<const BIT: usize>(Protected<Array<u8, KeySize<BIT>>>)
 where
@@ -43,7 +43,7 @@ impl<const BIT: usize> AesKey<BIT>
 where
     Aes<BIT>: AesCipher,
 {
-    pub(crate) fn try_from_bytes<T: AsRef<[u8]>>(input: T) -> Option<Self> {
+    pub fn try_from_bytes<T: AsRef<[u8]>>(input: T) -> Option<Self> {
         let key_size = KeySize::<BIT>::to_usize();
         let input = input.as_ref();
         if key_size != input.len() {

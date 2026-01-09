@@ -62,7 +62,7 @@ impl<TagSize> Tag<TagSize>
 where
     TagSize: ValidTagSize,
 {
-    fn try_from_bytes<T: AsRef<[u8]>>(input: T) -> Option<Self> {
+    pub fn try_from_bytes<T: AsRef<[u8]>>(input: T) -> Option<Self> {
         let len = TagSize::to_usize();
         let input = input.as_ref();
         if input.len() != len {

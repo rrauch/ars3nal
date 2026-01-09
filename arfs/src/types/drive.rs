@@ -1,13 +1,16 @@
+use crate::crypto::DefaultMetadataCryptor;
 use crate::types::folder::FolderId;
 use crate::types::{
     ArfsEntity, ArfsEntityId, AuthMode, BytesToStr, Chain, Cipher, DisplayFromStr, Entity,
-    HasContentType, HasId, HasName, HasTimestamp, MaybeHasCipher, Model, SignatureFormat, TaggedId,
-    TimestampSeconds, ToFromStr,
+    HasContentType, HasId, HasName, HasTimestamp, MaybeHasCipher, MetadataCryptor, Model,
+    SignatureFormat, TaggedId, TimestampSeconds, ToFromStr,
 };
 use crate::{ContentType, Privacy, Timestamp};
 use ario_core::blob::{Blob, OwnedBlob};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_with::base64::{Base64, UrlSafe};
+use serde_with::formats::Unpadded;
 use serde_with::{serde_as, skip_serializing_none};
 use uuid::Uuid;
 
@@ -20,6 +23,24 @@ impl Entity for DriveKind {
     type Header = DriveHeader;
     type Metadata = DriveMetadata;
     type Extra = ();
+    type MetadataCryptor<'a> = DefaultMetadataCryptor;
+
+    fn maybe_metadata_cryptor(
+        header: &Self::Header,
+    ) -> Option<
+        Result<
+            Self::MetadataCryptor<'_>,
+            <Self::MetadataCryptor<'_> as MetadataCryptor<'_>>::DecryptionError,
+        >,
+    > {
+        header.cipher().map(move |(cipher, iv)| {
+            DefaultMetadataCryptor::new(
+                cipher,
+                iv.as_ref().map(|iv| iv.as_ref()),
+                header.signature_type.unwrap_or(SignatureFormat::V1),
+            )
+        })
+    }
 }
 
 impl HasId for DriveKind {
@@ -56,20 +77,6 @@ impl HasContentType for DriveKind {
         Self: Entity + Sized,
     {
         &entity.header.inner.content_type
-    }
-}
-
-impl MaybeHasCipher for DriveKind {
-    fn cipher(entity: &Model<Self>) -> Option<(Cipher, Option<Blob<'_>>)>
-    where
-        Self: Entity + Sized,
-    {
-        entity.header.inner.cipher.as_ref().map(|c| {
-            (
-                *c,
-                entity.header.inner.cipher_iv.as_ref().map(|iv| iv.borrow()),
-            )
-        })
     }
 }
 
@@ -111,6 +118,7 @@ pub(crate) struct DriveHeader {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Cipher")]
     pub cipher: Option<Cipher>,
+    #[serde_as(as = "Option<Chain<(BytesToStr, Base64<UrlSafe, Unpadded>)>>")]
     #[serde(rename = "Cipher-IV")]
     pub cipher_iv: Option<OwnedBlob>,
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
@@ -131,6 +139,14 @@ pub(crate) struct DriveHeader {
     #[serde_as(as = "Chain<(BytesToStr, ToFromStr<i64>, TimestampSeconds)>")]
     #[serde(rename = "Unix-Time")]
     pub time: DateTime<Utc>,
+}
+
+impl MaybeHasCipher for DriveHeader {
+    fn cipher(&self) -> Option<(Cipher, Option<Blob<'_>>)> {
+        self.cipher
+            .as_ref()
+            .map(|c| (*c, self.cipher_iv.as_ref().map(|b| b.borrow())))
+    }
 }
 
 #[serde_as]
