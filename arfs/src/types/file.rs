@@ -1,5 +1,5 @@
-use crate::crypto::{DefaultMetadataCryptor, FileMetadataCryptor, MetadataCryptor};
-use crate::types::drive::{DriveHeader, DriveId};
+use crate::crypto::{FileMetadataCryptor, MetadataCryptor};
+use crate::types::drive::DriveId;
 use crate::types::folder::FolderId;
 use crate::types::{
     ArfsEntity, ArfsEntityId, BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType,

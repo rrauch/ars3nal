@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail};
-use arfs::{AccessMode, ArFs, DriveId, DriveKey, Scope, SyncLimit};
+use arfs::{AccessMode, ArFs, DriveId, KeyRing, Scope, SyncLimit};
 use ario_client::{ByteSize, Cache, Client};
 use ario_core::confidential::Confidential;
 use ario_core::crypto::keys::KeyType;
@@ -495,8 +495,8 @@ impl Config {
                         None,
                         Some(password),
                     ) => {
-                        let drive_key = DriveKey::derive_from(&pb.drive_id, wallet, password)?;
-                        Scope::private(wallet.clone(), drive_key)
+                        let key_ring = KeyRing::builder().drive_id(&pb.drive_id).wallet(wallet).password(password).build()?;
+                        Scope::private(wallet.clone(), key_ring)
                     },
                     (
                         Some(AccessMode::ReadWrite),
@@ -504,8 +504,8 @@ impl Config {
                         None,
                         Some(password),
                     ) => {
-                        let drive_key = DriveKey::derive_from(&pb.drive_id, wallet, password)?;
-                        Scope::private_rw(wallet.clone(), drive_key)
+                        let key_ring = KeyRing::builder().drive_id(&pb.drive_id).wallet(wallet).password(password).build()?;
+                        Scope::private_rw(wallet.clone(), key_ring)
                     },
                     _ => bail!("config error in bucket [{}]: invalid scope related settings, check access_mode, owner, wallet ...", pb.name),
                 };

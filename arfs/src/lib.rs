@@ -2,6 +2,7 @@ extern crate core;
 
 mod crypto;
 mod db;
+mod key_ring;
 pub(crate) mod resolve;
 pub(crate) mod serde_tag;
 mod sync;
@@ -53,7 +54,7 @@ use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zeroize::Zeroize;
 
-pub use crypto::DriveKey;
+pub use crate::key_ring::KeyRing;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -216,6 +217,13 @@ impl ArFs {
         .await?;
 
         let drive_config = db.read().await?.config().await?;
+        if drive_config.drive.privacy() == Privacy::Private {
+            if let Some(key_ring) = scope.key_ring()
+                && let Some(signature_format) = drive_config.drive.signature_type()
+            {
+                key_ring.set_signature_format(signature_format);
+            }
+        }
 
         let sync_settings = SyncSettings {
             sync_interval,
@@ -423,7 +431,7 @@ impl Status {
 #[derive(Debug)]
 pub enum Scope {
     Public(Access<WalletAddress, Wallet>),
-    Private(Access<(WalletAddress, DriveKey), (Wallet, DriveKey)>),
+    Private(Access<(WalletAddress, KeyRing), (Wallet, KeyRing)>),
 }
 
 impl Scope {
@@ -435,12 +443,12 @@ impl Scope {
         Scope::Public(Access::ReadWrite(wallet))
     }
 
-    pub fn private(wallet: Wallet, drive_key: DriveKey) -> Self {
-        Scope::Private(Access::ReadOnly((wallet.address(), drive_key)))
+    pub fn private(wallet: Wallet, key_ring: KeyRing) -> Self {
+        Scope::Private(Access::ReadOnly((wallet.address(), key_ring)))
     }
 
-    pub fn private_rw(wallet: Wallet, drive_key: DriveKey) -> Self {
-        Scope::Private(Access::ReadWrite((wallet, drive_key)))
+    pub fn private_rw(wallet: Wallet, key_ring: KeyRing) -> Self {
+        Scope::Private(Access::ReadWrite((wallet, key_ring)))
     }
 
     fn owner(&self) -> MaybeOwned<'_, WalletAddress> {
@@ -463,11 +471,11 @@ impl Scope {
         }
     }
 
-    fn drive_key(&self) -> Option<&DriveKey> {
+    fn key_ring(&self) -> Option<&KeyRing> {
         match self {
             Self::Public(_) => None,
-            Self::Private(Access::ReadOnly((_, drive_key)))
-            | Self::Private(Access::ReadWrite((_, drive_key))) => Some(drive_key),
+            Self::Private(Access::ReadOnly((_, key_ring)))
+            | Self::Private(Access::ReadWrite((_, key_ring))) => Some(key_ring),
         }
     }
 
@@ -641,9 +649,9 @@ impl ArFsInner<Private, ReadOnly> {
         status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
-        drive_key: DriveKey,
+        key_ring: KeyRing,
     ) -> Result<Self, Error> {
-        let privacy = Arc::new(Private::new(drive_config.owner.clone(), drive_key));
+        let privacy = Arc::new(Private::new(drive_config.owner.clone(), key_ring));
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
@@ -676,10 +684,10 @@ impl ArFsInner<Private, ReadWrite> {
         status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
-        drive_key: DriveKey,
+        key_ring: KeyRing,
         wallet: Wallet,
     ) -> Result<Self, Error> {
-        let privacy = Arc::new(Private::new(drive_config.owner.clone(), drive_key));
+        let privacy = Arc::new(Private::new(drive_config.owner.clone(), key_ring));
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
@@ -845,12 +853,12 @@ impl From<Password> for AuthCredentials {
 #[derive(Debug)]
 struct Private {
     owner: WalletAddress,
-    drive_key: DriveKey,
+    key_ring: KeyRing,
 }
 
 impl Private {
-    fn new(owner: WalletAddress, drive_key: DriveKey) -> Self {
-        Self { owner, drive_key }
+    fn new(owner: WalletAddress, key_ring: KeyRing) -> Self {
+        Self { owner, key_ring }
     }
 }
 
@@ -875,7 +883,7 @@ impl Display for ArFsInner<Private, ReadWrite> {
 #[cfg(test)]
 mod tests {
     use crate::types::drive::DriveId;
-    use crate::{ArFs, DriveKey, Inode, Scope, SyncStatus, VfsPath, resolve};
+    use crate::{ArFs, Inode, KeyRing, Scope, SyncStatus, VfsPath, resolve};
     use ario_client::Client;
     use ario_core::Gateway;
     use ario_core::jwk::Jwk;
@@ -931,12 +939,16 @@ mod tests {
             .await?
             .unwrap();
 
-        let drive_key = DriveKey::derive_from(&drive_id, &wallet, "foo".to_string())?;
+        let key_ring = KeyRing::builder()
+            .drive_id(&drive_id)
+            .wallet(&wallet)
+            .password("foo".to_string())
+            .build()?;
 
         let arfs = ArFs::builder()
             .client(client.clone())
             .db_dir(&PathBuf::from_str("/tmp/foo/")?)
-            .scope(Scope::private_rw(wallet, drive_key))
+            .scope(Scope::private_rw(wallet, key_ring))
             .drive_id(drive_id)
             .build()
             .await?;

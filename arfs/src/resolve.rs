@@ -1,7 +1,7 @@
 use crate::types::drive::{DriveEntity, DriveHeader, DriveId, DriveKind};
 use crate::types::folder::{FolderEntity, FolderHeader, FolderId, FolderKind};
 use crate::types::{ArfsEntityId, Entity, HasId, Header, Metadata, Model, ParseError};
-use crate::{DriveKey, EntityError, Error, MetadataError, Privacy};
+use crate::{EntityError, Error, MetadataError, Privacy};
 
 use ario_client::Client;
 use ario_client::data_reader::DataReader;
@@ -16,6 +16,7 @@ use ario_core::wallet::WalletAddress;
 use ario_core::{BlockNumber, JsonValue};
 
 use crate::crypto::MetadataCryptor;
+use crate::key_ring::KeyRing;
 use crate::types::file::{FileEntity, FileHeader, FileId, FileKind};
 use crate::types::snapshot::{SnapshotHeader, SnapshotId, SnapshotKind};
 use futures_lite::{AsyncReadExt, Stream, StreamExt};
@@ -135,11 +136,11 @@ pub async fn find_drive_by_id_owner(
     client: &Client,
     drive_id: &DriveId,
     owner: &WalletAddress,
-    drive_key: Option<&DriveKey>,
+    key_ring: Option<&KeyRing>,
 ) -> Result<DriveEntity, Error> {
     let (drive_id, item) = _find_drive_by_id_owner(client, drive_id, owner).await?;
     let location = client.location_by_item_id(&item.id()).await?;
-    Ok(drive_entity(client, &drive_id, &location, owner, drive_key).await?)
+    Ok(drive_entity(client, &drive_id, &location, owner, key_ring).await?)
 }
 
 async fn _find_drive_by_id_owner(
@@ -237,10 +238,9 @@ pub async fn folder_entity(
     location: &Arl,
     drive_id: &DriveId,
     owner: &WalletAddress,
-    drive_key: Option<&DriveKey>,
+    key_ring: Option<&KeyRing>,
 ) -> Result<FolderEntity, Error> {
-    let folder_entity =
-        read_entity::<FolderKind, 1024>(client, location, owner, drive_key).await?;
+    let folder_entity = read_entity::<FolderKind, 1024>(client, location, owner, key_ring).await?;
     if folder_entity.id() != folder_id {
         Err(EntityError::FolderMismatch {
             expected: folder_id.clone(),
@@ -262,10 +262,9 @@ pub async fn file_entity(
     location: &Arl,
     drive_id: &DriveId,
     owner: &WalletAddress,
-    drive_key: Option<&DriveKey>,
+    key_ring: Option<&KeyRing>,
 ) -> Result<FileEntity, Error> {
-    let mut file_entity =
-        read_entity::<FileKind, 1024>(client, location, owner, drive_key).await?;
+    let mut file_entity = read_entity::<FileKind, 1024>(client, location, owner, key_ring).await?;
     if file_entity.id() != file_id {
         Err(EntityError::FileMismatch {
             expected: file_id.clone(),
@@ -291,7 +290,7 @@ async fn read_entity<E: Entity, const MAX_METADATA_LEN: usize>(
     client: &Client,
     location: &Arl,
     owner: &WalletAddress,
-    drive_key: Option<&DriveKey>,
+    key_ring: Option<&KeyRing>,
 ) -> Result<Model<E>, Error>
 where
     Header<<E as Entity>::Header, E>: for<'a> TryFrom<&'a Vec<Tag<'a>>, Error = ParseError>,
@@ -328,7 +327,7 @@ where
     if let Some(metadata_cryptor) = E::maybe_metadata_cryptor(header.as_inner()) {
         let metadata_cryptor =
             metadata_cryptor.map_err(|e| EntityError::DecryptionError(e.to_string()))?;
-        match drive_key {
+        match key_ring {
             Some(drive_key) => {
                 buf = metadata_cryptor
                     .decrypt(&mut buf, drive_key)
@@ -351,13 +350,12 @@ async fn drive_entity(
     drive_id: &DriveId,
     location: &Arl,
     owner: &WalletAddress,
-    drive_key: Option<&DriveKey>,
+    key_ring: Option<&KeyRing>,
 ) -> Result<DriveEntity, Error> {
     let drive_entity =
-        read_entity::<DriveKind, { 1024 * 1024 }>(client, location, owner, drive_key)
-            .await?;
+        read_entity::<DriveKind, { 1024 * 1024 }>(client, location, owner, key_ring).await?;
 
-    let privacy = drive_key
+    let privacy = key_ring
         .map(|_| Privacy::Private)
         .unwrap_or(Privacy::Public);
     if drive_entity.header().as_inner().privacy != privacy {
@@ -367,7 +365,7 @@ async fn drive_entity(
         })?;
     }
 
-    let auth_mode = drive_key.map(|key| key.auth_mode());
+    let auth_mode = key_ring.map(|key| key.auth_mode());
     if drive_entity.header().as_inner().auth_mode != auth_mode {
         Err(EntityError::AuthModeMismatch {
             expected: auth_mode

@@ -511,8 +511,15 @@ async fn bootstrap(
 ) -> Result<Config, super::Error> {
     let owner = scope.owner();
     let drive_entity =
-        resolve::find_drive_by_id_owner(client, drive_id, owner.as_ref(), scope.drive_key())
-            .await?;
+        resolve::find_drive_by_id_owner(client, drive_id, owner.as_ref(), scope.key_ring()).await?;
+
+    if let Some(key_ring) = scope.key_ring()
+        && drive_entity.privacy() == Privacy::Private
+    {
+        if let Some(signature_format) = drive_entity.signature_type() {
+            key_ring.set_signature_format(signature_format);
+        }
+    }
 
     let root_folder_location = resolve::find_entity_location_by_id_drive::<FolderKind>(
         client,
@@ -528,7 +535,7 @@ async fn bootstrap(
         &root_folder_location,
         &drive_id,
         owner.as_ref(),
-        scope.drive_key(),
+        scope.key_ring(),
     )
     .await?;
 

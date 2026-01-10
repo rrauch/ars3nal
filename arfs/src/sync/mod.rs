@@ -6,7 +6,7 @@ use crate::types::file::FileKind;
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{ArfsEntity, ArfsEntityId};
 use crate::vfs::{InodeError, InodeId};
-use crate::{DriveKey, Inode, Private, Public, State, SyncLimit, Vfs, resolve};
+use crate::{Inode, KeyRing, Private, Public, State, SyncLimit, Vfs, resolve};
 use ario_client::Client;
 use ario_client::graphql::BlockRange;
 use ario_core::BlockNumber;
@@ -460,7 +460,7 @@ impl CacheNow for BackgroundTask<Public> {
 impl CacheNow for BackgroundTask<Private> {
     #[tracing::instrument(name = "background_proactive_caching_private", skip(self))]
     async fn cache(&mut self) -> Result<Option<DateTime<Utc>>, crate::Error> {
-        self._cache(&self.privacy.owner, Some(&self.privacy.drive_key))
+        self._cache(&self.privacy.owner, Some(&self.privacy.key_ring))
             .await
     }
 }
@@ -475,7 +475,7 @@ impl SyncNow for BackgroundTask<Public> {
 impl SyncNow for BackgroundTask<Private> {
     #[tracing::instrument(name = "background_sync_private", skip(self))]
     async fn sync(&mut self) -> Result<Option<Success>, crate::Error> {
-        self._sync(&self.privacy.owner, Some(&self.privacy.drive_key))
+        self._sync(&self.privacy.owner, Some(&self.privacy.key_ring))
             .await
     }
 }
@@ -490,7 +490,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
     async fn _sync(
         &self,
         owner: &WalletAddress,
-        drive_key: Option<&DriveKey>,
+        key_ring: Option<&KeyRing>,
     ) -> Result<Option<Success>, crate::Error> {
         tracing::debug!("waiting for sync permit");
         let _permit = self.sync_limit.acquire_permit().await?;
@@ -541,7 +541,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
             .find_latest_drive(
                 current_drive_config.drive.id(),
                 &current_drive_config.owner,
-                drive_key,
+                key_ring,
             )
             .await?;
 
@@ -588,7 +588,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
                                 &location,
                                 current_drive_config.drive.id(),
                                 owner,
-                                drive_key,
+                                key_ring,
                             )
                             .await?;
 
@@ -610,7 +610,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
                                 &location,
                                 current_drive_config.drive.id(),
                                 owner,
-                                drive_key,
+                                key_ring,
                             )
                             .await?;
 
@@ -649,17 +649,17 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
         &self,
         drive_id: &DriveId,
         owner: &WalletAddress,
-        drive_key: Option<&DriveKey>,
+        key_ring: Option<&KeyRing>,
     ) -> Result<DriveEntity, crate::Error> {
         tracing::debug!("finding latest drive entity");
-        resolve::find_drive_by_id_owner(&self.client, drive_id, owner, drive_key).await
+        resolve::find_drive_by_id_owner(&self.client, drive_id, owner, key_ring).await
     }
 
     #[tracing::instrument(skip(self))]
     async fn _cache(
         &self,
         owner: &WalletAddress,
-        drive_key: Option<&DriveKey>,
+        key_ring: Option<&KeyRing>,
     ) -> Result<Option<DateTime<Utc>>, crate::Error> {
         let min_cached_interval = self.proactive_cache_interval.unwrap_or_default();
         let min_attempt_interval = Duration::from_secs(3600 * 8);

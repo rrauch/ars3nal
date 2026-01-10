@@ -52,6 +52,10 @@ where
         }
         Some(Self(Array::try_from(input).unwrap().protected()))
     }
+
+    pub fn from_byte_array(bytes: Array<u8, KeySize<BIT>>) -> Self {
+        Self(bytes.protected())
+    }
 }
 
 impl<const BIT: usize> SymmetricKey for AesKey<BIT>

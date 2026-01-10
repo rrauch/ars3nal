@@ -1,4 +1,4 @@
-use crate::crypto::DefaultMetadataCryptor;
+use crate::crypto::DriveKeyMetadataCryptor;
 use crate::types::folder::FolderId;
 use crate::types::{
     ArfsEntity, ArfsEntityId, AuthMode, BytesToStr, Chain, Cipher, DisplayFromStr, Entity,
@@ -23,7 +23,7 @@ impl Entity for DriveKind {
     type Header = DriveHeader;
     type Metadata = DriveMetadata;
     type Extra = ();
-    type MetadataCryptor<'a> = DefaultMetadataCryptor;
+    type MetadataCryptor<'a> = DriveKeyMetadataCryptor;
 
     fn maybe_metadata_cryptor(
         header: &Self::Header,
@@ -34,7 +34,7 @@ impl Entity for DriveKind {
         >,
     > {
         header.cipher().map(move |(cipher, iv)| {
-            DefaultMetadataCryptor::new(
+            DriveKeyMetadataCryptor::new(
                 cipher,
                 iv.as_ref().map(|iv| iv.as_ref()),
                 header.signature_type,
@@ -94,6 +94,10 @@ pub(crate) type DriveEntity = Model<DriveKind>;
 impl DriveEntity {
     pub fn privacy(&self) -> Privacy {
         self.header().as_inner().privacy
+    }
+
+    pub fn signature_type(&self) -> Option<SignatureFormat> {
+        self.header.as_inner().signature_type
     }
 
     pub fn auth_mode(&self) -> Option<AuthMode> {

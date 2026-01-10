@@ -1,4 +1,4 @@
-use crate::crypto::{DefaultMetadataCryptor, MetadataCryptor};
+use crate::crypto::{DriveKeyMetadataCryptor, MetadataCryptor};
 use crate::types::drive::DriveId;
 use crate::types::{
     ArfsEntity, ArfsEntityId, BytesToStr, Chain, Cipher, DisplayFromStr, Entity, HasContentType,
@@ -23,7 +23,7 @@ impl Entity for FolderKind {
     type Header = FolderHeader;
     type Metadata = FolderMetadata;
     type Extra = ();
-    type MetadataCryptor<'a> = DefaultMetadataCryptor;
+    type MetadataCryptor<'a> = DriveKeyMetadataCryptor;
 
     fn maybe_metadata_cryptor(
         header: &Self::Header,
@@ -34,7 +34,7 @@ impl Entity for FolderKind {
         >,
     > {
         header.cipher().map(move |(cipher, iv)| {
-            DefaultMetadataCryptor::new(cipher, iv.as_ref().map(|iv| iv.as_ref()), None)
+            DriveKeyMetadataCryptor::new(cipher, iv.as_ref().map(|iv| iv.as_ref()), None)
         })
     }
 }
