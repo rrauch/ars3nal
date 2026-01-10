@@ -29,19 +29,15 @@ use crate::types::AuthMode;
 
 use ario_client::Client;
 use ario_core::MaybeOwned;
-use ario_core::confidential::{Confidential, NewSecretExt, RevealExt, RevealMutExt};
+use ario_core::confidential::{Confidential, NewSecretExt, RevealExt};
 use ario_core::tx::TxId;
 use ario_core::wallet::{Wallet, WalletAddress};
 
 use crate::types::file::FileId;
-use ario_core::crypto::encryption::DecryptionExt;
-use ario_core::crypto::hash::Hasher;
 use bon::Builder;
 use core::fmt;
 use derive_more::Display;
 use futures_lite::Stream;
-use rsa::rand_core::{CryptoRng, RngCore};
-use rsa::signature::hazmat::RandomizedPrehashSigner;
 use serde_json::Error as JsonError;
 use std::fmt::{Debug, Display, Formatter};
 use std::num::NonZeroUsize;

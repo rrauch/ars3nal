@@ -289,15 +289,12 @@ pub(crate) struct FileMetadataCryptor<'a> {
 
 impl<'a> FileMetadataCryptor<'a> {
     pub(crate) fn new(
-        cipher: Cipher,
         iv: Option<&[u8]>,
         file_id: &'a FileId,
         signature_format: Option<SignatureFormat>,
     ) -> Result<Self, MetadataCryptorError> {
-        match cipher {
-            Cipher::Aes256Gcm => {} // todo: this might not be correct for file metadata
-            other => return Err(MetadataCryptorError::UnsupportedCipher(other)),
-        }
+        // According to the docs, File Metadata are *ALWAYS* AES-256-GCM encrypted
+        // The cipher tag must therefore refer to the file body encryption.
 
         let iv = iv.ok_or_else(|| MetadataCryptorError::IvMissing)?;
         let nonce = Nonce::try_from(iv).map_err(|_| MetadataCryptorError::InvalidNonce)?;

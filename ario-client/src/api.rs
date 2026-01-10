@@ -1,6 +1,6 @@
 use ario_core::JsonValue;
 use ario_core::MaybeOwned;
-use ario_core::blob::{Blob, OwnedBlob, TypedBlob};
+use ario_core::blob::{OwnedBlob, TypedBlob};
 use ario_core::buffer::ByteBuffer;
 use ario_core::network::Network;
 use bon::Builder;

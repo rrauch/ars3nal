@@ -37,13 +37,8 @@ impl Entity for FileKind {
             <Self::MetadataCryptor<'_> as MetadataCryptor<'_>>::DecryptionError,
         >,
     > {
-        header.cipher().map(move |(cipher, iv)| {
-            FileMetadataCryptor::new(
-                cipher,
-                iv.as_ref().map(|iv| iv.as_ref()),
-                &header.file_id,
-                None,
-            )
+        header.cipher().map(move |(_, iv)| {
+            FileMetadataCryptor::new(iv.as_ref().map(|iv| iv.as_ref()), &header.file_id, None)
         })
     }
 }

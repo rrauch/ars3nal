@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail};
 use indexmap::IndexMap;
 use itertools::Itertools;
 use s3s::access::{S3Access, S3AccessContext};
-use s3s::auth::{Credentials, S3Auth, SecretKey};
+use s3s::auth::{S3Auth, SecretKey};
 use s3s::path::S3Path;
 use s3s::{S3Result, s3_error};
 use s3s_policy::model::{
@@ -483,6 +483,7 @@ fn check_policy(policy: &Policy, ctx: &Context<'_>) -> S3Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use s3s::auth::Credentials;
     use s3s_policy::model::{
         ActionRule, OneOrMore, Principal as S3Principal, PrincipalRule, ResourceRule,
         WildcardOneOrMore,

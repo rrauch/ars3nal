@@ -5,6 +5,7 @@ use crate::api::{
 };
 use crate::routemaster::Handle;
 use crate::{Client, Error, api};
+use ario_core::Gateway;
 use ario_core::base64::OptionalBase64As;
 use ario_core::blob::{AsBlob, Blob};
 use ario_core::buffer::ByteBuffer;
@@ -14,7 +15,6 @@ use ario_core::data::{
     TxDataAuthenticityProof, UnauthenticatedTxDataChunk,
 };
 use ario_core::tx::TxId;
-use ario_core::{AuthenticationState, Gateway};
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;

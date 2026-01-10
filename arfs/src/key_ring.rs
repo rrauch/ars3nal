@@ -58,12 +58,12 @@ impl KeyRing {
     }
 
     pub fn v1_file_key(&self, file_id: &FileId) -> FileKey {
-        let mut lock = self.0.lock().expect("lock not to be poisoned");
+        let lock = self.0.lock().expect("lock not to be poisoned");
         lock.v1_file_key(file_id)
     }
 
     pub fn v2_file_key(&self, file_id: &FileId) -> FileKey {
-        let mut lock = self.0.lock().expect("lock not to be poisoned");
+        let lock = self.0.lock().expect("lock not to be poisoned");
         lock.v2_file_key(file_id)
     }
 
