@@ -541,7 +541,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
             .find_latest_drive(
                 current_drive_config.drive.id(),
                 &current_drive_config.owner,
-                None,
+                drive_key,
             )
             .await?;
 

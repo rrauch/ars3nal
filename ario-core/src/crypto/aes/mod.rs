@@ -236,3 +236,19 @@ where
 
     Ok((t, out))
 }
+
+#[cfg(feature = "hazmat")]
+pub mod hazmat {
+    use crate::confidential::RevealExt;
+    use crate::crypto::aes::{Aes, AesCipher, AesKey, KeySize};
+    use hybrid_array::Array;
+
+    impl<const BIT: usize> AesKey<BIT>
+    where
+        Aes<BIT>: AesCipher,
+    {
+        pub fn danger_reveal_raw_key(&self) -> &Array<u8, KeySize<BIT>> {
+            self.0.reveal()
+        }
+    }
+}

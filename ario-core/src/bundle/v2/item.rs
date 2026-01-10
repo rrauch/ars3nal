@@ -130,11 +130,7 @@ impl AuthenticatedItem<'_> {
             data_deep_hash: DataDeepHash::new_from_inner(b"".digest()), // dummy value
             data_verifier: BundleItemDataAuthenticator::from_single_value(
                 Blob::Slice(b"".as_slice()),
-                BundleItemChunker::align(
-                    DefaultChunker::chunk_map(self.0.data_size),
-                    0,
-                    None,
-                ),
+                BundleItemChunker::align(DefaultChunker::chunk_map(self.0.data_size), 0, None),
             ), // dummy value
         };
 
@@ -384,6 +380,21 @@ impl<'a> From<&'a RawBundleItem<'a>> for BundleItemHashBuilder<'a> {
             tag_data: raw.tag_data.as_blob(),
             data_deep_hash: MaybeOwned::Borrowed(&raw.data_deep_hash),
             signature_type: Some(raw.signature_type),
+        }
+    }
+}
+
+#[cfg(feature = "hazmat")]
+pub mod hazmat {
+    use crate::bundle::BundleItemHash;
+    use crate::bundle::v2::V2BundleItemHash;
+    use crate::bundle::v2::item::AuthenticatedItem;
+
+    impl AuthenticatedItem<'_> {
+        pub fn danger_bundle_item_hash(&self) -> &V2BundleItemHash {
+            match &self.0.hash {
+                BundleItemHash::V2(v2) => v2,
+            }
         }
     }
 }

@@ -123,21 +123,6 @@ where
     }
 }
 
-#[cfg(feature = "hazmat")]
-mod hazmat {
-    use crate::crypto::rsa::{Rsa, RsaPrivateKey, SupportedRsaKeySize};
-    use rsa::RsaPrivateKey as ExternalRsaPrivateKey;
-
-    impl<const BIT: usize> RsaPrivateKey<BIT>
-    where
-        Rsa<BIT>: SupportedRsaKeySize,
-    {
-        pub fn danger_expose_raw_key(&self) -> &ExternalRsaPrivateKey {
-            &self.0
-        }
-    }
-}
-
 #[derive(Zeroize, ZeroizeOnDrop)]
 #[repr(transparent)]
 pub struct RsaPrivateKeyComponents(Confidential<RsaPrivateKeyComponentsInner>);

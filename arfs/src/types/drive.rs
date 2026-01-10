@@ -37,7 +37,7 @@ impl Entity for DriveKind {
             DefaultMetadataCryptor::new(
                 cipher,
                 iv.as_ref().map(|iv| iv.as_ref()),
-                header.signature_type.unwrap_or(SignatureFormat::V1),
+                header.signature_type,
             )
         })
     }

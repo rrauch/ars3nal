@@ -4,7 +4,6 @@ use crate::crypto::rsa::{Rsa, RsaPrivateKey, RsaPublicKey, SupportedRsaKeySize};
 use crate::crypto::signature::{Scheme, Signature, SigningError, VerificationError};
 use crate::crypto::{Output, OutputLen};
 use derive_where::derive_where;
-use digest::OutputSizeUser;
 use ecdsa::signature;
 use maybe_owned::MaybeOwned;
 use rsa::pss::Signature as ExternalPssSignature;
@@ -14,7 +13,9 @@ use rsa::signature::hazmat::{PrehashVerifier, RandomizedPrehashSigner};
 use std::marker::PhantomData;
 use thiserror::Error;
 
-pub struct RsaPss<const BIT: usize>;
+pub struct RsaPss<const BIT: usize, const SALT_LEN: usize = 32>;
+
+pub type DeterministicRsaPss<const BIT: usize> = RsaPss<BIT, 0>;
 
 #[derive(Clone)]
 pub enum Message<'a> {
@@ -82,7 +83,7 @@ impl<'a, L: OutputLen> TryFrom<Blob<'a>> for PssSignature<L> {
     }
 }
 
-impl<const BIT: usize> Scheme for RsaPss<BIT>
+impl<const BIT: usize, const SALT_LEN: usize> Scheme for RsaPss<BIT, SALT_LEN>
 where
     Rsa<BIT>: SupportedRsaKeySize,
 {
@@ -100,10 +101,8 @@ where
     where
         Self: Sized,
     {
-        let signing_key = PssSigningKey::<Sha256>::new_with_salt_len(
-            signer.as_inner().clone(),
-            Sha256::output_size(),
-        );
+        let signing_key =
+            PssSigningKey::<Sha256>::new_with_salt_len(signer.as_inner().clone(), SALT_LEN);
 
         let mut rng = rand::rng();
 

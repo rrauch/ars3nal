@@ -240,7 +240,7 @@ pub async fn folder_entity(
     drive_key: Option<&DriveKey>,
 ) -> Result<FolderEntity, Error> {
     let folder_entity =
-        read_entity::<FolderKind, 1024>(client, location, drive_id, owner, drive_key).await?;
+        read_entity::<FolderKind, 1024>(client, location, owner, drive_key).await?;
     if folder_entity.id() != folder_id {
         Err(EntityError::FolderMismatch {
             expected: folder_id.clone(),
@@ -265,7 +265,7 @@ pub async fn file_entity(
     drive_key: Option<&DriveKey>,
 ) -> Result<FileEntity, Error> {
     let mut file_entity =
-        read_entity::<FileKind, 1024>(client, location, drive_id, owner, drive_key).await?;
+        read_entity::<FileKind, 1024>(client, location, owner, drive_key).await?;
     if file_entity.id() != file_id {
         Err(EntityError::FileMismatch {
             expected: file_id.clone(),
@@ -290,7 +290,6 @@ pub async fn file_entity(
 async fn read_entity<E: Entity, const MAX_METADATA_LEN: usize>(
     client: &Client,
     location: &Arl,
-    drive_id: &DriveId,
     owner: &WalletAddress,
     drive_key: Option<&DriveKey>,
 ) -> Result<Model<E>, Error>
@@ -355,7 +354,7 @@ async fn drive_entity(
     drive_key: Option<&DriveKey>,
 ) -> Result<DriveEntity, Error> {
     let drive_entity =
-        read_entity::<DriveKind, { 1024 * 1024 }>(client, location, drive_id, owner, drive_key)
+        read_entity::<DriveKind, { 1024 * 1024 }>(client, location, owner, drive_key)
             .await?;
 
     let privacy = drive_key

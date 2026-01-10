@@ -743,7 +743,7 @@ impl SignatureData {
     }
 }
 
-pub(crate) type V2BundleItemHash = TypedDigest<BundleItemKind, Sha384>;
+pub type V2BundleItemHash = TypedDigest<BundleItemKind, Sha384>;
 
 impl WithSerde for V2BundleItemHash {}
 

@@ -161,36 +161,6 @@ impl Debug for Wallet {
     }
 }
 
-#[cfg(feature = "hazmat")]
-pub mod hazmat {
-    use crate::crypto::ec::EcSecretKey;
-    use crate::crypto::edwards::Ed25519SigningKey;
-    use crate::crypto::edwards::multi_aptos::MultiAptosSigningKey;
-    use crate::crypto::rsa::RsaPrivateKey;
-    use crate::wallet::{WalletInner, WalletSk};
-    use k256::Secp256k1;
-
-    pub enum SigningKey<'a> {
-        Rsa4096(&'a WalletSk<RsaPrivateKey<4096>>),
-        Rsa2048(&'a WalletSk<RsaPrivateKey<2048>>),
-        Secp256k1(&'a WalletSk<EcSecretKey<Secp256k1>>),
-        Ed25519(&'a WalletSk<Ed25519SigningKey>),
-        MultiAptos(&'a WalletSk<MultiAptosSigningKey>),
-    }
-
-    impl super::Wallet {
-        pub fn danger_expose_signing_key(&self) -> SigningKey<'_> {
-            match self.0.as_ref() {
-                WalletInner::Rsa4096(sk) => SigningKey::Rsa4096(sk),
-                WalletInner::Rsa2048(sk) => SigningKey::Rsa2048(sk),
-                WalletInner::Secp256k1(sk) => SigningKey::Secp256k1(sk),
-                WalletInner::Ed25519(sk) => SigningKey::Ed25519(sk),
-                WalletInner::MultiAptos(sk) => SigningKey::MultiAptos(sk),
-            }
-        }
-    }
-}
-
 #[derive(Error, Debug)]
 pub enum WalletError {
     #[error(transparent)]
@@ -314,6 +284,51 @@ impl<PK: PublicKey> WalletPk<PK> {
     {
         let msg = hash.to_signable_message();
         self.verify_sig(&msg, sig).map_err(|e| e.into().to_string())
+    }
+}
+
+#[cfg(feature = "hazmat")]
+pub mod hazmat {
+    use crate::crypto::ec::EcSecretKey;
+    use crate::crypto::edwards::Ed25519SigningKey;
+    use crate::crypto::edwards::multi_aptos::MultiAptosSigningKey;
+    use crate::crypto::keys::SecretKey;
+    use crate::crypto::rsa::RsaPrivateKey;
+    use crate::crypto::signature::SignSigExt;
+    use crate::crypto::signature::{Scheme as SignatureScheme, Signature};
+    use crate::wallet::{Wallet, WalletInner, WalletSk};
+    use k256::Secp256k1;
+
+    pub enum SigningKey<'a> {
+        Rsa4096(&'a WalletSk<RsaPrivateKey<4096>>),
+        Rsa2048(&'a WalletSk<RsaPrivateKey<2048>>),
+        Secp256k1(&'a WalletSk<EcSecretKey<Secp256k1>>),
+        Ed25519(&'a WalletSk<Ed25519SigningKey>),
+        MultiAptos(&'a WalletSk<MultiAptosSigningKey>),
+    }
+
+    impl Wallet {
+        pub fn danger_expose_signing_key(&self) -> SigningKey<'_> {
+            match self.0.as_ref() {
+                WalletInner::Rsa4096(sk) => SigningKey::Rsa4096(sk),
+                WalletInner::Rsa2048(sk) => SigningKey::Rsa2048(sk),
+                WalletInner::Secp256k1(sk) => SigningKey::Secp256k1(sk),
+                WalletInner::Ed25519(sk) => SigningKey::Ed25519(sk),
+                WalletInner::MultiAptos(sk) => SigningKey::MultiAptos(sk),
+            }
+        }
+    }
+
+    impl<SK: SecretKey> WalletSk<SK> {
+        pub fn danger_sign_arbitrary_message<S: SignatureScheme>(
+            &self,
+            msg: &S::Message<'_>,
+        ) -> Result<Signature<S>, String>
+        where
+            SK: SignSigExt<S>,
+        {
+            self.sign_sig(msg).map_err(|e| e.into().to_string())
+        }
     }
 }
 

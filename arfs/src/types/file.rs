@@ -1,3 +1,4 @@
+use crate::crypto::{DefaultMetadataCryptor, FileMetadataCryptor, MetadataCryptor};
 use crate::types::drive::{DriveHeader, DriveId};
 use crate::types::folder::FolderId;
 use crate::types::{
@@ -26,7 +27,25 @@ impl Entity for FileKind {
     type Header = FileHeader;
     type Metadata = FileMetadata;
     type Extra = FileExtra;
-    type MetadataCryptor<'a> = ();
+    type MetadataCryptor<'a> = FileMetadataCryptor<'a>;
+
+    fn maybe_metadata_cryptor(
+        header: &Self::Header,
+    ) -> Option<
+        Result<
+            Self::MetadataCryptor<'_>,
+            <Self::MetadataCryptor<'_> as MetadataCryptor<'_>>::DecryptionError,
+        >,
+    > {
+        header.cipher().map(move |(cipher, iv)| {
+            FileMetadataCryptor::new(
+                cipher,
+                iv.as_ref().map(|iv| iv.as_ref()),
+                &header.file_id,
+                None,
+            )
+        })
+    }
 }
 
 impl HasId for FileKind {
