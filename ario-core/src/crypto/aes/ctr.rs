@@ -348,13 +348,13 @@ where
     }
 
     fn finalize(self) -> Result<(Self::AuthenticationTag, Option<Vec<u8>>), Self::Error> {
-        Ok((
-            (),
+        let (auth_res, residual) =
             process_finalize(self.block_fragment, |plaintext, ciphertext| {
                 self.aes_ctr.finalize(plaintext, ciphertext, Op::Enc)?;
                 Ok(())
-            })?,
-        ))
+            });
+        auth_res?;
+        Ok(((), residual))
     }
 }
 
@@ -396,7 +396,7 @@ where
         Ok(())
     }
 
-    fn finalize(self, _: &Self::AuthenticationTag) -> Result<Option<Vec<u8>>, Self::Error> {
+    fn finalize(self, _: &Self::AuthenticationTag) -> (Result<(), Self::Error>, Option<Vec<u8>>) {
         process_finalize(self.block_fragment, |ciphertext, plaintext| {
             self.aes_ctr.finalize(ciphertext, plaintext, Op::Dec)?;
             Ok(())
@@ -443,13 +443,12 @@ where
 fn process_finalize<const BIT: usize>(
     block_fragment: BlockFragment<BIT>,
     handler: impl FnOnce(&[u8], &mut [u8]) -> Result<(), Error>,
-) -> Result<Option<Vec<u8>>, Error>
+) -> (Result<(), Error>, Option<Vec<u8>>)
 where
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
-    let (_, residual) = super::process_finalize(block_fragment, handler)?;
-    Ok(residual)
+    super::process_finalize(block_fragment, handler)
 }
 
 #[cfg(test)]
@@ -796,7 +795,7 @@ mod tests {
             let mut ciphertext = Cursor::new(test.ciphertext);
 
             let mut output = BytesMut::with_capacity(test.plaintext.len());
-            AesCtr::decrypt(params, &mut ciphertext, &mut output, &())?;
+            AesCtr::decrypt(params, &mut ciphertext, &mut output, ())?;
             let plaintext = output.freeze();
             assert_eq!(plaintext.to_vec().as_slice(), test.plaintext);
         }
@@ -822,7 +821,7 @@ mod tests {
         let mut plaintext = Vec::with_capacity(ONE_MB.len());
         let mut output = Cursor::new(&mut plaintext);
 
-        AesCtr::decrypt_readwrite(params, &mut ciphertext_reader, &mut output, &())?;
+        AesCtr::decrypt_readwrite(params, &mut ciphertext_reader, &mut output, ())?;
 
         assert_eq!(&plaintext, ONE_MB);
 
@@ -849,7 +848,7 @@ mod tests {
         let mut plaintext = Vec::with_capacity(ONE_MB.len());
         let mut output = futures_lite::io::Cursor::new(&mut plaintext);
 
-        AesCtr::decrypt_async_readwrite(params, &mut ciphertext_reader, &mut output, &()).await?;
+        AesCtr::decrypt_async_readwrite(params, &mut ciphertext_reader, &mut output, ()).await?;
 
         assert_eq!(&plaintext, ONE_MB);
 
@@ -872,7 +871,7 @@ mod tests {
 
         let mut ciphertext_reader = Cursor::new(ciphertext);
 
-        let mut decrypting_reader = AesCtr::decrypting_reader(params, &mut ciphertext_reader)?;
+        let mut decrypting_reader = AesCtr::decrypting_reader(params, &mut ciphertext_reader, ())?;
 
         fn seek_test<R: Read + Seek>(
             reader: &mut R,
@@ -896,7 +895,7 @@ mod tests {
         seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 256256)?;
         seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 1000000)?;
 
-        decrypting_reader.finalize(&())?;
+        decrypting_reader.finalize()?;
         Ok(())
     }
 
@@ -918,7 +917,7 @@ mod tests {
         let mut ciphertext_reader = futures_lite::io::Cursor::new(ciphertext);
 
         let mut decrypting_reader =
-            AesCtr::decrypting_async_reader(params, &mut ciphertext_reader)?;
+            AesCtr::decrypting_async_reader(params, &mut ciphertext_reader, ())?;
 
         async fn seek_test<R: AsyncRead + AsyncSeek + Unpin>(
             reader: &mut R,
@@ -942,7 +941,7 @@ mod tests {
         seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 256256).await?;
         seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 1000000).await?;
 
-        decrypting_reader.finalize(&())?;
+        decrypting_reader.finalize()?;
         Ok(())
     }
 }

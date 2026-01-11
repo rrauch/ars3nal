@@ -208,8 +208,8 @@ where
 
 fn process_finalize<T, const BIT: usize, E: Into<Error>>(
     mut block_fragment: BlockFragment<BIT>,
-    handler: impl FnOnce(&[u8], &mut [u8]) -> Result<T, E>,
-) -> Result<(T, Option<Vec<u8>>), Error>
+    auth_handler: impl FnOnce(&[u8], &mut [u8]) -> Result<T, E>,
+) -> (Result<T, Error>, Option<Vec<u8>>)
 where
     Aes<BIT>: AesCipher,
 {
@@ -231,14 +231,14 @@ where
         &mut []
     };
 
-    let t = handler(input.as_ref(), out_buf).map_err(|e| e.into())?;
+    let auth_res = auth_handler(input.as_ref(), out_buf).map_err(|e| e.into());
 
     let len = out_buf.len();
     unsafe { out.advance_mut(len) }
 
     let out = if out.is_empty() { None } else { Some(out) };
 
-    Ok((t, out))
+    (auth_res, out)
 }
 
 #[cfg(feature = "hazmat")]

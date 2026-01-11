@@ -50,8 +50,8 @@ path.
 - [x] Instant Write support
 - [x] On-demand rollback of uncommitted changes
 - [x] S3 compatible access control
+- [x] Encryption support for *private* ArFs file systems.
 - [ ] Automatic uploading of changed data in the background
-- [ ] Encryption support for *private* ArFs file systems.
 
 ## Technical Details
 
@@ -280,15 +280,28 @@ access_key = "12345"
 secret_key = "67890"
 principal = "arn:aws:iam::123456789012:user/john-doe"
 
+# Wallets / Private Keys for signing & access to private drives
+
+[[wallet]]
+# Internal name / alias
+name = "wallet1"
+jwk = "/path/to/jwk-file"
+
 # Permabuckets are configured below. Use one `[[permabucket]]` per ArFs drive. 
 
 [[permabucket]]
 # Bucket will be reachable at http://localhost:6767/bucket1/
 name = "bucket1"
 drive_id = "<<drive-uuid>>"
-owner = "<<owner address>>"
 # Can be either 'ro' (read-only, default) or 'rw' (read-write) 
 access_mode = "ro"
+# only for read-only public drives
+owner = "<<owner address>>"
+# required for private drives or when in read-write mode
+wallet = "<<name of configured wallet>>" # e.g. "wallet1"
+# only required for private drives
+drive_password = "<<drive password>>"
+
 ```
 
 ## Access Control
@@ -318,6 +331,25 @@ Limitations:
 Users are configured using `[[user]]` sections in the config file. The `access_key` and `secret_key` fields authenticate
 signed requests. The `principal` field can be set to any arbitrary value (ARN format is not enforced) and is matched
 against policy rules during authorization.
+
+## Wallets / Private Drives
+
+ArS3nal supports both public and private drives in read-only and read-write modes. Depending on the configuration, different elements are required.
+
+### Wallets
+
+Wallets (private keys) can be configured instance-wide and then activated on a per-bucket basis. Each wallet requires only a name and a path to a valid JWK file containing the private key.
+
+When accessing a public drive in read-only mode, you can configure access by setting either a wallet or just the owner address. Private drives *always* require the correct wallet and drive password, even in read-only mode.
+
+### Requirements Matrix
+
+The following table shows what information is required for each access scenario:
+
+|                   |      **Read-Only**      |     **Read-Write**      |
+|:------------------|:-----------------------:|:-----------------------:|
+| **Public Drive**  |     Owner or Wallet     |         Wallet          |
+| **Private Drive** | Wallet & Drive Password | Wallet & Drive Password |
 
 ## Logging
 

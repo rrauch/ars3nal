@@ -1,21 +1,31 @@
 mod db;
 
 use crate::db::{DataError, Db, Read, ReadWrite, Transaction, TxScope, Write};
+use crate::serde_tag::{BytesToStr, Chain};
 use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
-use crate::types::{Entity, Model};
+use crate::types::{Cipher, Entity, Model};
 use crate::wal::{WalDirMetadata, WalFileMetadata, WalNode};
-use crate::{CacheSettings, ContentType, State, Status, wal};
+use crate::{CacheSettings, ContentType, EntityError, KeyRing, State, Status, serde_tag, wal};
+use ario_client::data_reader::DataReader;
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
 use ario_core::blob::{Blob, OwnedBlob};
 use ario_core::wallet::WalletAddress;
 use chrono::{DateTime, Utc};
+pub(crate) use db::{VfsRow, get_vfs_row, insert_arfs_inode, insert_vfs_row};
 use derive_more::Display;
-use futures_lite::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, Stream, stream};
+use futures_lite::{
+    AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, Stream, stream,
+};
 use maybe_owned::MaybeOwnedMut;
 use moka::future::Cache;
 use ouroboros::self_referencing;
+use serde::{Deserialize, Serialize};
+use serde_with::DisplayFromStr;
+use serde_with::base64::{Base64, UrlSafe};
+use serde_with::formats::Unpadded;
+use serde_with::{serde_as, skip_serializing_none};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::SeekFrom;
@@ -26,8 +36,6 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll};
 use thiserror::Error;
 use typed_path::{Utf8Component, Utf8UnixEncoding, Utf8UnixPath, Utf8UnixPathBuf};
-
-pub(crate) use db::{VfsRow, get_vfs_row, insert_arfs_inode, insert_vfs_row};
 
 pub(crate) const ROOT_INODE_ID: InodeId = InodeId(2);
 static ROOT_NAME: LazyLock<Name> =
@@ -130,6 +138,7 @@ struct VfsInner {
     dir_cache: DirCache,
     wal_chunk_size: u32,
     read_only: bool,
+    key_ring: Option<KeyRing>,
 }
 
 #[derive(Debug)]
@@ -174,6 +183,7 @@ impl Vfs {
         cache_settings: CacheSettings,
         wal_chunk_size: u32,
         read_only: bool,
+        key_ring: Option<KeyRing>,
     ) -> Result<Self, crate::Error> {
         let path_cache = Cache::builder()
             .name("path_cache")
@@ -207,6 +217,7 @@ impl Vfs {
             dir_cache,
             wal_chunk_size,
             read_only,
+            key_ring,
         })))
     }
 
@@ -435,8 +446,43 @@ impl Vfs {
                 "data_location not set for file".to_ascii_lowercase(),
             ))
         })?;
-        let reader = self.0.client.read_any(data_location).await?;
-        Ok(FileHandle(ReadOnly(Box::new(reader))))
+        let mut reader = self.0.client.read_any(data_location).await?;
+        let actual_len = reader.len();
+        let mut expected_len = model.size();
+
+        let maybe_encrypted: MaybeEncryptedDataItem = serde_tag::from_tags(reader.item().tags())
+            .map_err(|e| EntityError::ParseError(e.into()))?;
+
+        if let Some(Cipher::Aes256Gcm) = maybe_encrypted.cipher {
+            expected_len += 16;
+        }
+
+        if actual_len != expected_len {
+            return Err(crate::Error::UnexpectedDataLength {
+                expected: expected_len,
+                actual: actual_len,
+            });
+        }
+
+        if let Some(cipher) = maybe_encrypted.cipher {
+            // file is encrypted
+            let key_ring = self
+                .0
+                .key_ring
+                .as_ref()
+                .ok_or_else(|| crate::Error::EncryptedFile)?;
+            let file_key = key_ring
+                .file_key(model.id())
+                .ok_or_else(|| crate::Error::FileKeyNotFound)?;
+
+            Ok(FileHandle(ReadOnly(
+                file_key
+                    .decrypt_content(reader, model.size(), cipher, maybe_encrypted.cipher_iv)
+                    .await?,
+            )))
+        } else {
+            Ok(FileHandle(ReadOnly(Box::new(reader))))
+        }
     }
 
     async fn wal_mode(&self) -> Result<Transaction<ReadWrite>, crate::Error> {
@@ -669,7 +715,19 @@ impl Vfs {
     }
 }
 
-trait FileReader: AsyncRead + AsyncSeek + Send + Sync + Unpin {}
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct MaybeEncryptedDataItem {
+    #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
+    #[serde(default, rename = "Cipher")]
+    pub cipher: Option<Cipher>,
+    #[serde_as(as = "Option<Chain<(BytesToStr, Base64<UrlSafe, Unpadded>)>>")]
+    #[serde(rename = "Cipher-IV")]
+    pub cipher_iv: Option<OwnedBlob>,
+}
+
+pub(crate) trait FileReader: AsyncRead + AsyncSeek + Send + Sync + Unpin {}
 impl<T> FileReader for T where T: AsyncRead + AsyncSeek + Send + Sync + Unpin {}
 
 pub struct ReadOnly(Box<dyn FileReader>);

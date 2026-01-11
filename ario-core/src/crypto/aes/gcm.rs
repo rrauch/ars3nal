@@ -2,9 +2,7 @@ use crate::buffer::BufError;
 use crate::confidential::RevealExt;
 use crate::crypto::aes::ctr::AesCtrCore;
 use crate::crypto::aes::{Aes, AesCipher, AesKey, Block, BlockFragment, Nonce, Op};
-use crate::crypto::encryption::hazmat::{
-    FinalizeDecryptionWithoutAuthentication, SeekableDecryptor,
-};
+use crate::crypto::encryption::hazmat::SeekableDecryptor;
 use crate::crypto::encryption::{Decryptor, Encryptor, Scheme};
 use aes::cipher::typenum::U16;
 use aes::cipher::{BlockCipherEncrypt, InnerIvInit, KeyInit, StreamCipherCore, crypto_common};
@@ -283,6 +281,7 @@ where
     NonceSize: ArraySize,
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
+    Tag<TagSize>: Unpin,
 {
     type Encryptor<'a> = AesGcmEncryptor<'a, BIT, TagSize, NonceSize>;
     type EncryptionParams<'a> = AesGcmParams<'a, BIT, NonceSize>;
@@ -365,13 +364,13 @@ where
     }
 
     fn finalize(self) -> Result<(Self::AuthenticationTag, Option<Vec<u8>>), Self::Error> {
-        Ok(process_finalize(
-            self.block_fragment,
-            |plaintext, ciphertext| {
+        let (auth_res, residual) =
+            process_finalize(self.block_fragment, |plaintext, ciphertext| {
                 let tag = self.aes_gcm.finalize(plaintext, ciphertext, Op::Enc)?;
                 Ok(tag)
-            },
-        )?)
+            });
+        let tag = auth_res?;
+        Ok((tag, residual))
     }
 }
 
@@ -394,25 +393,17 @@ where
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
-    fn finalize_maybe_authenticated(
-        self,
-        tag: Option<&Tag<TagSize>>,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    fn finalize_authenticated(self, tag: &Tag<TagSize>) -> (Result<(), Error>, Option<Vec<u8>>) {
         use subtle::ConstantTimeEq;
 
         process_finalize(self.block_fragment, |ciphertext, plaintext| {
             let generated_tag = self.aes_gcm.finalize(ciphertext, plaintext, Op::Dec)?;
-            if let Some(tag) = tag {
-                if tag.0.ct_eq(&generated_tag.0).into() {
-                    Ok(())
-                } else {
-                    Err(Error::DecryptionError)
-                }
-            } else {
+            if tag.0.ct_eq(&generated_tag.0).into() {
                 Ok(())
+            } else {
+                Err(Error::DecryptionError)
             }
         })
-        .map(|(_, residual)| residual)
     }
 }
 
@@ -423,6 +414,7 @@ where
     NonceSize: ArraySize,
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
+    Tag<TagSize>: Unpin,
 {
     type Error = super::ctr::Error;
     type AuthenticationTag = Tag<TagSize>;
@@ -447,21 +439,9 @@ where
         Ok(())
     }
 
-    fn finalize(self, tag: &Self::AuthenticationTag) -> Result<Option<Vec<u8>>, Self::Error> {
-        Ok(self.finalize_maybe_authenticated(Some(tag))?)
-    }
-}
-
-impl<'a, const BIT: usize, TagSize, NonceSize> FinalizeDecryptionWithoutAuthentication<'a>
-    for AesGcmDecryptor<'a, BIT, TagSize, NonceSize>
-where
-    TagSize: ValidTagSize,
-    NonceSize: ArraySize,
-    Aes<BIT>: AesCipher,
-    <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
-{
-    fn finalize_unauthenticated(self) -> Result<Option<Vec<u8>>, Self::Error> {
-        Ok(self.finalize_maybe_authenticated(None)?)
+    fn finalize(self, tag: &Self::AuthenticationTag) -> (Result<(), Self::Error>, Option<Vec<u8>>) {
+        let (auth_res, residual) = self.finalize_authenticated(tag);
+        (auth_res.map_err(|e| e.into()), residual)
     }
 }
 
@@ -472,6 +452,7 @@ where
     NonceSize: ArraySize,
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
+    Tag<TagSize>: Unpin,
 {
     fn seek(&mut self, position: u64) -> Result<(), Self::Error> {
         let current_pos = self.aes_gcm.position();
@@ -509,12 +490,13 @@ where
 fn process_finalize<T, const BIT: usize>(
     block_fragment: BlockFragment<BIT>,
     handler: impl FnOnce(&[u8], &mut [u8]) -> Result<T, Error>,
-) -> Result<(T, Option<Vec<u8>>), Error>
+) -> (Result<T, Error>, Option<Vec<u8>>)
 where
     Aes<BIT>: AesCipher,
     <Aes<BIT> as AesCipher>::Cipher: SupportedAesCiphers<BIT>,
 {
-    Ok(super::process_finalize(block_fragment, handler)?)
+    let (auth_res, residual) = super::process_finalize(block_fragment, handler);
+    (auth_res.map_err(|e| e.into()), residual)
 }
 
 #[cfg(test)]
@@ -583,7 +565,7 @@ mod tests {
             let tag = Tag::try_from_bytes(test.tag.as_slice()).unwrap();
 
             let mut output = BytesMut::with_capacity(test.plaintext.len());
-            DefaultAesGcm::decrypt(params, &mut ciphertext, &mut output, &tag)?;
+            DefaultAesGcm::decrypt(params, &mut ciphertext, &mut output, tag)?;
             let plaintext = output.freeze();
             assert_eq!(plaintext.to_vec().as_slice(), test.plaintext);
         }
@@ -613,7 +595,7 @@ mod tests {
         let mut plaintext = Vec::with_capacity(ONE_MB.len());
         let mut output = Cursor::new(&mut plaintext);
 
-        DefaultAesGcm::decrypt_readwrite(params, &mut ciphertext_reader, &mut output, &tag)?;
+        DefaultAesGcm::decrypt_readwrite(params, &mut ciphertext_reader, &mut output, tag)?;
 
         assert_eq!(&plaintext, ONE_MB);
 
@@ -647,7 +629,7 @@ mod tests {
         let mut plaintext = Vec::with_capacity(ONE_MB.len());
         let mut output = futures_lite::io::Cursor::new(&mut plaintext);
 
-        DefaultAesGcm::decrypt_async_readwrite(params, &mut ciphertext_reader, &mut output, &tag)
+        DefaultAesGcm::decrypt_async_readwrite(params, &mut ciphertext_reader, &mut output, tag)
             .await?;
 
         assert_eq!(&plaintext, ONE_MB);
@@ -667,13 +649,13 @@ mod tests {
         let params = AesGcmParams::new(key, nonce, b"");
         let mut output = Cursor::new(&mut ciphertext);
 
-        let _tag =
+        let tag =
             DefaultAesGcm::encrypt_readwrite(params.clone(), &mut plaintext_reader, &mut output)?;
 
         let mut ciphertext_reader = Cursor::new(ciphertext);
 
         let mut decrypting_reader =
-            DefaultAesGcm::decrypting_reader(params, &mut ciphertext_reader)?;
+            DefaultAesGcm::decrypting_reader(params, &mut ciphertext_reader, tag)?;
 
         fn seek_test<R: Read + Seek>(
             reader: &mut R,
@@ -697,7 +679,8 @@ mod tests {
         seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 256256)?;
         seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 1000000)?;
 
-        decrypting_reader.finalize_unauthenticated()?;
+        // we did not read the full ciphertext sequentially, therefore authentication should fail
+        assert!(decrypting_reader.finalize().is_err());
         Ok(())
     }
 
@@ -713,7 +696,7 @@ mod tests {
         let params = AesGcmParams::new(key, nonce, b"");
         let mut output = futures_lite::io::Cursor::new(&mut ciphertext);
 
-        let _tag = DefaultAesGcm::encrypt_async_readwrite(
+        let tag = DefaultAesGcm::encrypt_async_readwrite(
             params.clone(),
             &mut plaintext_reader,
             &mut output,
@@ -723,7 +706,7 @@ mod tests {
         let mut ciphertext_reader = futures_lite::io::Cursor::new(ciphertext);
 
         let mut decrypting_reader =
-            DefaultAesGcm::decrypting_async_reader(params, &mut ciphertext_reader)?;
+            DefaultAesGcm::decrypting_async_reader(params, &mut ciphertext_reader, tag)?;
 
         async fn seek_test<R: AsyncRead + AsyncSeek + Unpin>(
             reader: &mut R,
@@ -747,7 +730,8 @@ mod tests {
         seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 256256).await?;
         seek_test(&mut decrypting_reader, buffer.as_mut_slice(), 1000000).await?;
 
-        decrypting_reader.finalize_unauthenticated()?;
+        // we did not read the full ciphertext sequentially, therefore authentication should fail
+        assert!(decrypting_reader.finalize().is_err());
         Ok(())
     }
 }

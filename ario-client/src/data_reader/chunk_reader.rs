@@ -288,6 +288,13 @@ where
             )));
         }
 
+        // seeking to eof
+        if pos == self.len {
+            self.state = State::Ready { data: None };
+            self.pos = pos;
+            return Poll::Ready(Ok(pos));
+        }
+
         loop {
             match std::mem::replace(&mut self.state, State::default()) {
                 State::Ready {

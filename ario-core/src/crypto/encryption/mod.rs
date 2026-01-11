@@ -5,7 +5,6 @@ use crate::buffer::{BufError, BufMutExt};
 use crate::crypto::encryption::decryption::DecryptingReader;
 use crate::crypto::encryption::encryption::EncryptingWriter;
 use bytes::{Buf, BufMut};
-use futures_lite::AsyncWriteExt;
 use futures_lite::{AsyncRead, AsyncWrite};
 use hybrid_array::ArraySize;
 use std::io;
@@ -67,9 +66,9 @@ pub trait Encryptor<'a> {
 /// This trait allows for decryption of data streams incrementally, with internal buffering
 /// for partial blocks. It may return residual plaintext during finalization.
 pub trait Decryptor<'a> {
-    type Error: Into<Error>;
+    type Error: Into<Error> + Send + Sync + Unpin;
     /// The type required for finalization (e.g., an authentication tag for AEAD, or `()` if not applicable).
-    type AuthenticationTag: Send + Sync;
+    type AuthenticationTag: Send + Sync + Unpin;
 
     /// Required alignment for certain operations such as buffering and seeking.
     /// Typically, the cipher's block size.
@@ -92,23 +91,12 @@ pub trait Decryptor<'a> {
     /// Finalizes the decryption process, ensuring all data is processed and verified if applicable.
     ///
     /// This consumes the decryptor, accepts a final input value (e.g., for tag verification),
-    /// and returns any residual plaintext from internal buffering.
-    fn finalize(self, tag: &Self::AuthenticationTag) -> Result<Option<Vec<u8>>, Self::Error>;
+    /// and returns the authentication result & any residual plaintext from internal buffering.
+    fn finalize(self, tag: &Self::AuthenticationTag) -> (Result<(), Self::Error>, Option<Vec<u8>>);
 }
 
 pub mod hazmat {
     use crate::crypto::encryption::Decryptor;
-
-    pub trait FinalizeDecryptionWithoutAuthentication<'a>: Decryptor<'a> {
-        /// Allows finalizing while skipping authentication.
-        /// Intended to be used together with `SeekableDecryptor::seek`.
-        ///
-        /// **WARNING**: Only use if ciphertext has already been pre-authenticated!
-        ///
-        /// This consumes the decryptor and returns any residual plaintext from internal buffering.
-        fn finalize_unauthenticated(self) -> Result<Option<Vec<u8>>, Self::Error>;
-    }
-
     pub trait SeekableDecryptor<'a>: Decryptor<'a> {
         /// Sets the current position within the ciphertext.
         ///
@@ -402,18 +390,18 @@ pub trait DecryptionExt {
 
     fn decrypt<'a, I: Buf, O: BufMut>(
         params: Self::DecryptionParams<'a>,
-        ciphertext: &mut I,
-        plaintext: &mut O,
-        tag: &<Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
+        ciphertext: I,
+        plaintext: O,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<(), Error>
     where
         Self: 'a;
 
     fn decrypt_readwrite<'a, I: Read, O: Write>(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
-        plaintext_writer: &'a mut O,
-        tag: &<Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
+        ciphertext_reader: I,
+        plaintext_writer: O,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<(), Error>
     where
         Self: 'a,
@@ -428,35 +416,41 @@ pub trait DecryptionExt {
 
     fn decrypt_readwrite_with_buf_size<'a, I: Read, O: Write, const BUF_SIZE: usize>(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
-        plaintext_writer: &'a mut O,
-        tag: &<Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
+        ciphertext_reader: I,
+        plaintext_writer: O,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<(), Error>
     where
         Self: 'a;
 
     fn decrypting_reader<'a, I: Read>(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
+        ciphertext_reader: I,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
     where
         Self: 'a,
     {
-        Self::decrypting_reader_with_buf_size::<I, { 64 * 1024 }>(params, ciphertext_reader)
+        Self::decrypting_reader_with_buf_size::<I, { 64 * 1024 }>(params, ciphertext_reader, tag)
     }
 
     fn decrypting_reader_with_buf_size<'a, I: Read, const BUF_SIZE: usize>(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
+        ciphertext_reader: I,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
     where
         Self: 'a;
 
-    fn decrypt_async_readwrite<'a, I: AsyncRead + Send + Unpin, O: AsyncWrite + Send + Unpin>(
+    fn decrypt_async_readwrite<
+        'a,
+        I: AsyncRead + Send + Unpin + 'a,
+        O: AsyncWrite + Send + Unpin + 'a,
+    >(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
-        plaintext_writer: &'a mut O,
-        tag: &<Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
+        ciphertext_reader: I,
+        plaintext_writer: O,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> impl Future<Output = Result<(), Error>> + Send
     where
         Self: Unpin + 'a,
@@ -473,35 +467,40 @@ pub trait DecryptionExt {
 
     fn decrypt_async_readwrite_with_buf_size<
         'a,
-        I: AsyncRead + Send + Unpin,
-        O: AsyncWrite + Send + Unpin,
+        I: AsyncRead + Send + Unpin + 'a,
+        O: AsyncWrite + Send + Unpin + 'a,
         const BUF_SIZE: usize,
     >(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
-        plaintext_writer: &'a mut O,
-        tag: &<Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
+        ciphertext_reader: I,
+        plaintext_writer: O,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> impl Future<Output = Result<(), Error>> + Send
     where
         Self: Unpin + 'a,
         for<'b> Self: 'b,
         for<'b> Self::Decryptor<'b>: Send + Unpin;
-
     fn decrypting_async_reader<'a, I: AsyncRead + Unpin>(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
+        ciphertext_reader: I,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
     where
         Self: 'a,
         Self: Unpin,
         Self::Decryptor<'a>: Unpin,
     {
-        Self::decrypting_async_reader_with_buf_size::<I, { 64 * 1024 }>(params, ciphertext_reader)
+        Self::decrypting_async_reader_with_buf_size::<I, { 64 * 1024 }>(
+            params,
+            ciphertext_reader,
+            tag,
+        )
     }
 
     fn decrypting_async_reader_with_buf_size<'a, I: AsyncRead + Unpin, const BUF_SIZE: usize>(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
+        ciphertext_reader: I,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
     where
         Self: 'a,
@@ -524,9 +523,9 @@ where
 
     fn decrypt<'a, I: Buf, O: BufMut>(
         params: Self::DecryptionParams<'a>,
-        ciphertext: &mut I,
-        plaintext: &mut O,
-        tag: &<Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
+        mut ciphertext: I,
+        mut plaintext: O,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<(), Error>
     where
         T: 'a,
@@ -534,10 +533,11 @@ where
         let mut decryptor = <Self as Scheme>::new_decryptor(params).map_err(|e| e.into())?;
         while ciphertext.has_remaining() {
             decryptor
-                .update(ciphertext, plaintext)
+                .update(&mut ciphertext, &mut plaintext)
                 .map_err(|e| e.into())?;
         }
-        let residual = decryptor.finalize(tag).map_err(|e| e.into())?;
+        let (auth_res, residual) = decryptor.finalize(&tag);
+        auth_res.map_err(|e| e.into())?;
         if let Some(residual) = residual {
             plaintext.copy_all_from_slice(residual.as_slice())?;
         }
@@ -546,26 +546,25 @@ where
 
     fn decrypt_readwrite_with_buf_size<'a, I: Read, O: Write, const BUF_SIZE: usize>(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
-        plaintext_writer: &'a mut O,
-        tag: &<Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
+        ciphertext_reader: I,
+        plaintext_writer: O,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<(), Error>
     where
         T: 'a,
     {
         let mut reader =
-            Self::decrypting_reader_with_buf_size::<I, BUF_SIZE>(params, ciphertext_reader)?;
+            Self::decrypting_reader_with_buf_size::<I, BUF_SIZE>(params, ciphertext_reader, tag)?;
         let mut writer = plaintext_writer;
         io::copy(&mut reader, &mut writer)?;
-        if let Some(residual) = reader.finalize(tag)? {
-            writer.write_all(&residual)?;
-        }
+        reader.finalize()?;
         Ok(())
     }
 
     fn decrypting_reader_with_buf_size<'a, I: Read, const BUF_SIZE: usize>(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
+        ciphertext_reader: I,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
     where
         Self: 'a,
@@ -575,39 +574,42 @@ where
         Ok(DecryptingReader::new(
             decryptor,
             ciphertext_reader,
+            tag,
             BUF_SIZE,
         ))
     }
 
     async fn decrypt_async_readwrite_with_buf_size<
         'a,
-        I: AsyncRead + Unpin,
-        O: AsyncWrite + Unpin,
+        I: AsyncRead + Unpin + 'a,
+        O: AsyncWrite + Unpin + 'a,
         const BUF_SIZE: usize,
     >(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
-        plaintext_writer: &'a mut O,
-        tag: &<Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
+        ciphertext_reader: I,
+        plaintext_writer: O,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<(), Error>
     where
         Self: Unpin + 'a,
         for<'b> Self: 'b,
         for<'b> Self::Decryptor<'b>: Send + Unpin,
     {
-        let mut reader =
-            Self::decrypting_async_reader_with_buf_size::<I, BUF_SIZE>(params, ciphertext_reader)?;
+        let mut reader = Self::decrypting_async_reader_with_buf_size::<I, BUF_SIZE>(
+            params,
+            ciphertext_reader,
+            tag,
+        )?;
         let mut writer = plaintext_writer;
         futures_lite::io::copy(&mut reader, &mut writer).await?;
-        if let Some(residual) = reader.finalize(tag)? {
-            writer.write_all(&residual).await?;
-        }
+        reader.finalize()?;
         Ok(())
     }
 
     fn decrypting_async_reader_with_buf_size<'a, I: AsyncRead + Unpin, const BUF_SIZE: usize>(
         params: Self::DecryptionParams<'a>,
-        ciphertext_reader: &'a mut I,
+        ciphertext_reader: I,
+        tag: <Self::Decryptor<'a> as Decryptor<'a>>::AuthenticationTag,
     ) -> Result<DecryptingReader<'a, Self::Decryptor<'a>, I>, Error>
     where
         Self: 'a,
@@ -619,6 +621,7 @@ where
         Ok(DecryptingReader::new(
             decryptor,
             ciphertext_reader,
+            tag,
             BUF_SIZE,
         ))
     }

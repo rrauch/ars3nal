@@ -1,29 +1,34 @@
 use crate::key_ring::KeyRing;
 use crate::types::file::FileId;
 use crate::types::{Cipher, SignatureFormat};
+use crate::vfs::FileReader;
 use crate::{DriveId, Password};
-use ario_core::blob::AsBlob;
+use ario_core::blob::{AsBlob, OwnedBlob};
 use ario_core::bundle::{
     ArweaveScheme, BundleItem, BundleItemBuilder, BundleItemError, V2BundleItemDataProcessor,
 };
 use ario_core::confidential::{NewSecretExt, RevealExt, RevealMutExt};
-use ario_core::crypto::aes::gcm::{AesGcm, AesGcmParams, Tag as AesGcmTag};
+use ario_core::crypto::aes::ctr::{AesCtr, AesCtrParams};
+use ario_core::crypto::aes::gcm::{AesGcmParams, DefaultAesGcm, Tag as AesGcmTag, Tag};
 use ario_core::crypto::aes::{AesKey, Nonce};
 use ario_core::crypto::encryption;
-use ario_core::crypto::encryption::DecryptionExt;
+use ario_core::crypto::encryption::{DecryptionExt, Decryptor};
 use ario_core::crypto::hash::{Hasher, HasherExt, Sha256};
 use ario_core::crypto::rsa::RsaPrivateKey;
 use ario_core::crypto::rsa::pss::DeterministicRsaPss;
 use ario_core::crypto::signature::Signature;
 use ario_core::wallet::hazmat::SigningKey;
 use ario_core::wallet::{Wallet, WalletSk};
+use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use hkdf::Hkdf;
 use hkdf::hmac::digest::array::Array;
 use hkdf::hmac::digest::consts::U16;
 use rsa::signature::digest::typenum::U12;
 use std::fmt::Display;
-use std::io::Cursor;
+use std::io::{Cursor, SeekFrom};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -128,10 +133,26 @@ impl DriveKey {
         &self,
         ciphertext: &[u8],
         nonce: &Nonce<U12>,
-        tag: &AesGcmTag<U16>,
+        tag: AesGcmTag<U16>,
     ) -> Result<Vec<u8>, DriveKeyError> {
         Ok(decrypt_metadata(ciphertext, nonce, tag, &self.0)?)
     }
+}
+
+#[derive(Error, Debug)]
+pub enum FileKeyError {
+    #[error(transparent)]
+    DecryptionError(#[from] encryption::Error),
+    #[error(transparent)]
+    IoError(#[from] std::io::Error),
+    #[error("Cipher '{0}' not supported")]
+    UnsupportedCipher(Cipher),
+    #[error("invalid nonce")]
+    InvalidNonce,
+    #[error("invalid tag")]
+    InvalidTag,
+    #[error("IV is missing")]
+    IvMissing,
 }
 
 #[derive(Debug, Clone)]
@@ -150,13 +171,13 @@ fn derive_file_key(file_id: &FileId, aes_drive_key: &AesKey<256>) -> AesKey<256>
 fn decrypt_metadata(
     ciphertext: &[u8],
     nonce: &Nonce<U12>,
-    tag: &AesGcmTag<U16>,
+    tag: AesGcmTag<U16>,
     key: &AesKey<256>,
 ) -> Result<Vec<u8>, encryption::Error> {
     let params = AesGcmParams::new(key, nonce, "".as_bytes());
     let mut plaintext = Vec::with_capacity(ciphertext.len());
     let mut ciphertext = Cursor::new(ciphertext);
-    AesGcm::decrypt(params, &mut ciphertext, &mut plaintext, &tag)?;
+    DefaultAesGcm::decrypt(params, &mut ciphertext, &mut plaintext, tag)?;
     Ok(plaintext)
 }
 
@@ -169,9 +190,45 @@ impl FileKey {
         &self,
         ciphertext: &[u8],
         nonce: &Nonce<U12>,
-        tag: &AesGcmTag<U16>,
-    ) -> Result<Vec<u8>, DriveKeyError> {
+        tag: AesGcmTag<U16>,
+    ) -> Result<Vec<u8>, FileKeyError> {
         Ok(decrypt_metadata(ciphertext, nonce, tag, &self.0)?)
+    }
+
+    pub async fn decrypt_content<T: AsyncRead + AsyncSeek + Send + Sync + Unpin + 'static>(
+        &self,
+        mut ciphertext: T,
+        plaintext_len: u64,
+        cipher: Cipher,
+        iv: Option<OwnedBlob>,
+    ) -> Result<Box<dyn FileReader + 'static>, FileKeyError> {
+        let iv = iv.ok_or_else(|| FileKeyError::IvMissing)?;
+        let nonce = Nonce::try_from(iv).map_err(|_| FileKeyError::InvalidNonce)?;
+
+        match cipher {
+            Cipher::Aes256Gcm => {
+                // read tag first
+                ciphertext.seek(SeekFrom::Start(plaintext_len)).await?;
+                let mut buf = vec![0u8; 16];
+                ciphertext.read_exact(&mut buf).await?;
+                ciphertext.seek(SeekFrom::Start(0)).await?;
+                let tag = Tag::try_from_bytes(buf.as_slice()).ok_or(FileKeyError::InvalidTag)?;
+
+                let ciphertext = Take::new(ciphertext, 0, plaintext_len); // trim the tag as we have to ignore it
+                let params = AesGcmParams::new(self.0.as_ref().clone(), nonce, b"");
+                Ok(Box::new(DefaultAesGcm::decrypting_async_reader(
+                    params, ciphertext, tag,
+                )?))
+            }
+            Cipher::Aes256Ctr => {
+                let params = AesCtrParams::new(self.0.as_ref().clone(), nonce);
+                Ok(Box::new(AesCtr::decrypting_async_reader(
+                    params,
+                    ciphertext,
+                    (),
+                )?))
+            }
+        }
     }
 }
 
@@ -202,6 +259,8 @@ pub(crate) enum MetadataCryptorError {
     CiphertextTooShort,
     #[error(transparent)]
     DriveKeyError(#[from] DriveKeyError),
+    #[error(transparent)]
+    FileKeyError(#[from] FileKeyError),
     #[error("no default key is set in key ring")]
     NoDefaultKeyInKeyRing,
     #[error("invalid nonce")]
@@ -277,7 +336,7 @@ impl MetadataCryptor<'_> for DriveKeyMetadataCryptor {
                 .ok_or_else(|| MetadataCryptorError::NoDefaultKeyInKeyRing)?,
         };
 
-        Ok(drive_key.decrypt_metadata(ciphertext, &self.nonce, &tag)?)
+        Ok(drive_key.decrypt_metadata(ciphertext, &self.nonce, tag)?)
     }
 }
 
@@ -289,12 +348,15 @@ pub(crate) struct FileMetadataCryptor<'a> {
 
 impl<'a> FileMetadataCryptor<'a> {
     pub(crate) fn new(
+        cipher: Cipher,
         iv: Option<&[u8]>,
         file_id: &'a FileId,
         signature_format: Option<SignatureFormat>,
     ) -> Result<Self, MetadataCryptorError> {
-        // According to the docs, File Metadata are *ALWAYS* AES-256-GCM encrypted
-        // The cipher tag must therefore refer to the file body encryption.
+        match cipher {
+            Cipher::Aes256Gcm => {}
+            other => return Err(MetadataCryptorError::UnsupportedCipher(other)),
+        }
 
         let iv = iv.ok_or_else(|| MetadataCryptorError::IvMissing)?;
         let nonce = Nonce::try_from(iv).map_err(|_| MetadataCryptorError::InvalidNonce)?;
@@ -333,7 +395,7 @@ impl<'a> MetadataCryptor<'a> for FileMetadataCryptor<'a> {
                 .ok_or_else(|| MetadataCryptorError::NoDefaultKeyInKeyRing)?,
         };
 
-        Ok(file_key.decrypt_metadata(ciphertext, &self.nonce, &tag)?)
+        Ok(file_key.decrypt_metadata(ciphertext, &self.nonce, tag)?)
     }
 }
 
@@ -350,4 +412,72 @@ fn prepare_encrypted_metadata(
         .ok_or_else(|| MetadataCryptorError::InvalidTag)?;
 
     Ok((ciphertext, tag))
+}
+
+pub struct Take<T> {
+    inner: T,
+    limit: u64,
+    pos: u64,
+}
+
+impl<T> Take<T> {
+    pub fn new(inner: T, current_pos: u64, limit: u64) -> Self {
+        Self {
+            inner,
+            limit,
+            pos: current_pos,
+        }
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for Take<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let remaining = self.limit.saturating_sub(self.pos) as usize;
+        if remaining == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        let max = buf.len().min(remaining);
+        let result = Pin::new(&mut self.inner).poll_read(cx, &mut buf[..max]);
+        if let Poll::Ready(Ok(n)) = result {
+            self.pos = self.pos.saturating_add(n as u64);
+        }
+        result
+    }
+}
+
+impl<T: AsyncSeek + Unpin> AsyncSeek for Take<T> {
+    fn poll_seek(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        pos: SeekFrom,
+    ) -> Poll<std::io::Result<u64>> {
+        let oob = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek out of bounds");
+
+        let target = match pos {
+            SeekFrom::Start(n) => n,
+            SeekFrom::Current(n) => self.pos.checked_add_signed(n).ok_or_else(oob)?,
+            SeekFrom::End(n) if n <= 0 => self.limit.checked_add_signed(n).ok_or_else(oob)?,
+            SeekFrom::End(_) => return Poll::Ready(Err(oob())),
+        };
+
+        if target > self.limit {
+            return Poll::Ready(Err(oob()));
+        }
+
+        if target == self.pos {
+            return Poll::Ready(Ok(target));
+        }
+
+        let result = Pin::new(&mut self.inner).poll_seek(cx, SeekFrom::Start(target));
+        if let Poll::Ready(Ok(pos)) = result {
+            self.pos = pos;
+            Poll::Ready(Ok(pos))
+        } else {
+            result
+        }
+    }
 }

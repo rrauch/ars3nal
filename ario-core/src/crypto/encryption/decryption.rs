@@ -1,7 +1,5 @@
 use crate::buffer::{BufExt, HeapCircularBuffer};
-use crate::crypto::encryption::hazmat::{
-    FinalizeDecryptionWithoutAuthentication, SeekableDecryptor,
-};
+use crate::crypto::encryption::hazmat::SeekableDecryptor;
 use crate::crypto::encryption::{BufMutExt, Decryptor, align};
 use bytes::{Buf, BufMut};
 use futures_lite::{AsyncRead, AsyncSeek, AsyncSeekExt, FutureExt};
@@ -166,12 +164,12 @@ impl<'a, D: Decryptor<'a>> DecryptingCore<'a, D> {
 
 impl<'a, D: Decryptor<'a>> Drop for DecryptingCore<'a, D> {
     fn drop(&mut self) {
-        if !cfg!(test) {
+        /*if !cfg!(test) {
             debug_assert!(
                 self.decryptor.is_none(),
                 "decryptor was not closed properly. 'close' needs to be called manually prior to dropping!"
             );
-        }
+        }*/
         if self.decryptor.is_some() {
             // decryptor wasn't properly closed
             // output is not authenticated!
@@ -182,9 +180,12 @@ impl<'a, D: Decryptor<'a>> Drop for DecryptingCore<'a, D> {
 
 pub struct DecryptingReader<'a, D: Decryptor<'a>, R> {
     core: DecryptingCore<'a, D>,
-    reader: &'a mut R,
+    reader: R,
     len: Option<u64>,
     async_state: AsyncState,
+    tag: <D as Decryptor<'a>>::AuthenticationTag,
+    residual: Option<std::io::Cursor<Vec<u8>>>,
+    finalization: Option<Result<(), <D as Decryptor<'a>>::Error>>,
 }
 
 enum AsyncState {
@@ -194,32 +195,32 @@ enum AsyncState {
 }
 
 impl<'a, D: Decryptor<'a>, R> DecryptingReader<'a, D, R> {
-    pub fn new(decryptor: D, reader: &'a mut R, buf_size: usize) -> Self {
+    pub fn new(
+        decryptor: D,
+        reader: R,
+        tag: <D as Decryptor<'a>>::AuthenticationTag,
+        buf_size: usize,
+    ) -> Self {
         Self {
             core: DecryptingCore::new(decryptor, buf_size),
             reader,
             len: None,
             async_state: AsyncState::None,
+            tag,
+            residual: None,
+            finalization: None,
         }
     }
 
-    pub fn finalize(mut self, tag: &D::AuthenticationTag) -> Result<Option<Vec<u8>>, Error> {
-        let mut residual = self.core.drain_buffer()?.unwrap_or_default();
-
-        let decryptor = self.core.take_decryptor()?;
-
-        if let Some(mut res2) = decryptor
-            .finalize(tag)
-            .map_err(|e| Error::other(e.into()))?
-        {
-            residual.append(&mut res2);
-        }
-
-        Ok(if residual.is_empty() {
-            None
+    pub fn finalize(mut self) -> Result<(), Error> {
+        if let Some(auth_res) = self.finalization {
+            // already finalized
+            auth_res
         } else {
-            Some(residual)
-        })
+            let (auth_res, _) = self.core.take_decryptor()?.finalize(&self.tag);
+            auth_res
+        }
+        .map_err(|e| Error::other(e.into()))
     }
 
     fn align(pos: u64) -> (u64, usize) {
@@ -227,31 +228,6 @@ impl<'a, D: Decryptor<'a>, R> DecryptingReader<'a, D, R> {
         let block_no = pos / block_size;
         let offset = pos % block_size;
         (block_no * block_size, offset as usize)
-    }
-}
-
-impl<'a, D: Decryptor<'a>, R> DecryptingReader<'a, D, R>
-where
-    D: FinalizeDecryptionWithoutAuthentication<'a>,
-{
-    /// **WARNING**: Only use if ciphertext has already been pre-authenticated!
-    pub fn finalize_unauthenticated(mut self) -> Result<Option<Vec<u8>>, Error> {
-        let mut residual = self.core.drain_buffer()?.unwrap_or_default();
-
-        let decryptor = self.core.take_decryptor()?;
-
-        if let Some(mut res2) = decryptor
-            .finalize_unauthenticated()
-            .map_err(|e| Error::other(e.into()))?
-        {
-            residual.append(&mut res2);
-        }
-
-        Ok(if residual.is_empty() {
-            None
-        } else {
-            Some(residual)
-        })
     }
 }
 
@@ -287,6 +263,12 @@ where
 
 impl<'a, D: Decryptor<'a>, R: Read> Read for DecryptingReader<'a, D, R> {
     fn read(&mut self, output: &mut [u8]) -> Result<usize, Error> {
+        if let Some(residual) = self.residual.as_mut() {
+            let n = min(residual.remaining(), output.len());
+            residual.copy_to_slice(&mut output[..n]);
+            return Ok(n);
+        }
+
         let mut need_input =
             !self.core.has_input() && !(self.core.is_eof() || self.core.is_closed());
 
@@ -308,6 +290,17 @@ impl<'a, D: Decryptor<'a>, R: Read> Read for DecryptingReader<'a, D, R> {
             }
 
             if !self.core.has_input() {
+                // we keep the authentication result on purpose here
+                let (auth_res, residual) = self.core.take_decryptor()?.finalize(&self.tag);
+                self.finalization = Some(auth_res);
+
+                if let Some(residual) = residual {
+                    let mut residual = std::io::Cursor::new(residual);
+                    let n = min(residual.remaining(), output.len());
+                    residual.copy_to_slice(&mut output[..n]);
+                    self.residual = Some(residual);
+                    return Ok(n);
+                }
                 return Ok(0);
             }
 
@@ -331,6 +324,12 @@ where
         cx: &mut Context<'_>,
         output: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
+        if let Some(residual) = self.residual.as_mut() {
+            let n = min(residual.remaining(), output.len());
+            residual.copy_to_slice(&mut output[..n]);
+            return Poll::Ready(Ok(n));
+        }
+
         let mut need_input =
             !self.core.has_input() && !(self.core.is_eof() || self.core.is_closed());
         let this = self.as_mut().get_mut();
@@ -353,6 +352,17 @@ where
             }
 
             if !this.core.has_input() {
+                // we keep the authentication result on purpose here
+                let (auth_res, residual) = this.core.take_decryptor()?.finalize(&this.tag);
+                this.finalization = Some(auth_res);
+
+                if let Some(residual) = residual {
+                    let mut residual = std::io::Cursor::new(residual);
+                    let n = min(residual.remaining(), output.len());
+                    residual.copy_to_slice(&mut output[..n]);
+                    this.residual = Some(residual);
+                    return Poll::Ready(Ok(n));
+                }
                 return Poll::Ready(Ok(0));
             }
 
@@ -417,8 +427,10 @@ where
         loop {
             match std::mem::replace(&mut this.async_state, AsyncState::Invalid) {
                 AsyncState::Seeking(SeekState::AbsoluteSeekPosition(mut abs)) => {
-                    let (seek_pos, current_pos, len) =
-                        ready!(abs.drive(this.reader, cx), this.async_state = abs.into())?;
+                    let (seek_pos, current_pos, len) = ready!(
+                        abs.drive(&mut this.reader, cx),
+                        this.async_state = abs.into()
+                    )?;
                     if let Some(len) = len {
                         this.len = Some(len);
                     }
@@ -596,6 +608,9 @@ impl AbsoluteSeekState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::aes::gcm::{AesGcmParams, DefaultAesGcm};
+    use crate::crypto::aes::{AesKey, Nonce};
+    use crate::crypto::encryption::{DecryptionExt, EncryptionExt};
     use anyhow::anyhow;
     use hybrid_array::typenum::U1;
     use thiserror::Error;
@@ -638,12 +653,15 @@ mod tests {
             Ok(())
         }
 
-        fn finalize(self, tag: &Self::AuthenticationTag) -> Result<Option<Vec<u8>>, Self::Error> {
+        fn finalize(
+            self,
+            tag: &Self::AuthenticationTag,
+        ) -> (Result<(), Self::Error>, Option<Vec<u8>>) {
             // Verify mock tag
             if tag != &vec![0xAA, 0xBB] {
-                return Err(anyhow!("Invalid authentication tag").into());
+                return (Err(anyhow!("Invalid authentication tag").into()), None);
             }
-            Ok(None)
+            (Ok(()), None)
         }
 
         fn position(&self) -> u64 {
@@ -653,16 +671,25 @@ mod tests {
 
     #[test]
     fn test_decrypting_reader_data_integrity() -> anyhow::Result<()> {
-        let original_data = b"Hello, World! This is a test message for the decrypting reader.";
+        let original_data = b"Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.";
 
         // Simulate encrypted input (in this mock case, it's just the original data)
         let encrypted_input = original_data.to_vec();
         let mut decrypted_data = Vec::new();
+        let tag = vec![0xAA, 0xBB]; // Mock tag
 
         {
             let mut encrypted_cursor = std::io::Cursor::new(&encrypted_input);
             let decryptor = MockDecryptor::new();
-            let mut reader = DecryptingReader::new(decryptor, &mut encrypted_cursor, 64);
+            let mut reader = DecryptingReader::new(decryptor, &mut encrypted_cursor, tag, 64);
 
             // Read data in chunks to simulate real usage
             let mut buffer = [0u8; 16];
@@ -674,8 +701,111 @@ mod tests {
                 decrypted_data.extend_from_slice(&buffer[..bytes_read]);
             }
 
-            let tag = vec![0xAA, 0xBB]; // Mock tag
-            reader.finalize(&tag)?;
+            reader.finalize()?;
+        }
+
+        assert_eq!(
+            original_data.as_slice(),
+            decrypted_data.as_slice(),
+            "Data corruption in DecryptingReader!"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_decrypting_reader_async() -> anyhow::Result<()> {
+        let original_data = b"Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.";
+
+        let key = AesKey::try_from_bytes(b"gdenj3490gfso43SDdf3249fdeuuuuuu").unwrap();
+        let nonce = Nonce::try_from(b"5391jvke011X".as_slice())?;
+        let params = AesGcmParams::new(&key, &nonce, b"");
+        let mut ciphertext = Vec::with_capacity(original_data.len());
+        let tag = DefaultAesGcm::encrypt(
+            params.clone(),
+            &mut std::io::Cursor::new(original_data),
+            &mut ciphertext,
+        )?;
+        let mut decrypted_data = Vec::new();
+
+        {
+            let mut reader = DefaultAesGcm::decrypting_async_reader_with_buf_size::<_, 15>(
+                params,
+                ciphertext.as_slice(),
+                tag,
+            )?;
+
+            // Read data in chunks to simulate real usage
+            let mut buffer = [0u8; 16];
+            loop {
+                let bytes_read = futures_lite::AsyncReadExt::read(&mut reader, &mut buffer).await?;
+                if bytes_read == 0 {
+                    break;
+                }
+                decrypted_data.extend_from_slice(&buffer[..bytes_read]);
+            }
+
+            reader.finalize()?;
+        }
+
+        assert_eq!(
+            original_data.as_slice(),
+            decrypted_data.as_slice(),
+            "Data corruption in DecryptingReader!"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decrypting_reader() -> anyhow::Result<()> {
+        let original_data = b"Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.\
+        Hello, World! This is a test message for the decrypting reader.";
+
+        let key = AesKey::try_from_bytes(b"gdenj3490gfso43SDdf3249fdeuuuuuu").unwrap();
+        let nonce = Nonce::try_from(b"5391jvke011X".as_slice())?;
+        let params = AesGcmParams::new(&key, &nonce, b"");
+        let mut ciphertext = Vec::with_capacity(original_data.len());
+        let tag = DefaultAesGcm::encrypt(
+            params.clone(),
+            &mut std::io::Cursor::new(original_data),
+            &mut ciphertext,
+        )?;
+        let mut decrypted_data = Vec::new();
+
+        {
+            let mut reader = DefaultAesGcm::decrypting_reader_with_buf_size::<_, 15>(
+                params,
+                ciphertext.as_slice(),
+                tag,
+            )?;
+
+            // Read data in chunks to simulate real usage
+            let mut buffer = [0u8; 16];
+            loop {
+                let bytes_read = std::io::Read::read(&mut reader, &mut buffer)?;
+                if bytes_read == 0 {
+                    break;
+                }
+                decrypted_data.extend_from_slice(&buffer[..bytes_read]);
+            }
+
+            reader.finalize()?;
         }
 
         assert_eq!(

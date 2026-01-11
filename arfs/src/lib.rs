@@ -33,6 +33,8 @@ use ario_core::confidential::{Confidential, NewSecretExt, RevealExt};
 use ario_core::tx::TxId;
 use ario_core::wallet::{Wallet, WalletAddress};
 
+use crate::crypto::FileKeyError;
+pub use crate::key_ring::KeyRing;
 use crate::types::file::FileId;
 use bon::Builder;
 use core::fmt;
@@ -49,8 +51,6 @@ use strum::EnumString;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zeroize::Zeroize;
-
-pub use crate::key_ring::KeyRing;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -70,6 +70,14 @@ pub enum Error {
     SyncError(#[from] sync::Error),
     #[error("read-only file system")]
     ReadOnlyFileSystem,
+    #[error("file is encrypted")]
+    EncryptedFile,
+    #[error("file key not found")]
+    FileKeyNotFound,
+    #[error(transparent)]
+    FileKeyError(#[from] FileKeyError),
+    #[error("unexpected data length: expected '{expected}' but got '{actual}'")]
+    UnexpectedDataLength { expected: u64, actual: u64 },
     #[error("file system not synchronized")]
     FileSystemNotSynchronized,
 }
@@ -237,6 +245,7 @@ impl ArFs {
             cache_settings,
             wal_chunk_size,
             scope.read_only(),
+            scope.key_ring().map(|kr| kr.clone()),
         )
         .await?;
 

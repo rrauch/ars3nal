@@ -15,7 +15,7 @@ derive-where = { workspace = true }
 futures-lite = { workspace = true }
 hkdf = { workspace = true }
 maybe-owned = { workspace = true }
-moka = { workspace = true, features = ["future", "sync"], version = "1.0.0" }
+moka = { workspace = true, features = ["future", "sync"] }
 ouroboros = "0.18"
 rangemap = { workspace = true }
 rsa = { workspace = true }
