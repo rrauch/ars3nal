@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
 use std::convert::Infallible;
 use std::fmt::{Debug, Display, Formatter};
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::{Add, Deref, Div, Mul, Sub};
 use std::str::FromStr;
@@ -26,11 +27,12 @@ impl<T, C: Currency> TypedMoney<T, C> {
 
 static BIG_ONE: LazyLock<BigDecimal> = LazyLock::new(|| BigDecimal::one());
 
-pub trait Currency {
+pub trait Currency: Clone + Hash + Debug + PartialEq + Send + Sync + 'static {
     const DECIMAL_POINTS: u16;
     const SYMBOL: &'static str;
 }
 
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub struct Winston;
 
 impl Currency for Winston {
@@ -38,6 +40,7 @@ impl Currency for Winston {
     const SYMBOL: &'static str = "W";
 }
 
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub struct AR;
 
 impl Currency for AR {
@@ -46,16 +49,16 @@ impl Currency for AR {
 }
 
 static AR_WINSTON_XE: LazyLock<BigDecimal> = LazyLock::new(|| BigDecimal::from(1000000000000u64));
-impl ConversionRate<'static, AR, Winston> for () {
-    fn get<'a>(&self) -> &'static BigDecimal {
+impl ConversionRate<AR, Winston> for () {
+    fn multiplier(&self) -> &BigDecimal {
         &AR_WINSTON_XE
     }
 }
 
 static WINSTON_AR_XE: LazyLock<BigDecimal> =
     LazyLock::new(|| BigDecimal::from(1000000000000u64).inverse());
-impl ConversionRate<'static, Winston, AR> for () {
-    fn get(&self) -> &'static BigDecimal {
+impl ConversionRate<Winston, AR> for () {
+    fn multiplier(&self) -> &BigDecimal {
         &WINSTON_AR_XE
     }
 }
@@ -143,6 +146,9 @@ impl<C: Currency> Money<C> {
     pub fn to_plain_string(&self) -> String {
         self.0.to_plain_string()
     }
+    pub fn as_big_decimal(&self) -> &BigDecimal {
+        &self.0
+    }
 
     fn try_convert_impl<T: Currency>(
         self,
@@ -164,11 +170,11 @@ impl<C: Currency> Money<C> {
         }
     }
 
-    pub fn convert_with<'a, To: Currency, XE>(self, xe: &'a XE) -> Money<To>
+    pub fn convert_with<To: Currency, XE: ?Sized>(self, xe: &'_ XE) -> Money<To>
     where
-        XE: ConversionRate<'a, C, To>,
+        XE: ConversionRate<C, To>,
     {
-        self.try_convert_impl(xe.get(), false)
+        self.try_convert_impl(xe.multiplier(), false)
             .expect("imprecise conversion should never fail")
     }
 
@@ -254,12 +260,12 @@ impl<'a, C: Currency> TryFrom<&'a str> for Money<C> {
     }
 }
 
-pub trait ConversionRate<'a, From: Currency, To: Currency> {
-    fn get(&self) -> &'a BigDecimal;
+pub trait ConversionRate<From: Currency, To: Currency> {
+    fn multiplier(&self) -> &BigDecimal;
 }
 
-impl<C: Currency> ConversionRate<'static, C, C> for () {
-    fn get(&self) -> &'static BigDecimal {
+impl<C: Currency> ConversionRate<C, C> for () {
+    fn multiplier(&self) -> &BigDecimal {
         &BIG_ONE
     }
 }
@@ -272,7 +278,7 @@ pub trait Convertible<From: Currency, To: Currency> {
 
 impl<'a, From: Currency, To: Currency> Convertible<From, To> for ()
 where
-    (): ConversionRate<'a, From, To>,
+    (): ConversionRate<From, To>,
 {
     fn convert(from: Money<From>) -> Money<To> {
         from.convert_with(&())

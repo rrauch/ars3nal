@@ -18,11 +18,12 @@ maybe-owned = { workspace = true }
 moka = { workspace = true, features = ["future", "sync"] }
 ouroboros = "0.18"
 rangemap = { workspace = true }
+reqwest = { workspace = true }
 rsa = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = "0.11"
 serde-content = { version = "0.1", features = ["default"] }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 serde_sqlite_jsonb = "0.2"
 serde_with = { workspace = true, features = ["chrono"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "migrate"] }

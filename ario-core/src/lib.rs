@@ -5,6 +5,7 @@ pub use rsa::BoxedUint as BigUint;
 pub use rsa::Error as RsaError;
 pub use serde_json::Error as JsonError;
 pub use serde_json::Value as JsonValue;
+pub use bigdecimal::BigDecimal;
 
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::Blob;

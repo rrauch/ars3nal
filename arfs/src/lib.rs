@@ -2,6 +2,7 @@ extern crate core;
 
 mod crypto;
 mod db;
+pub(crate) mod fx;
 mod key_ring;
 pub(crate) mod resolve;
 pub(crate) mod serde_tag;
@@ -27,30 +28,37 @@ use crate::db::{Db, Transaction};
 use crate::sync::{SyncResult, Syncer};
 use crate::types::AuthMode;
 
-use ario_client::Client;
-use ario_core::MaybeOwned;
+use ario_client::{ByteSize, Client};
 use ario_core::confidential::{Confidential, NewSecretExt, RevealExt};
 use ario_core::tx::TxId;
 use ario_core::wallet::{Wallet, WalletAddress};
+use ario_core::{BigDecimal, MaybeOwned, money};
 
 use crate::crypto::FileKeyError;
+use crate::fx::fiat::{CNY, EUR, GBP, JPY, USD};
 pub use crate::key_ring::KeyRing;
 use crate::types::file::FileId;
+use ario_core::money::{AR, Currency, Money, Winston};
 use bon::Builder;
 use core::fmt;
 use derive_more::Display;
 use futures_lite::Stream;
 use serde_json::Error as JsonError;
+use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::str::FromStr;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use strum::EnumString;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zeroize::Zeroize;
+
+static ZERO: LazyLock<BigDecimal> =
+    LazyLock::new(|| BigDecimal::from_str("0").expect("0 to be a valid big decimal value"));
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -165,6 +173,161 @@ struct SyncSettings {
     sync_min_initial: Duration,
     sync_limit: SyncLimit,
     proactive_cache_interval: Option<Duration>,
+}
+
+#[derive(PartialEq, Debug, Clone)]
+pub struct PriceLimit {
+    price: Price,
+    unit: ByteSize,
+}
+
+#[derive(Error, Debug)]
+pub enum PriceLimitError {
+    #[error("input not valid: '{0}'")]
+    InvalidInput(String),
+    #[error(transparent)]
+    PriceError(#[from] PriceError),
+    #[error("error with data unit: '{0}'")]
+    UnitError(String),
+}
+
+impl FromStr for PriceLimit {
+    type Err = PriceLimitError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (price, unit) = s
+            .split_once("/")
+            .map(|(value, currency)| (value.trim(), currency.trim()))
+            .ok_or_else(|| PriceLimitError::InvalidInput(s.to_string()))?;
+
+        let price = Price::from_str(price)?;
+
+        let unit = if unit.chars().next().map_or(false, |c| c.is_numeric()) {
+            Cow::Borrowed(unit)
+        } else {
+            Cow::Owned(format!("1 {}", unit))
+        };
+
+        let unit = ByteSize::from_str(unit.as_ref()).map_err(|e| PriceLimitError::UnitError(e))?;
+
+        Ok(Self { price, unit })
+    }
+}
+
+#[derive(PartialEq, Debug, Clone)]
+enum Price {
+    AR(Money<AR>),
+    Winston(Money<Winston>),
+    USD(Money<USD>),
+    EUR(Money<EUR>),
+    CNY(Money<CNY>),
+    JPY(Money<JPY>),
+    GBP(Money<GBP>),
+}
+
+impl Price {
+    fn as_big_decimal(&self) -> &BigDecimal {
+        match self {
+            Self::AR(money) => money.as_big_decimal(),
+            Self::Winston(money) => money.as_big_decimal(),
+            Self::USD(money) => money.as_big_decimal(),
+            Self::EUR(money) => money.as_big_decimal(),
+            Self::CNY(money) => money.as_big_decimal(),
+            Self::JPY(money) => money.as_big_decimal(),
+            Self::GBP(money) => money.as_big_decimal(),
+        }
+    }
+}
+
+impl From<Money<AR>> for Price {
+    fn from(value: Money<AR>) -> Self {
+        Price::AR(value)
+    }
+}
+
+impl From<Money<Winston>> for Price {
+    fn from(value: Money<Winston>) -> Self {
+        Price::Winston(value)
+    }
+}
+
+impl From<Money<USD>> for Price {
+    fn from(value: Money<USD>) -> Self {
+        Price::USD(value)
+    }
+}
+
+impl From<Money<EUR>> for Price {
+    fn from(value: Money<EUR>) -> Self {
+        Price::EUR(value)
+    }
+}
+
+impl From<Money<CNY>> for Price {
+    fn from(value: Money<CNY>) -> Self {
+        Price::CNY(value)
+    }
+}
+
+impl From<Money<JPY>> for Price {
+    fn from(value: Money<JPY>) -> Self {
+        Price::JPY(value)
+    }
+}
+
+impl From<Money<GBP>> for Price {
+    fn from(value: Money<GBP>) -> Self {
+        Price::GBP(value)
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum PriceError {
+    #[error(transparent)]
+    MoneyError(#[from] money::MoneyError),
+    #[error("unsupported or invalid currency: '{0}'")]
+    CurrencyError(String),
+    #[error("input not valid: '{0}'")]
+    InvalidInput(String),
+    #[error("price cannot be negative: '{0}'")]
+    NegativePrice(String),
+}
+
+impl FromStr for Price {
+    type Err = PriceError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (value, currency) = s
+            .split_once(" ")
+            .map(|(value, currency)| (value.trim(), currency.trim()))
+            .ok_or_else(|| PriceError::InvalidInput(s.to_string()))?;
+
+        let price: Price = if currency.eq_ignore_ascii_case(AR::SYMBOL) {
+            Money::<AR>::from_str(value)?.into()
+        } else if currency.eq_ignore_ascii_case(Winston::SYMBOL) {
+            Money::<Winston>::from_str(value)?.into()
+        } else if currency.eq_ignore_ascii_case(USD::SYMBOL) {
+            Money::<USD>::from_str(value)?.into()
+        } else if currency.eq_ignore_ascii_case(EUR::SYMBOL) {
+            Money::<EUR>::from_str(value)?.into()
+        } else if currency.eq_ignore_ascii_case(CNY::SYMBOL) {
+            Money::<CNY>::from_str(value)?.into()
+        } else if currency.eq_ignore_ascii_case(JPY::SYMBOL) {
+            Money::<JPY>::from_str(value)?.into()
+        } else if currency.eq_ignore_ascii_case(GBP::SYMBOL) {
+            Money::<GBP>::from_str(value)?.into()
+        } else {
+            Err(PriceError::CurrencyError(currency.to_string()))?
+        };
+
+        if price.as_big_decimal() < ZERO.deref() {
+            Err(PriceError::NegativePrice(
+                price.as_big_decimal().to_plain_string(),
+            ))?;
+        }
+
+        Ok(price)
+    }
 }
 
 #[derive(Builder, Clone, Debug)]
@@ -888,10 +1051,11 @@ impl Display for ArFsInner<Private, ReadWrite> {
 #[cfg(test)]
 mod tests {
     use crate::types::drive::DriveId;
-    use crate::{ArFs, Inode, KeyRing, Scope, SyncStatus, VfsPath, resolve};
-    use ario_client::Client;
+    use crate::{ArFs, Inode, KeyRing, Price, PriceLimit, Scope, SyncStatus, VfsPath, resolve};
+    use ario_client::{ByteSize, Client};
     use ario_core::Gateway;
     use ario_core::jwk::Jwk;
+    use ario_core::money::Money;
     use ario_core::network::Network;
     use ario_core::wallet::{Wallet, WalletAddress};
     use futures_lite::AsyncReadExt;
@@ -1081,6 +1245,40 @@ mod tests {
         } else {
             panic!("expected file to exist")
         }
+        Ok(())
+    }
+
+    #[test]
+    fn price_limit() -> anyhow::Result<()> {
+        let price_limit_1 = "10 USD/GiB";
+        let price_limit_2 = "10000 W/ kb";
+        let negative_price_limit = "-10 Ar/gb";
+        let invalid_price_limit = "1222 /fsad";
+
+        let price_limit = PriceLimit::from_str(price_limit_1)?;
+        assert_eq!(
+            price_limit,
+            PriceLimit {
+                price: Price::USD(Money::from_str("10.0")?),
+                unit: ByteSize::gib(1),
+            }
+        );
+
+        let price_limit = PriceLimit::from_str(price_limit_2)?;
+        assert_eq!(
+            price_limit,
+            PriceLimit {
+                price: Price::Winston(Money::from_str("10000")?),
+                unit: ByteSize::kb(1),
+            }
+        );
+
+        let res = PriceLimit::from_str(invalid_price_limit);
+        assert!(res.is_err());
+
+        let res = PriceLimit::from_str(negative_price_limit);
+        assert!(res.is_err());
+
         Ok(())
     }
 }

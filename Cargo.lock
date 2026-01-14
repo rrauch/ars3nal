@@ -144,6 +144,7 @@ dependencies = [
  "moka",
  "ouroboros",
  "rangemap",
+ "reqwest",
  "rsa 0.10.0-rc.6",
  "serde",
  "serde-content",

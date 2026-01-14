@@ -29,7 +29,7 @@ n0-watcher = "0.3"
 netwatch = "0.8"
 rand = { workspace = true, features = ["thread_rng"] }
 rangemap = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls-webpki-roots", "charset"] }
+reqwest = { workspace = true }
 send-future = "0.1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
