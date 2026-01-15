@@ -26,20 +26,23 @@ pub struct FxService {
 
 #[bon]
 impl FxService {
+    #[tracing::instrument(fields(backend = XE::NAME), skip(xe_source))]
     #[builder]
     pub async fn new<XE: XeSource + Send + 'static>(
         xe_source: XE,
-        #[builder(default = Duration::from_secs(600))] refresh_interval: Duration,
-        #[builder(default = Duration::from_secs(1800))] retry_interval: Duration,
+        #[builder(default = Duration::from_secs(300))] refresh_interval: Duration,
+        #[builder(default = Duration::from_secs(900))] retry_interval: Duration,
     ) -> Result<Self, XE::Error> {
         let (tx, rx) = watch::channel(xe_source.retrieve().await?);
         let jh = tokio::spawn(async move {
             refresh_task(xe_source, tx, refresh_interval, retry_interval).await;
         });
+        tracing::info!("FxService started");
         Ok(Self { current: rx, jh })
     }
 }
 
+#[tracing::instrument(skip(xe_source, sender))]
 async fn refresh_task<XE: XeSource>(
     xe_source: XE,
     sender: watch::Sender<Rates>,
@@ -53,9 +56,21 @@ async fn refresh_task<XE: XeSource>(
             .ok()
             .unwrap_or_else(|| Duration::from_millis(0));
 
+        tracing::debug!(
+            next_refresh_in_secs = sleep_duration.as_secs(),
+            "fx rate refresh attempt"
+        );
         tokio::time::sleep(sleep_duration).await;
-
-        match xe_source.retrieve().await {
+        tracing::debug!("fx rate refresh start");
+        let start = SystemTime::now();
+        let res = xe_source.retrieve().await;
+        let duration = SystemTime::now().duration_since(start).unwrap_or_default();
+        tracing::debug!(
+            duration_millis = duration.as_millis(),
+            success = res.is_ok(),
+            "fx rate refresh complete"
+        );
+        match res {
             Ok(rates) => {
                 if sender.send(rates).is_err() {
                     // no more listeners, shut down now
@@ -64,14 +79,14 @@ async fn refresh_task<XE: XeSource>(
                 next_attempt = SystemTime::now() + refresh_interval;
             }
             Err(err) => {
-                //todo: logging
+                tracing::error!(error = %err, "fx rate refresh failed");
                 next_attempt = SystemTime::now() + retry_interval;
             }
         }
     }
 
     // shutting down fx rate refresher
-    // todo: logging
+    tracing::info!("FxService shutting down");
 }
 
 impl Drop for FxService {
@@ -96,6 +111,7 @@ impl FxService {
 }
 
 trait XeSource {
+    const NAME: &'static str;
     type Error: Send + Display;
 
     fn retrieve(&self) -> impl Future<Output = Result<Rates, Self::Error>> + Send;

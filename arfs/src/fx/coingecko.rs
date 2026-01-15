@@ -37,8 +37,10 @@ pub enum CoinGeckoError {
 }
 
 impl XeSource for CoinGecko {
+    const NAME: &'static str = "CoinGecko";
     type Error = CoinGeckoError;
 
+    #[tracing::instrument(skip(self))]
     async fn retrieve(&self) -> Result<Rates, Self::Error> {
         let resp = self
             .client

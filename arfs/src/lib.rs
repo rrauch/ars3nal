@@ -47,7 +47,7 @@ use serde_json::Error as JsonError;
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
 use std::num::NonZeroUsize;
-use std::ops::Deref;
+use std::ops::{Deref, Div};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -59,6 +59,9 @@ use zeroize::Zeroize;
 
 static ZERO: LazyLock<BigDecimal> =
     LazyLock::new(|| BigDecimal::from_str("0").expect("0 to be a valid big decimal value"));
+
+static HUNDRED: LazyLock<BigDecimal> =
+    LazyLock::new(|| BigDecimal::from_str("100").expect("100 to be a valid big decimal value"));
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -173,6 +176,57 @@ struct SyncSettings {
     sync_min_initial: Duration,
     sync_limit: SyncLimit,
     proactive_cache_interval: Option<Duration>,
+}
+
+#[derive(PartialEq, Debug, Clone)]
+#[repr(transparent)]
+pub struct PriceAdjustment(BigDecimal);
+
+#[derive(Error, Debug)]
+pub enum PriceAdjustmentError {
+    #[error("input not valid: '{0}'")]
+    InvalidInput(String),
+    #[error("price adjustment value must be percentage")]
+    NotAPercentage,
+    #[error("price adjustment must be explicitly positive or negative. prefix with '+' or '-'")]
+    NotPositiveOrNegative,
+    #[error("error parsing number: '{0}'")]
+    NumberParseError(String),
+}
+
+impl FromStr for PriceAdjustment {
+    type Err = PriceAdjustmentError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut input = s.trim();
+        match input.strip_suffix("%") {
+            Some(stripped) => input = stripped,
+            None => Err(PriceAdjustmentError::NotAPercentage)?,
+        }
+        let prefix = match input.split_at_checked(1) {
+            Some((prefix, value)) => {
+                input = value.trim();
+                prefix
+            }
+            _ => Err(PriceAdjustmentError::InvalidInput(s.to_string()))?,
+        };
+
+        let sign = match prefix {
+            "+" => "",
+            "-" => "-",
+            _ => Err(PriceAdjustmentError::NotPositiveOrNegative)?,
+        };
+
+        if input.is_empty() {
+            Err(PriceAdjustmentError::InvalidInput(s.to_string()))?
+        }
+
+        let value = BigDecimal::from_str(format!("{}{}", sign, input).as_str())
+            .map_err(|e| PriceAdjustmentError::NumberParseError(e.to_string()))?
+            .div(HUNDRED.deref());
+
+        Ok(PriceAdjustment(value))
+    }
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -1051,13 +1105,16 @@ impl Display for ArFsInner<Private, ReadWrite> {
 #[cfg(test)]
 mod tests {
     use crate::types::drive::DriveId;
-    use crate::{ArFs, Inode, KeyRing, Price, PriceLimit, Scope, SyncStatus, VfsPath, resolve};
+    use crate::{
+        ArFs, Inode, KeyRing, Price, PriceAdjustment, PriceLimit, Scope, SyncStatus, VfsPath,
+        resolve,
+    };
     use ario_client::{ByteSize, Client};
-    use ario_core::Gateway;
     use ario_core::jwk::Jwk;
     use ario_core::money::Money;
     use ario_core::network::Network;
     use ario_core::wallet::{Wallet, WalletAddress};
+    use ario_core::{BigDecimal, Gateway};
     use futures_lite::AsyncReadExt;
     use futures_lite::stream::StreamExt;
     use std::collections::VecDeque;
@@ -1277,6 +1334,28 @@ mod tests {
         assert!(res.is_err());
 
         let res = PriceLimit::from_str(negative_price_limit);
+        assert!(res.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn price_adjustment() -> anyhow::Result<()> {
+        let price_adjustment_1 = "+10%";
+        let price_adjustment_2 = "-5%";
+        let invalid_price_adjustment_1 = "10%";
+        let invalid_price_adjustment_2 = "+foo%";
+
+        let value = PriceAdjustment::from_str(price_adjustment_1)?;
+        assert_eq!(value.0, BigDecimal::from_str("0.1")?);
+
+        let value = PriceAdjustment::from_str(price_adjustment_2)?;
+        assert_eq!(value.0, BigDecimal::from_str("-0.05")?);
+
+        let res = PriceAdjustment::from_str(invalid_price_adjustment_1);
+        assert!(res.is_err());
+
+        let res = PriceAdjustment::from_str(invalid_price_adjustment_2);
         assert!(res.is_err());
 
         Ok(())
