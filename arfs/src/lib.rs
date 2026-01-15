@@ -38,7 +38,7 @@ use crate::crypto::FileKeyError;
 use crate::fx::fiat::{CNY, EUR, GBP, JPY, USD};
 pub use crate::key_ring::KeyRing;
 use crate::types::file::FileId;
-use ario_core::money::{AR, Currency, Money, Winston};
+use ario_core::money::{AR, Currency, Money, MoneyError, Winston};
 use bon::Builder;
 use core::fmt;
 use derive_more::Display;
@@ -47,7 +47,7 @@ use serde_json::Error as JsonError;
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
 use std::num::NonZeroUsize;
-use std::ops::{Deref, Div};
+use std::ops::{Deref, Div, Mul};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -291,47 +291,106 @@ impl Price {
             Self::GBP(money) => money.as_big_decimal(),
         }
     }
-}
 
-impl From<Money<AR>> for Price {
-    fn from(value: Money<AR>) -> Self {
-        Price::AR(value)
+    fn round_digits(&self) -> i64 {
+        match self {
+            Self::AR(_) => <AR as Currency>::DECIMAL_POINTS,
+            Self::Winston(_) => <Winston as Currency>::DECIMAL_POINTS,
+            Self::USD(_) => <USD as Currency>::DECIMAL_POINTS,
+            Self::EUR(_) => <EUR as Currency>::DECIMAL_POINTS,
+            Self::CNY(_) => <CNY as Currency>::DECIMAL_POINTS,
+            Self::JPY(_) => <JPY as Currency>::DECIMAL_POINTS,
+            Self::GBP(_) => <GBP as Currency>::DECIMAL_POINTS,
+        }
+        .into()
+    }
+
+    pub fn adjust(&self, adjustment: &PriceAdjustment) -> Result<Self, PriceError> {
+        let value = self.as_big_decimal()
+            + self
+                .as_big_decimal()
+                .mul(&adjustment.0)
+                .round(self.round_digits());
+        Ok(match self {
+            Self::AR(_) => Money::<AR>::try_from(value)?.try_into()?,
+            Self::Winston(_) => Money::<Winston>::try_from(value)?.try_into()?,
+            Self::USD(_) => Money::<USD>::try_from(value)?.try_into()?,
+            Self::EUR(_) => Money::<EUR>::try_from(value)?.try_into()?,
+            Self::CNY(_) => Money::<CNY>::try_from(value)?.try_into()?,
+            Self::JPY(_) => Money::<JPY>::try_from(value)?.try_into()?,
+            Self::GBP(_) => Money::<GBP>::try_from(value)?.try_into()?,
+        })
     }
 }
 
-impl From<Money<Winston>> for Price {
-    fn from(value: Money<Winston>) -> Self {
-        Price::Winston(value)
+fn check_negative_money<C: Currency>(value: &Money<C>) -> Result<(), PriceError> {
+    if value.as_big_decimal() < ZERO.deref() {
+        Err(PriceError::NegativePrice(value.to_plain_string()))
+    } else {
+        Ok(())
     }
 }
 
-impl From<Money<USD>> for Price {
-    fn from(value: Money<USD>) -> Self {
-        Price::USD(value)
+impl TryFrom<Money<AR>> for Price {
+    type Error = PriceError;
+
+    fn try_from(value: Money<AR>) -> Result<Self, Self::Error> {
+        check_negative_money(&value)?;
+        Ok(Price::AR(value))
     }
 }
 
-impl From<Money<EUR>> for Price {
-    fn from(value: Money<EUR>) -> Self {
-        Price::EUR(value)
+impl TryFrom<Money<Winston>> for Price {
+    type Error = PriceError;
+
+    fn try_from(value: Money<Winston>) -> Result<Self, Self::Error> {
+        check_negative_money(&value)?;
+        Ok(Price::Winston(value))
     }
 }
 
-impl From<Money<CNY>> for Price {
-    fn from(value: Money<CNY>) -> Self {
-        Price::CNY(value)
+impl TryFrom<Money<USD>> for Price {
+    type Error = PriceError;
+
+    fn try_from(value: Money<USD>) -> Result<Self, Self::Error> {
+        check_negative_money(&value)?;
+        Ok(Price::USD(value))
     }
 }
 
-impl From<Money<JPY>> for Price {
-    fn from(value: Money<JPY>) -> Self {
-        Price::JPY(value)
+impl TryFrom<Money<EUR>> for Price {
+    type Error = PriceError;
+
+    fn try_from(value: Money<EUR>) -> Result<Self, Self::Error> {
+        check_negative_money(&value)?;
+        Ok(Price::EUR(value))
     }
 }
 
-impl From<Money<GBP>> for Price {
-    fn from(value: Money<GBP>) -> Self {
-        Price::GBP(value)
+impl TryFrom<Money<CNY>> for Price {
+    type Error = PriceError;
+
+    fn try_from(value: Money<CNY>) -> Result<Self, Self::Error> {
+        check_negative_money(&value)?;
+        Ok(Price::CNY(value))
+    }
+}
+
+impl TryFrom<Money<JPY>> for Price {
+    type Error = PriceError;
+
+    fn try_from(value: Money<JPY>) -> Result<Self, Self::Error> {
+        check_negative_money(&value)?;
+        Ok(Price::JPY(value))
+    }
+}
+
+impl TryFrom<Money<GBP>> for Price {
+    type Error = PriceError;
+
+    fn try_from(value: Money<GBP>) -> Result<Self, Self::Error> {
+        check_negative_money(&value)?;
+        Ok(Price::GBP(value))
     }
 }
 
@@ -357,28 +416,22 @@ impl FromStr for Price {
             .ok_or_else(|| PriceError::InvalidInput(s.to_string()))?;
 
         let price: Price = if currency.eq_ignore_ascii_case(AR::SYMBOL) {
-            Money::<AR>::from_str(value)?.into()
+            Money::<AR>::from_str(value)?.try_into()?
         } else if currency.eq_ignore_ascii_case(Winston::SYMBOL) {
-            Money::<Winston>::from_str(value)?.into()
+            Money::<Winston>::from_str(value)?.try_into()?
         } else if currency.eq_ignore_ascii_case(USD::SYMBOL) {
-            Money::<USD>::from_str(value)?.into()
+            Money::<USD>::from_str(value)?.try_into()?
         } else if currency.eq_ignore_ascii_case(EUR::SYMBOL) {
-            Money::<EUR>::from_str(value)?.into()
+            Money::<EUR>::from_str(value)?.try_into()?
         } else if currency.eq_ignore_ascii_case(CNY::SYMBOL) {
-            Money::<CNY>::from_str(value)?.into()
+            Money::<CNY>::from_str(value)?.try_into()?
         } else if currency.eq_ignore_ascii_case(JPY::SYMBOL) {
-            Money::<JPY>::from_str(value)?.into()
+            Money::<JPY>::from_str(value)?.try_into()?
         } else if currency.eq_ignore_ascii_case(GBP::SYMBOL) {
-            Money::<GBP>::from_str(value)?.into()
+            Money::<GBP>::from_str(value)?.try_into()?
         } else {
             Err(PriceError::CurrencyError(currency.to_string()))?
         };
-
-        if price.as_big_decimal() < ZERO.deref() {
-            Err(PriceError::NegativePrice(
-                price.as_big_decimal().to_plain_string(),
-            ))?;
-        }
 
         Ok(price)
     }
