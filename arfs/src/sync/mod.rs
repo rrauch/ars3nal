@@ -1,4 +1,5 @@
 mod db;
+pub(crate) mod upload;
 
 use crate::db::Db;
 use crate::types::drive::{DriveEntity, DriveId};
@@ -73,19 +74,20 @@ pub struct Syncer {
 }
 
 impl Syncer {
-    pub(crate) async fn new<PRIVACY: Send + Sync + 'static>(
+    pub(crate) async fn new<PRIVACY: Send + Sync + 'static, MODE: Send + Sync + 'static>(
         client: Client,
         db: Db,
         vfs: Vfs,
         privacy: Arc<PRIVACY>,
+        mode: Arc<MODE>,
         sync_interval: Duration,
         min_initial_wait: Duration,
         sync_limit: SyncLimit,
         proactive_cache_interval: Option<Duration>,
     ) -> Result<Self, crate::Error>
     where
-        BackgroundTask<PRIVACY>: SyncNow,
-        BackgroundTask<PRIVACY>: CacheNow,
+        BackgroundTask<PRIVACY, MODE>: SyncNow,
+        BackgroundTask<PRIVACY, MODE>: CacheNow,
     {
         let root_ct = CancellationToken::new();
 
@@ -112,6 +114,7 @@ impl Syncer {
             db,
             vfs,
             privacy,
+            mode,
             task_ct.clone(),
             status_tx,
             sync_trigger_rx,
@@ -265,11 +268,12 @@ trait SyncNow {
     fn sync(&mut self) -> impl Future<Output = Result<Option<Success>, crate::Error>> + Send;
 }
 
-struct BackgroundTask<PRIVACY> {
+struct BackgroundTask<PRIVACY, MODE> {
     client: Client,
     db: Db,
     vfs: Vfs,
     privacy: Arc<PRIVACY>,
+    mode: Arc<MODE>,
     ct: CancellationToken,
     status_tx: watch::Sender<Status>,
     sync_trigger: mpsc::Receiver<oneshot::Sender<()>>,
@@ -280,12 +284,13 @@ struct BackgroundTask<PRIVACY> {
     sync_limit: SyncLimit,
 }
 
-impl<PRIVACY> BackgroundTask<PRIVACY> {
+impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
     fn new(
         client: Client,
         db: Db,
         vfs: Vfs,
         privacy: Arc<PRIVACY>,
+        mode: Arc<MODE>,
         ct: CancellationToken,
         status_tx: watch::Sender<Status>,
         sync_trigger: mpsc::Receiver<oneshot::Sender<()>>,
@@ -304,6 +309,7 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
             db,
             vfs,
             privacy,
+            mode,
             ct,
             status_tx,
             sync_trigger,
@@ -450,14 +456,14 @@ impl<PRIVACY> BackgroundTask<PRIVACY> {
     }
 }
 
-impl CacheNow for BackgroundTask<Public> {
+impl<MODE: Send + Sync> CacheNow for BackgroundTask<Public, MODE> {
     #[tracing::instrument(name = "background_proactive_caching_public", skip(self))]
     async fn cache(&mut self) -> Result<Option<DateTime<Utc>>, crate::Error> {
         self._cache(&self.privacy.owner, None).await
     }
 }
 
-impl CacheNow for BackgroundTask<Private> {
+impl<MODE: Send + Sync> CacheNow for BackgroundTask<Private, MODE> {
     #[tracing::instrument(name = "background_proactive_caching_private", skip(self))]
     async fn cache(&mut self) -> Result<Option<DateTime<Utc>>, crate::Error> {
         self._cache(&self.privacy.owner, Some(&self.privacy.key_ring))
@@ -465,14 +471,14 @@ impl CacheNow for BackgroundTask<Private> {
     }
 }
 
-impl SyncNow for BackgroundTask<Public> {
+impl<MODE: Send + Sync> SyncNow for BackgroundTask<Public, MODE> {
     #[tracing::instrument(name = "background_sync_public", skip(self))]
     async fn sync(&mut self) -> Result<Option<Success>, crate::Error> {
         self._sync(&self.privacy.owner, None).await
     }
 }
 
-impl SyncNow for BackgroundTask<Private> {
+impl<MODE: Send + Sync> SyncNow for BackgroundTask<Private, MODE> {
     #[tracing::instrument(name = "background_sync_private", skip(self))]
     async fn sync(&mut self) -> Result<Option<Success>, crate::Error> {
         self._sync(&self.privacy.owner, Some(&self.privacy.key_ring))
@@ -480,7 +486,7 @@ impl SyncNow for BackgroundTask<Private> {
     }
 }
 
-impl<PRIVACY> BackgroundTask<PRIVACY> {
+impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
     #[tracing::instrument(skip(self))]
     async fn current_block_height(&self) -> Result<BlockNumber, crate::Error> {
         Ok(self.client.any_gateway_info().await?.height)

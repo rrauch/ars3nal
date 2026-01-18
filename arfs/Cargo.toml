@@ -8,6 +8,7 @@ ario-client = { workspace = true }
 ario-core = { workspace = true }
 
 async-stream = { workspace = true }
+async-trait = { workspace = true }
 bon = { workspace = true }
 chrono = { workspace = true }
 derive_more = { workspace = true, features = ["full"] }
@@ -16,6 +17,7 @@ futures-lite = { workspace = true }
 hkdf = { workspace = true }
 maybe-owned = { workspace = true }
 moka = { workspace = true, features = ["future", "sync"] }
+num-traits = "0.2"
 ouroboros = "0.18"
 rangemap = { workspace = true }
 reqwest = { workspace = true }

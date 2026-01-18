@@ -12,6 +12,9 @@ mod vfs;
 mod wal;
 
 pub use crate::db::Error as DbError;
+pub use crate::fx::FxService;
+pub use crate::fx::coingecko::CoinGecko as CoinGeckoFxService;
+pub use crate::sync::upload::{Direct, Turbo, UploadMode, Uploader};
 pub use crate::vfs::Error as VfsError;
 pub use crate::wal::Error as WalError;
 pub use ario_client::Error as ClientError;
@@ -38,11 +41,12 @@ use crate::crypto::FileKeyError;
 use crate::fx::fiat::{CNY, EUR, GBP, JPY, USD};
 pub use crate::key_ring::KeyRing;
 use crate::types::file::FileId;
-use ario_core::money::{AR, Currency, Money, MoneyError, Winston};
+use ario_core::money::{AR, Currency, Money, Winston};
 use bon::Builder;
 use core::fmt;
 use derive_more::Display;
 use futures_lite::Stream;
+use num_traits::identities::Zero;
 use serde_json::Error as JsonError;
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
@@ -182,6 +186,12 @@ struct SyncSettings {
 #[repr(transparent)]
 pub struct PriceAdjustment(BigDecimal);
 
+impl Default for PriceAdjustment {
+    fn default() -> Self {
+        Self(BigDecimal::zero())
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum PriceAdjustmentError {
     #[error("input not valid: '{0}'")]
@@ -233,6 +243,12 @@ impl FromStr for PriceAdjustment {
 pub struct PriceLimit {
     price: Price,
     unit: ByteSize,
+}
+
+impl PriceLimit {
+    pub fn is_native(&self) -> bool {
+        self.price.is_native()
+    }
 }
 
 #[derive(Error, Debug)]
@@ -320,6 +336,13 @@ impl Price {
             Self::JPY(_) => Money::<JPY>::try_from(value)?.try_into()?,
             Self::GBP(_) => Money::<GBP>::try_from(value)?.try_into()?,
         })
+    }
+
+    pub fn is_native(&self) -> bool {
+        match self {
+            Self::AR(_) | Self::Winston(_) => true,
+            _ => false,
+        }
     }
 }
 
@@ -703,10 +726,30 @@ impl Status {
     }
 }
 
-#[derive(Debug)]
 pub enum Scope {
-    Public(Access<WalletAddress, Wallet>),
-    Private(Access<(WalletAddress, KeyRing), (Wallet, KeyRing)>),
+    Public(Access<WalletAddress, (Wallet, UploadService)>),
+    Private(Access<(WalletAddress, KeyRing), (Wallet, KeyRing, UploadService)>),
+}
+
+impl Debug for Scope {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Public(Access::ReadOnly(owner)) => {
+                f.write_fmt(format_args!("Public,RO,{}", owner))
+            }
+            Self::Public(Access::ReadWrite((wallet, _))) => {
+                let owner = wallet.address();
+                f.write_fmt(format_args!("Public,RW,{}", &owner))
+            }
+            Self::Private(Access::ReadOnly((owner, _))) => {
+                f.write_fmt(format_args!("Private,RO,{}", &owner))
+            }
+            Self::Private(Access::ReadWrite((wallet, _, _))) => {
+                let owner = wallet.address();
+                f.write_fmt(format_args!("Private,RW,{}", &owner))
+            }
+        }
+    }
 }
 
 impl Scope {
@@ -714,27 +757,27 @@ impl Scope {
         Scope::Public(Access::ReadOnly(owner))
     }
 
-    pub fn public_rw(wallet: Wallet) -> Self {
-        Scope::Public(Access::ReadWrite(wallet))
+    pub fn public_rw(wallet: Wallet, uploader: UploadService) -> Self {
+        Scope::Public(Access::ReadWrite((wallet, uploader)))
     }
 
     pub fn private(wallet: Wallet, key_ring: KeyRing) -> Self {
         Scope::Private(Access::ReadOnly((wallet.address(), key_ring)))
     }
 
-    pub fn private_rw(wallet: Wallet, key_ring: KeyRing) -> Self {
-        Scope::Private(Access::ReadWrite((wallet, key_ring)))
+    pub fn private_rw(wallet: Wallet, key_ring: KeyRing, uploader: UploadService) -> Self {
+        Scope::Private(Access::ReadWrite((wallet, key_ring, uploader)))
     }
 
     fn owner(&self) -> MaybeOwned<'_, WalletAddress> {
         match self {
             Self::Public(public) => match public {
                 Access::ReadOnly(owner) => owner.into(),
-                Access::ReadWrite(wallet) => wallet.address().into(),
+                Access::ReadWrite((wallet, _)) => wallet.address().into(),
             },
             Self::Private(private) => match private {
                 Access::ReadOnly((owner, _)) => owner.into(),
-                Access::ReadWrite((wallet, _)) => wallet.address().into(),
+                Access::ReadWrite((wallet, _, _)) => wallet.address().into(),
             },
         }
     }
@@ -750,7 +793,7 @@ impl Scope {
         match self {
             Self::Public(_) => None,
             Self::Private(Access::ReadOnly((_, key_ring)))
-            | Self::Private(Access::ReadWrite((_, key_ring))) => Some(key_ring),
+            | Self::Private(Access::ReadWrite((_, key_ring, _))) => Some(key_ring),
         }
     }
 
@@ -800,7 +843,7 @@ impl ErasedArFs {
                     )
                     .await?,
                 ),
-                Access::ReadWrite(wallet) => Self::PublicRW(
+                Access::ReadWrite((wallet, uploader)) => Self::PublicRW(
                     ArFsInner::new_public_rw(
                         client,
                         db,
@@ -809,6 +852,7 @@ impl ErasedArFs {
                         sync_settings,
                         drive_config,
                         wallet,
+                        uploader,
                     )
                     .await?,
                 ),
@@ -826,7 +870,7 @@ impl ErasedArFs {
                     )
                     .await?,
                 ),
-                Access::ReadWrite((wallet, drive_key)) => Self::PrivateRW(
+                Access::ReadWrite((wallet, drive_key, uploader)) => Self::PrivateRW(
                     ArFsInner::new_private_rw(
                         client,
                         db,
@@ -836,6 +880,7 @@ impl ErasedArFs {
                         drive_config,
                         drive_key,
                         wallet,
+                        uploader,
                     )
                     .await?,
                 ),
@@ -855,11 +900,14 @@ impl ArFsInner<Public, ReadOnly> {
         owner: WalletAddress,
     ) -> Result<Self, Error> {
         let privacy = Arc::new(Public { owner });
+        let mode = Arc::new(ReadOnly);
+
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
             vfs.clone(),
             privacy.clone(),
+            mode.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
@@ -874,7 +922,7 @@ impl ArFsInner<Public, ReadOnly> {
             syncer,
             drive_config,
             privacy,
-            mode: ReadOnly,
+            mode,
         })
     }
 }
@@ -888,15 +936,18 @@ impl ArFsInner<Public, ReadWrite> {
         sync_settings: SyncSettings,
         drive_config: DriveConfig,
         wallet: Wallet,
+        uploader: UploadService,
     ) -> Result<Self, Error> {
         let privacy = Arc::new(Public {
             owner: wallet.address(),
         });
+        let mode = Arc::new(ReadWrite(wallet, uploader));
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
             vfs.clone(),
             privacy.clone(),
+            mode.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
@@ -911,7 +962,7 @@ impl ArFsInner<Public, ReadWrite> {
             syncer,
             drive_config,
             privacy,
-            mode: ReadWrite(wallet),
+            mode,
         })
     }
 }
@@ -927,11 +978,13 @@ impl ArFsInner<Private, ReadOnly> {
         key_ring: KeyRing,
     ) -> Result<Self, Error> {
         let privacy = Arc::new(Private::new(drive_config.owner.clone(), key_ring));
+        let mode = Arc::new(ReadOnly);
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
             vfs.clone(),
             privacy.clone(),
+            mode.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
@@ -946,7 +999,7 @@ impl ArFsInner<Private, ReadOnly> {
             syncer,
             drive_config,
             privacy,
-            mode: ReadOnly,
+            mode,
         })
     }
 }
@@ -961,13 +1014,16 @@ impl ArFsInner<Private, ReadWrite> {
         drive_config: DriveConfig,
         key_ring: KeyRing,
         wallet: Wallet,
+        uploader: UploadService,
     ) -> Result<Self, Error> {
         let privacy = Arc::new(Private::new(drive_config.owner.clone(), key_ring));
+        let mode = Arc::new(ReadWrite(wallet, uploader));
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
             vfs.clone(),
             privacy.clone(),
+            mode.clone(),
             sync_settings.sync_interval,
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
@@ -982,7 +1038,7 @@ impl ArFsInner<Private, ReadWrite> {
             syncer,
             drive_config,
             privacy,
-            mode: ReadWrite(wallet),
+            mode,
         })
     }
 }
@@ -1010,7 +1066,7 @@ impl<PRIVACY, MODE> ArFsInner<PRIVACY, MODE> {
 
     fn display(
         &self,
-        f: &mut fmt::Formatter<'_>,
+        f: &mut Formatter<'_>,
         privacy: &'static str,
         mode: &'static str,
         owner: &WalletAddress,
@@ -1024,8 +1080,16 @@ impl<PRIVACY, MODE> ArFsInner<PRIVACY, MODE> {
     }
 }
 
-#[derive(Debug)]
-struct ReadWrite(Wallet);
+pub type UploadService = Arc<tokio::sync::Mutex<Uploader>>;
+
+struct ReadWrite(Wallet, UploadService);
+
+impl Debug for ReadWrite {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let owner = self.0.address();
+        f.write_fmt(format_args!("RW({})", &owner))
+    }
+}
 
 #[derive(Debug)]
 struct ReadOnly;
@@ -1039,7 +1103,7 @@ struct ArFsInner<PRIVACY, MODE> {
     syncer: Syncer,
     drive_config: DriveConfig,
     privacy: Arc<PRIVACY>,
-    mode: MODE,
+    mode: Arc<MODE>,
 }
 
 #[derive(Debug)]
@@ -1159,8 +1223,8 @@ impl Display for ArFsInner<Private, ReadWrite> {
 mod tests {
     use crate::types::drive::DriveId;
     use crate::{
-        ArFs, Inode, KeyRing, Price, PriceAdjustment, PriceLimit, Scope, SyncStatus, VfsPath,
-        resolve,
+        ArFs, Direct, Inode, KeyRing, Price, PriceAdjustment, PriceLimit, Scope, SyncStatus,
+        Uploader, VfsPath, resolve,
     };
     use ario_client::{ByteSize, Client};
     use ario_core::jwk::Jwk;
@@ -1173,6 +1237,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn init_tracing() {
@@ -1224,10 +1289,16 @@ mod tests {
             .password("foo".to_string())
             .build()?;
 
+        let mode = Box::new(Direct::new(wallet.clone(), PriceAdjustment::default()));
+
+        let uploader = Arc::new(tokio::sync::Mutex::new(
+            Uploader::builder().mode(mode).build(),
+        ));
+
         let arfs = ArFs::builder()
             .client(client.clone())
-            .db_dir(&PathBuf::from_str("/tmp/foo/")?)
-            .scope(Scope::private_rw(wallet, key_ring))
+            .db_dir(&PathBuf::from_str("/tmp/")?)
+            .scope(Scope::private_rw(wallet, key_ring, uploader))
             .drive_id(drive_id)
             .build()
             .await?;

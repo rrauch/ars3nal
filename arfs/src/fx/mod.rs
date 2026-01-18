@@ -1,4 +1,4 @@
-mod coingecko;
+pub(crate) mod coingecko;
 
 use crate::fx::fiat::{CNY, EUR, GBP, JPY, USD};
 use ario_core::BigDecimal;
@@ -110,7 +110,7 @@ impl FxService {
     }
 }
 
-trait XeSource {
+pub trait XeSource {
     const NAME: &'static str;
     type Error: Send + Display;
 

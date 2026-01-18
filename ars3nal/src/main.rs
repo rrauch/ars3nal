@@ -1,5 +1,8 @@
 use anyhow::{anyhow, bail};
-use arfs::{AccessMode, ArFs, DriveId, KeyRing, Scope, SyncLimit};
+use arfs::{
+    AccessMode, ArFs, CoinGeckoFxService, Direct, DriveId, FxService, KeyRing, PriceAdjustment,
+    PriceLimit, Scope, SyncLimit, Turbo, UploadMode,
+};
 use ario_client::{ByteSize, Cache, Client};
 use ario_core::confidential::Confidential;
 use ario_core::crypto::keys::KeyType;
@@ -18,7 +21,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
@@ -252,6 +255,38 @@ where
     deserialize_key_type(deserializer).map(Some)
 }
 
+fn deserialize_price_adjustment<'de, D>(deserializer: D) -> Result<PriceAdjustment, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let str = String::deserialize(deserializer)?;
+    PriceAdjustment::from_str(&str).map_err(|e| serde::de::Error::custom(e.to_string()))
+}
+
+fn deserialize_price_limit_option<'de, D>(deserializer: D) -> Result<Option<PriceLimit>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_price_limit(deserializer).map(Some)
+}
+
+fn deserialize_price_limit<'de, D>(deserializer: D) -> Result<PriceLimit, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let str = String::deserialize(deserializer)?;
+    PriceLimit::from_str(&str).map_err(|e| serde::de::Error::custom(e.to_string()))
+}
+
+fn deserialize_price_adjustment_option<'de, D>(
+    deserializer: D,
+) -> Result<Option<PriceAdjustment>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_price_adjustment(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize)]
 struct TomlServerConfig {
     host: Option<String>,
@@ -274,6 +309,106 @@ struct TomlUserConfig {
     principal: String,
 }
 
+#[derive(Debug)]
+enum UploadType {
+    Direct,
+    Turbo,
+}
+
+#[derive(Debug)]
+struct UploaderConfig {
+    wallet: String,
+    mode: UploadType,
+    price_adjustment: PriceAdjustment,
+    price_limit: Option<PriceLimit>,
+}
+
+impl TryFrom<TomlUploaderConfig> for UploaderConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(value: TomlUploaderConfig) -> Result<Self, Self::Error> {
+        let mode = value.mode.trim();
+        let mode = if mode.eq_ignore_ascii_case("direct") {
+            UploadType::Direct
+        } else if mode.eq_ignore_ascii_case("turbo") {
+            UploadType::Turbo
+        } else {
+            bail!("upload mode '{}' not known", mode);
+        };
+        Ok(UploaderConfig {
+            wallet: value.wallet,
+            mode,
+            price_adjustment: value.price_adjustment.unwrap_or_default(),
+            price_limit: value.price_limit,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TomlUploaderConfig {
+    name: String,
+    mode: String,
+    wallet: String,
+    #[serde(default, deserialize_with = "deserialize_price_adjustment_option")]
+    price_adjustment: Option<PriceAdjustment>,
+    #[serde(default, deserialize_with = "deserialize_price_limit_option")]
+    price_limit: Option<PriceLimit>,
+}
+
+#[derive(Debug)]
+enum WalletConfig {
+    JwkFile(PathBuf),
+    Mnemonic {
+        mnemonic: Confidential<String>,
+        passphrase: Option<Confidential<String>>,
+        key_type: KeyType,
+    },
+}
+
+impl WalletConfig {
+    async fn try_into_wallet(self) -> anyhow::Result<Wallet> {
+        match self {
+            Self::JwkFile(jwk) => {
+                let bytes = tokio::fs::read(jwk).await?;
+                let jwk = Jwk::from_json(&bytes)?;
+                Ok(Wallet::from_jwk(&jwk)?)
+            }
+            Self::Mnemonic {
+                mnemonic,
+                passphrase,
+                key_type,
+            } => Ok(Wallet::from_mnemonic(
+                &mnemonic,
+                passphrase.as_ref(),
+                key_type,
+            )?),
+        }
+    }
+}
+
+impl TryFrom<TomlWalletConfig> for WalletConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(mut value: TomlWalletConfig) -> Result<Self, Self::Error> {
+        if let Some(jwk) = value.jwk {
+            return Ok(Self::JwkFile(jwk));
+        }
+        if let Some(mnemonic) = value.mnemonic {
+            let key_type = value.key_type.unwrap_or(KeyType::Rsa);
+            return Ok(Self::Mnemonic {
+                mnemonic,
+                passphrase: value.passphrase.take(),
+                key_type,
+            });
+        }
+        // invalid config
+        bail!(
+            "invalid configuration for wallet [{}], check settings",
+            value.name
+        )
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct TomlWalletConfig {
     name: String,
@@ -289,29 +424,6 @@ struct TomlWalletConfig {
         deserialize_with = "deserialize_key_type_option"
     )]
     key_type: Option<KeyType>,
-}
-
-impl TomlWalletConfig {
-    async fn try_into_wallet(self) -> anyhow::Result<Wallet> {
-        if let Some(jwk) = self.jwk {
-            let bytes = tokio::fs::read(jwk).await?;
-            let jwk = Jwk::from_json(&bytes)?;
-            return Ok(Wallet::from_jwk(&jwk)?);
-        }
-        if let Some(mnemonic) = self.mnemonic {
-            let key_type = self.key_type.unwrap_or(KeyType::Rsa);
-            return Ok(Wallet::from_mnemonic(
-                &mnemonic,
-                self.passphrase.as_ref(),
-                key_type,
-            )?);
-        }
-        // invalid config
-        bail!(
-            "invalid configuration for wallet [{}], check settings",
-            self.name
-        )
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,6 +447,8 @@ struct TomlPermabucketConfig {
     access_mode: Option<AccessMode>,
     #[serde(default)]
     policy: Option<String>,
+    #[serde(default)]
+    uploader: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -372,6 +486,8 @@ struct TomlConfig {
     users: Vec<TomlUserConfig>,
     #[serde(default, rename = "wallet")]
     wallets: Vec<TomlWalletConfig>,
+    #[serde(default, rename = "uploader")]
+    uploaders: Vec<TomlUploaderConfig>,
 }
 
 #[derive(Debug)]
@@ -388,27 +504,152 @@ struct Config {
     maybe_chunk_l1_cache_size: Option<ByteSize>,
     chunk_l2_cache_dir: PathBuf,
     chunk_l2_cache_size: ByteSize,
-    permabuckets: Vec<PermabucketConfig>,
+    wallets: HashMap<String, WalletConfig>,
+    uploaders: HashMap<String, UploaderConfig>,
+    permabuckets: HashMap<String, PermabucketConfig>,
     max_sync_concurrency: NonZeroUsize,
     proactive_cache_interval: Option<Duration>,
-    users: Vec<UserConfig>,
+    users: HashMap<String, UserConfig>,
     policy: Option<String>,
 }
 
 #[derive(Debug)]
 struct PermabucketConfig {
-    name: String,
     drive_id: DriveId,
-    scope: Scope,
+    scope: PermabucketType,
     data_dir: PathBuf,
     maybe_sync_interval: Option<Duration>,
     maybe_sync_min_initial_wait: Option<Duration>,
     policy: Option<String>,
 }
 
+impl PermabucketConfig {
+    fn wallet_name(&self) -> Option<&str> {
+        match &self.scope {
+            PermabucketType::PublicRo(WalletType::NamedWallet(wallet_name))
+            | PermabucketType::PublicRw { wallet_name, .. }
+            | PermabucketType::PrivateRo { wallet_name, .. }
+            | PermabucketType::PrivateRw { wallet_name, .. } => Some(wallet_name.as_str()),
+            _ => None,
+        }
+    }
+
+    fn uploader_name(&self) -> Option<&str> {
+        match &self.scope {
+            PermabucketType::PublicRw { uploader_name, .. }
+            | PermabucketType::PrivateRw { uploader_name, .. } => Some(uploader_name.as_str()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum WalletType {
+    Owner(WalletAddress),
+    NamedWallet(String),
+}
+
+#[derive(Debug)]
+enum PermabucketType {
+    PublicRo(WalletType),
+    PublicRw {
+        wallet_name: String,
+        uploader_name: String,
+    },
+    PrivateRo {
+        wallet_name: String,
+        drive_password: Confidential<String>,
+    },
+    PrivateRw {
+        wallet_name: String,
+        drive_password: Confidential<String>,
+        uploader_name: String,
+    },
+}
+
+impl<'a>
+    TryFrom<(
+        TomlPermabucketConfig,
+        &'a PathBuf,
+        Option<&'a Duration>,
+        Option<&'a Duration>,
+    )> for PermabucketConfig
+{
+    type Error = anyhow::Error;
+
+    fn try_from(
+        (value, default_data_dir, default_sync_interval, default_min_sync_wait): (
+            TomlPermabucketConfig,
+            &'a PathBuf,
+            Option<&'a Duration>,
+            Option<&'a Duration>,
+        ),
+    ) -> Result<Self, Self::Error> {
+        let scope = match (
+            value.access_mode,
+            value.wallet,
+            value.uploader,
+            value.owner,
+            value.drive_password,
+        ) {
+            (Some(AccessMode::ReadOnly) | None, None, None, Some(owner), None) => {
+                PermabucketType::PublicRo(WalletType::Owner(owner))
+            }
+            (Some(AccessMode::ReadOnly) | None, Some(wallet_name), None, None, None) => {
+                PermabucketType::PublicRo(WalletType::NamedWallet(wallet_name))
+            }
+            (Some(AccessMode::ReadWrite), Some(wallet_name), Some(uploader_name), None, None) => {
+                PermabucketType::PublicRw {
+                    wallet_name,
+                    uploader_name,
+                }
+            }
+            (
+                Some(AccessMode::ReadOnly) | None,
+                Some(wallet_name),
+                None,
+                None,
+                Some(drive_password),
+            ) => PermabucketType::PrivateRo {
+                wallet_name,
+                drive_password,
+            },
+            (
+                Some(AccessMode::ReadWrite),
+                Some(wallet_name),
+                Some(uploader_name),
+                None,
+                Some(drive_password),
+            ) => PermabucketType::PrivateRw {
+                wallet_name,
+                drive_password,
+                uploader_name,
+            },
+            _ => bail!(
+                "config error in bucket [{}]: invalid scope related settings, check access_mode, owner, wallet, uploader ...",
+                value.name
+            ),
+        };
+
+        Ok(PermabucketConfig {
+            drive_id: value.drive_id,
+            scope,
+            policy: value.policy,
+            data_dir: value.data_dir.unwrap_or_else(|| default_data_dir.clone()),
+            maybe_sync_interval: value
+                .sync_interval_secs
+                .map(|s| Some(s))
+                .unwrap_or_else(|| default_sync_interval.map(|d| d.clone())),
+            maybe_sync_min_initial_wait: value
+                .sync_min_initial_wait_secs
+                .map(|s| Some(s))
+                .unwrap_or_else(|| default_min_sync_wait.map(|d| d.clone())),
+        })
+    }
+}
+
 #[derive(Debug)]
 struct UserConfig {
-    access_key: String,
     secret_key: SecretKey,
     principal: String,
 }
@@ -416,7 +657,6 @@ struct UserConfig {
 impl From<TomlUserConfig> for UserConfig {
     fn from(value: TomlUserConfig) -> Self {
         Self {
-            access_key: value.access_key,
             secret_key: value.secret_key,
             principal: value.principal,
         }
@@ -424,7 +664,7 @@ impl From<TomlUserConfig> for UserConfig {
 }
 
 impl Config {
-    async fn new(toml: TomlConfig, arguments: Arguments) -> anyhow::Result<Self> {
+    fn new(toml: TomlConfig, arguments: Arguments) -> anyhow::Result<Self> {
         let listen_host = toml.server.host.unwrap_or_else(|| arguments.host);
         let listen_port = toml.server.port.unwrap_or_else(|| arguments.port);
 
@@ -447,91 +687,59 @@ impl Config {
         let default_sync_interval = toml.syncing.interval_secs;
         let default_min_sync_wait = toml.syncing.min_initial_wait_secs;
 
-        let mut wallets = HashMap::with_capacity(toml.wallets.len());
-        for conf in toml.wallets {
-            let name = conf.name.clone();
-            let wallet = conf.try_into_wallet().await?;
-            wallets.insert(name, wallet);
-        }
+        let wallets = toml
+            .wallets
+            .into_iter()
+            .map(|conf| -> anyhow::Result<(String, WalletConfig)> {
+                let name = conf.name.clone();
+                let wallet_config = conf.try_into()?;
+                Ok((name, wallet_config))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+
+        let uploaders = toml
+            .uploaders
+            .into_iter()
+            .map(|conf| -> anyhow::Result<(String, UploaderConfig)> {
+                let name = conf.name.clone();
+                if !wallets.contains_key(conf.wallet.as_str()) {
+                    bail!("wallet {} not configured", &conf.wallet)
+                }
+                let uploader_config = conf.try_into()?;
+                Ok((name, uploader_config))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
 
         let permabuckets = toml
             .permabuckets
             .into_iter()
-            .map(|pb| -> anyhow::Result<PermabucketConfig> {
-                // determine scope first
-                let wallet = if let Some(wallet_name) = &pb.wallet {
-                    Some(
-                        wallets
-                            .get(wallet_name)
-                            .ok_or_else(|| anyhow!("wallet {} not configured", wallet_name))?,
-                    )
-                } else {
-                    None
-                };
-                let scope = match (
-                    pb.access_mode,
-                    wallet,
-                    pb.owner,
-                    pb.drive_password,
-                ) {
-                    (
-                        Some(AccessMode::ReadOnly) | None,
-                        None,
-                        Some(owner),
-                        None,
-                    ) => Scope::public(owner),
-                    (
-                        Some(AccessMode::ReadOnly) | None,
-                        Some(wallet),
-                        None,
-                        None,
-                    ) => Scope::public(wallet.address()),
-                    (Some(AccessMode::ReadWrite), Some(wallet), None, None) => {
-                        Scope::public_rw(wallet.clone())
+            .map(|conf| -> anyhow::Result<(String, PermabucketConfig)> {
+                let name = conf.name.clone();
+                let permabucket_config = PermabucketConfig::try_from((
+                    conf,
+                    &data_dir,
+                    default_sync_interval.as_ref(),
+                    default_min_sync_wait.as_ref(),
+                ))?;
+                if let Some(wallet_name) = permabucket_config.wallet_name() {
+                    if !wallets.contains_key(wallet_name) {
+                        bail!("wallet {} not configured", wallet_name)
                     }
-                    (
-                        Some(AccessMode::ReadOnly) | None,
-                        Some(wallet),
-                        None,
-                        Some(password),
-                    ) => {
-                        let key_ring = KeyRing::builder().drive_id(&pb.drive_id).wallet(wallet).password(password).build()?;
-                        Scope::private(wallet.clone(), key_ring)
-                    },
-                    (
-                        Some(AccessMode::ReadWrite),
-                        Some(wallet),
-                        None,
-                        Some(password),
-                    ) => {
-                        let key_ring = KeyRing::builder().drive_id(&pb.drive_id).wallet(wallet).password(password).build()?;
-                        Scope::private_rw(wallet.clone(), key_ring)
-                    },
-                    _ => bail!("config error in bucket [{}]: invalid scope related settings, check access_mode, owner, wallet ...", pb.name),
-                };
-                Ok(PermabucketConfig {
-                    name: pb.name,
-                    drive_id: pb.drive_id,
-                    scope,
-                    data_dir: pb.data_dir.unwrap_or_else(|| data_dir.clone()),
-                    maybe_sync_interval: pb
-                        .sync_interval_secs
-                        .map(|s| Some(s))
-                        .unwrap_or_else(|| default_sync_interval.clone()),
-                    maybe_sync_min_initial_wait: pb
-                        .sync_min_initial_wait_secs
-                        .map(|s| Some(s))
-                        .unwrap_or_else(|| default_min_sync_wait.clone()),
-                    policy: pb.policy,
-                })
+                }
+                if let Some(uploader_name) = permabucket_config.uploader_name() {
+                    if !uploaders.contains_key(uploader_name) {
+                        bail!("uploader {} not configured", uploader_name)
+                    }
+                }
+                Ok((name, permabucket_config))
             })
-            .collect::<Result<_, anyhow::Error>>()?;
+            .collect::<Result<HashMap<_, _>, _>>()?;
 
         let users = toml
             .users
             .into_iter()
-            .map(|user| user.into())
-            .collect::<Vec<UserConfig>>();
+            .map(|user| (user.access_key.clone(), user.into()))
+            .collect::<HashMap<_, _>>();
 
         Ok(Self {
             listen_host,
@@ -546,6 +754,8 @@ impl Config {
             maybe_chunk_l1_cache_size,
             chunk_l2_cache_dir,
             chunk_l2_cache_size,
+            wallets,
+            uploaders,
             permabuckets,
             users,
             policy: toml.general.policy,
@@ -655,14 +865,13 @@ fn main() -> anyhow::Result<()> {
         TomlConfig::default()
     });
 
+    let config = Config::new(toml_config, arguments)?;
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_io()
         .enable_time()
         .build()?;
-    rt.block_on(async move {
-        let config = Config::new(toml_config, arguments).await?;
-        run(config).await
-    })?;
+    rt.block_on(async move { run(config).await })?;
     Ok(())
 }
 
@@ -704,6 +913,61 @@ async fn run(config: Config) -> anyhow::Result<()> {
         .build()
         .await?;
 
+    let mut wallets = HashMap::with_capacity(config.wallets.len());
+    for (name, conf) in config.wallets {
+        wallets.insert(name, conf.try_into_wallet().await?);
+    }
+
+    let mut fx_service: Option<Arc<FxService>> = None;
+
+    let mut uploaders = HashMap::with_capacity(config.uploaders.len());
+    for (name, conf) in config.uploaders {
+        let wallet = wallets
+            .get(conf.wallet.as_str())
+            .map(|w| w.clone())
+            .expect("wallet to be configured");
+
+        let mode: Box<dyn UploadMode + Send + Sync + 'static> = match conf.mode {
+            UploadType::Direct => Box::new(Direct::new(
+                client.clone(),
+                wallet.clone(),
+                conf.price_adjustment,
+            )),
+            UploadType::Turbo => Box::new(Turbo::new()),
+        };
+
+        let fx = if let Some(price_limit) = &conf.price_limit {
+            if !price_limit.is_native() {
+                // fx service required
+                if let Some(fx) = fx_service.as_ref() {
+                    Some(fx.clone())
+                } else {
+                    let fx = Arc::new(
+                        FxService::builder()
+                            .xe_source(CoinGeckoFxService::default())
+                            .build()
+                            .await?,
+                    );
+                    fx_service = Some(fx.clone());
+                    Some(fx)
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let uploader = arfs::Uploader::builder()
+            .client(client.clone())
+            .mode(mode)
+            .maybe_price_limit(conf.price_limit)
+            .maybe_fx_service(fx)
+            .build()?;
+
+        uploaders.insert(name, Arc::new(tokio::sync::Mutex::new(uploader)));
+    }
+
     let mut server = Server::builder()
         .host(config.listen_host.as_str())
         .port(config.listen_port)
@@ -713,12 +977,72 @@ async fn run(config: Config) -> anyhow::Result<()> {
     let sync_limit = SyncLimit::new(config.max_sync_concurrency);
     let bucket_count = config.permabuckets.len();
 
-    for bucket in config.permabuckets {
+    for (name, bucket) in config.permabuckets {
+        let scope = match bucket.scope {
+            PermabucketType::PublicRo(WalletType::Owner(owner)) => Scope::public(owner),
+            PermabucketType::PublicRo(WalletType::NamedWallet(wallet_name)) => {
+                let wallet = wallets
+                    .get(&wallet_name)
+                    .map(|w| w.clone())
+                    .expect("wallet to be configured");
+                Scope::public(wallet.address())
+            }
+            PermabucketType::PublicRw {
+                wallet_name,
+                uploader_name,
+            } => {
+                let wallet = wallets
+                    .get(&wallet_name)
+                    .map(|w| w.clone())
+                    .expect("wallet to be configured");
+                let uploader = uploaders
+                    .get(&uploader_name)
+                    .map(|u| u.clone())
+                    .expect("uploader to be configured");
+                Scope::public_rw(wallet, uploader)
+            }
+            PermabucketType::PrivateRo {
+                wallet_name,
+                drive_password,
+            } => {
+                let wallet = wallets
+                    .get(&wallet_name)
+                    .map(|w| w.clone())
+                    .expect("wallet to be configured");
+                let key_ring = KeyRing::builder()
+                    .drive_id(&bucket.drive_id)
+                    .wallet(&wallet)
+                    .password(drive_password)
+                    .build()?;
+                Scope::private(wallet, key_ring)
+            }
+            PermabucketType::PrivateRw {
+                wallet_name,
+                uploader_name,
+                drive_password,
+            } => {
+                let wallet = wallets
+                    .get(&wallet_name)
+                    .map(|w| w.clone())
+                    .expect("wallet to be configured");
+                let uploader = uploaders
+                    .get(&uploader_name)
+                    .map(|u| u.clone())
+                    .expect("uploader to be configured");
+                let key_ring = KeyRing::builder()
+                    .drive_id(&bucket.drive_id)
+                    .wallet(&wallet)
+                    .password(drive_password)
+                    .build()?;
+                Scope::private_rw(wallet, key_ring, uploader)
+            }
+        };
+
         let arfs = ArFs::builder()
             .client(client.clone())
             .drive_id(bucket.drive_id)
             .db_dir(&bucket.data_dir)
-            .scope(bucket.scope)
+            .scope(scope)
             .maybe_sync_interval(bucket.maybe_sync_interval)
             .maybe_sync_min_initial(bucket.maybe_sync_min_initial_wait)
             .maybe_proactive_cache_interval(config.proactive_cache_interval)
@@ -726,9 +1050,9 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .build()
             .await?;
 
-        server.insert_bucket(&bucket.name, arfs)?;
+        server.insert_bucket(&name, arfs)?;
         if let Some(policy) = bucket.policy {
-            server.insert_bucket_policy(&bucket.name, policy)?;
+            server.insert_bucket_policy(&name, policy)?;
         }
     }
 
@@ -736,8 +1060,8 @@ async fn run(config: Config) -> anyhow::Result<()> {
         server.set_default_policy(policy)?;
     }
 
-    for user in config.users {
-        server.insert_user(user.access_key, user.secret_key, user.principal)?;
+    for (access_key, user) in config.users {
+        server.insert_user(access_key, user.secret_key, user.principal)?;
     }
 
     let handle = server.serve();
