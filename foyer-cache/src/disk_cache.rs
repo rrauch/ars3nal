@@ -61,16 +61,15 @@ impl<K: StorageKey, V: StorageValue + Clone> DiskCache<K, V> {
     }
 
     pub async fn get(&self, key: impl Equivalent<K> + Hash) -> Result<Option<V>, std::io::Error> {
-        let value = match self
-            .hybrid_cache
-            .storage()
-            .load(&key)
-            .await
-            .map_err(|e| std::io::Error::other(e))?
-        {
-            Load::Entry { value, .. } => value,
-            Load::Piece { piece, .. } => piece.value().clone(),
-            _ => return Ok(None),
+        let value = match self.hybrid_cache.storage().load(&key).await {
+            Ok(Load::Entry { value, .. }) => value,
+            Ok(Load::Piece { piece, .. }) => piece.value().clone(),
+            Ok(_) => return Ok(None),
+            Err(err) => {
+                // invalid cache entry detected; remove
+                self.hybrid_cache.storage().delete(&key);
+                return Err(std::io::Error::other(err));
+            }
         };
 
         Ok(Some(value.try_into().map_err(|_| {

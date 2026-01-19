@@ -69,7 +69,7 @@ impl<'a, Auth: AuthenticationState> From<V1Tx<'a, Auth>> for RawTx<'a, Auth> {
             owner: Some(v1.signature_data.owner().as_blob().into_owned()),
             tags: v1.tags.into_iter().map(|t| t.into()).collect(),
             target: v1.target.map(|w| w.as_blob().into_owned()),
-            quantity: v1.quantity.map(|q| q.into_inner().into()),
+            quantity: v1.quantity.into_inner().into(),
             data_tree: vec![],
             data_root: None,
             data_size: v1.data_item.as_ref().map(|d| d.len() as u64).unwrap_or(0),
@@ -186,7 +186,7 @@ pub(super) struct V1TxData<'a> {
     pub last_tx: LastTx<'a>,
     pub tags: Vec<Tag<'a>>,
     pub target: Option<WalletAddress>,
-    pub quantity: Option<Quantity>,
+    pub quantity: Quantity,
     pub data_item: Option<EmbeddedDataItem<'a>>,
     pub reward: Reward,
     pub signature_data: V1SignatureData,
@@ -445,7 +445,7 @@ mod tests {
         assert_eq!(&tx_data.tags, &vec![]);
         assert!(tx_data.target.is_none());
         assert!(tx_data.denomination.is_none());
-        assert_eq!(tx_data.quantity.as_ref().unwrap(), ZERO_QUANTITY.deref(),);
+        assert_eq!(&tx_data.quantity, ZERO_QUANTITY.deref(),);
         assert_eq!(tx_data.data_item.as_ref().unwrap().len(), 1033478);
         //todo: verify data value
         assert_eq!(&tx_data.reward, &Reward::try_from("124145681682")?);

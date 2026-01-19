@@ -7,6 +7,7 @@ use crate::crypto::encryption::{Decryptor, Encryptor, Scheme};
 use aes::cipher::consts::U12;
 use aes::cipher::{BlockSizeUser, InOutBuf, KeyInit, StreamCipherCore, StreamCipherSeekCore};
 use bytes::{Buf, BufMut};
+use crypto_common::Generate;
 use ctr::cipher::InnerIvInit;
 use hybrid_array::ArraySize;
 use maybe_owned::MaybeOwned;
@@ -246,6 +247,10 @@ where
     fn finalize(self, input: &[u8], output: &mut [u8], op: Op) -> Result<(), Error> {
         self.core.finalize(input, output, |_| (), op)?;
         Ok(())
+    }
+
+    pub fn generate_nonce() -> Nonce<U12> {
+        Nonce::<U12>::generate()
     }
 }
 

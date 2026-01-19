@@ -1,4 +1,6 @@
-use crate::ContentType;
+use crate::types::file::FileId;
+use crate::{ContentType, FolderId};
+use ario_client::RawItemId;
 use ario_core::blob::{Blob, OwnedBlob};
 use ario_core::crypto::hash::Blake3Hash;
 use chrono::{DateTime, Utc};
@@ -31,8 +33,8 @@ pub enum Error {
 
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum WalNode {
-    File(u64, Option<WalFileMetadata>),
-    Directory,
+    File(u64, WalFileMetadata),
+    Directory(WalDirMetadata),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, strum::Display)]
@@ -81,6 +83,10 @@ impl WalFileChunks {
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WalFileMetadata {
+    #[serde_as(as = "DisplayFromStr")]
+    pub id: FileId,
+    #[serde_as(as = "DisplayFromStr")]
+    pub parent: FolderId,
     pub name: String,
     pub size: u64,
     pub last_modified: DateTime<Utc>,
@@ -89,12 +95,18 @@ pub(crate) struct WalFileMetadata {
     pub content_type: Option<ContentType>,
     #[serde(flatten)]
     pub extra: HashMap<String, OwnedBlob>,
+    #[serde(default)]
+    pub existing_data_item_id: Option<RawItemId>,
 }
 
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WalDirMetadata {
+    #[serde_as(as = "DisplayFromStr")]
+    pub id: FolderId,
+    #[serde_as(as = "DisplayFromStr")]
+    pub parent: FolderId,
     pub name: String,
     pub last_modified: DateTime<Utc>,
 }

@@ -17,6 +17,7 @@ bon = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 bytes = { workspace = true }
 circular-buffer = "1.1"
+crypto-common = { version = "0.2.0-rc.13", features = ["getrandom"] }
 ct-codecs = { workspace = true }
 ctr = { workspace = true, features = ["alloc", "zeroize", "block-padding"] }
 derive-where = { workspace = true, features = ["zeroize", "serde"] }

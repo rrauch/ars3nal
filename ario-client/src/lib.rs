@@ -1,5 +1,5 @@
 mod api;
-mod bundle;
+pub mod bundle;
 pub mod cache;
 pub mod chunk;
 pub mod data_reader;

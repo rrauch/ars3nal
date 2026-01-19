@@ -11,15 +11,17 @@ use crate::types::drive_signature::DriveSignatureEntity;
 use crate::types::file::{FileEntity, FileId};
 use crate::types::folder::{FolderEntity, FolderId};
 use crate::types::snapshot::{SnapshotEntity, SnapshotId};
-use crate::{Timestamp, Visibility, serde_tag};
+use crate::{KeyRing, Timestamp, Visibility, serde_tag};
 use ario_client::location::Arl;
 use ario_core::base64::Base64Error;
-use ario_core::blob::{Blob, OwnedBlob};
+use ario_core::blob::{AsBlob, Blob, OwnedBlob};
+use ario_core::crypto::aes::ctr::AesCtr;
+use ario_core::crypto::aes::gcm::DefaultAesGcm;
 use ario_core::tag::Tag;
 use ario_core::{BlockNumber, JsonValue};
 use derive_where::derive_where;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_with::serde_as;
 use serde_with::{DisplayFromStr, TimestampMilliSeconds, TimestampSeconds};
 use std::collections::HashMap;
@@ -33,6 +35,15 @@ use thiserror::Error;
 pub struct ArFsVersion {
     pub major: usize,
     pub minor: usize,
+}
+
+impl Default for ArFsVersion {
+    fn default() -> Self {
+        Self {
+            major: 0,
+            minor: 15,
+        }
+    }
 }
 
 impl Display for ArFsVersion {
@@ -300,7 +311,7 @@ where
 #[serde_as]
 #[derive_where(Debug, Clone, PartialEq; H)]
 #[derive(Serialize, Deserialize)]
-pub(crate) struct Header<H, T> {
+pub(crate) struct Header<H, T: Entity> {
     #[serde_as(as = "Chain<(BytesToStr, DisplayFromStr)>")]
     #[serde(rename = "ArFS")]
     version: ArFsVersion,
@@ -308,11 +319,35 @@ pub(crate) struct Header<H, T> {
     inner: H,
     #[serde(flatten)]
     extra: HashMap<String, OwnedBlob>,
-    #[serde(skip)]
+    #[serde(
+        rename = "Entity-Type",
+        skip_deserializing,
+        serialize_with = "serialize_entity_type",
+        bound = "T: Entity"
+    )]
     _marker: PhantomData<(T, H)>,
 }
 
-impl<H, T> Header<H, T> {
+fn serialize_entity_type<T: Entity, H, S: Serializer>(
+    _: &PhantomData<(T, H)>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.serialize_bytes(T::TYPE.as_bytes())
+}
+
+impl<H, T: Entity> Header<H, T> {
+    pub(crate) fn from_inner(
+        version: Option<ArFsVersion>,
+        inner: H,
+        extra: Option<HashMap<String, OwnedBlob>>,
+    ) -> Self {
+        Self {
+            version: version.unwrap_or_default(),
+            inner,
+            extra: extra.unwrap_or_default(),
+            _marker: PhantomData::default(),
+        }
+    }
     pub fn version(&self) -> &ArFsVersion {
         &self.version
     }
@@ -332,7 +367,7 @@ impl<H, T> Header<H, T> {
     }
 }
 
-impl<'a, H, T> TryInto<Vec<Tag<'static>>> for &'a Header<H, T>
+impl<'a, H, T: Entity> TryInto<Vec<Tag<'static>>> for &'a Header<H, T>
 where
     H: Serialize + Sized,
 {
@@ -343,7 +378,7 @@ where
     }
 }
 
-impl<'a, H, T> TryFrom<&'a Vec<Tag<'a>>> for Header<H, T>
+impl<'a, H, T: Entity> TryFrom<&'a Vec<Tag<'a>>> for Header<H, T>
 where
     H: Deserialize<'a> + Sized,
 {
@@ -392,6 +427,10 @@ pub enum ParseError {
     Base64Error(#[from] Base64Error),
     #[error(transparent)]
     UuidError(#[from] uuid::Error),
+    #[error("operation requires access to key ring")]
+    KeyRingRequired,
+    #[error("metadata encryption error: {0}")]
+    MetadataEncryptionError(String),
     #[error("parse error: {0}")]
     Other(String),
 }
@@ -409,6 +448,13 @@ pub(crate) struct Metadata<M, Tag> {
 impl<M, Tag> Metadata<M, Tag> {
     pub(crate) fn into_inner(self) -> (M, HashMap<String, JsonValue>) {
         (self.inner, self.extra)
+    }
+    pub(crate) fn from_inner(inner: M, extra: Option<HashMap<String, JsonValue>>) -> Self {
+        Self {
+            inner,
+            extra: extra.unwrap_or_default(),
+            _marker: PhantomData::default(),
+        }
     }
 }
 
@@ -450,6 +496,54 @@ pub(crate) enum ArfsEntity {
     Folder(FolderEntity),
     File(FileEntity),
     Snapshot(SnapshotEntity),
+}
+
+impl ArfsEntity {
+    pub(crate) fn to_header_tags(&self) -> Result<Vec<Tag<'static>>, serde_tag::Error> {
+        Ok(match self {
+            Self::Drive(entity) => (&entity.header).try_into()?,
+            Self::DriveSignature(entity) => (&entity.header).try_into()?,
+            Self::Folder(entity) => (&entity.header).try_into()?,
+            Self::File(entity) => (&entity.header).try_into()?,
+            Self::Snapshot(entity) => (&entity.header).try_into()?,
+        })
+    }
+
+    pub(crate) fn to_metadata_bytes(
+        &self,
+        key_ring: Option<&KeyRing>,
+    ) -> Result<OwnedBlob, ParseError> {
+        match self {
+            Self::Drive(entity) => to_maybe_encrypted_metadata(entity, key_ring),
+            Self::DriveSignature(entity) => to_maybe_encrypted_metadata(entity, key_ring),
+            Self::Folder(entity) => to_maybe_encrypted_metadata(entity, key_ring),
+            Self::File(entity) => to_maybe_encrypted_metadata(entity, key_ring),
+            Self::Snapshot(entity) => to_maybe_encrypted_metadata(entity, key_ring),
+        }
+    }
+}
+
+fn to_maybe_encrypted_metadata<E: Entity>(
+    entity: &Model<E>,
+    key_ring: Option<&KeyRing>,
+) -> Result<OwnedBlob, ParseError>
+where
+    <E as Entity>::Metadata: Serialize,
+{
+    let plaintext = serde_json::to_vec(&entity.metadata)?;
+    Ok(E::maybe_metadata_cryptor(entity.header.as_inner())
+        .transpose()
+        .map_err(|e| ParseError::MetadataEncryptionError(e.to_string()))?
+        .map(|mc| -> Result<_, ParseError> {
+            mc.encrypt(
+                plaintext.as_slice(),
+                key_ring.ok_or_else(|| ParseError::KeyRingRequired)?,
+            )
+            .map_err(|e| ParseError::MetadataEncryptionError(e.to_string()))
+        })
+        .transpose()?
+        .unwrap_or(plaintext)
+        .into())
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -547,6 +641,17 @@ pub(crate) enum Cipher {
     Aes256Gcm,
     #[strum(serialize = "AES256-CTR")]
     Aes256Ctr,
+}
+
+impl Cipher {
+    pub fn generate_nonce(&self) -> OwnedBlob {
+        match self {
+            Self::Aes256Gcm => DefaultAesGcm::<256>::generate_nonce(),
+            Self::Aes256Ctr => AesCtr::<256>::generate_nonce(),
+        }
+        .as_blob()
+        .into_owned()
+    }
 }
 
 fn bool_false() -> bool {

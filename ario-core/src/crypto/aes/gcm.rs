@@ -1,3 +1,4 @@
+use crate::blob::{AsBlob, OwnedBlob};
 use crate::buffer::BufError;
 use crate::confidential::RevealExt;
 use crate::crypto::aes::ctr::AesCtrCore;
@@ -7,7 +8,7 @@ use crate::crypto::encryption::{Decryptor, Encryptor, Scheme};
 use aes::cipher::typenum::U16;
 use aes::cipher::{BlockCipherEncrypt, InnerIvInit, KeyInit, StreamCipherCore, crypto_common};
 use bytes::{Buf, BufMut};
-use crypto_common::BlockSizeUser;
+use crypto_common::{BlockSizeUser, Generate};
 use ghash::GHash;
 use ghash::universal_hash::UniversalHash;
 use hybrid_array::typenum::U12;
@@ -68,6 +69,19 @@ where
             return None;
         }
         Some(Self(Array::try_from(input).unwrap()))
+    }
+
+    pub fn into_bytes(self) -> Array<u8, TagSize> {
+        self.0
+    }
+}
+
+impl<TagSize> Into<OwnedBlob> for Tag<TagSize>
+where
+    TagSize: ValidTagSize,
+{
+    fn into(self) -> OwnedBlob {
+        self.into_bytes().as_slice().as_blob().into_owned()
     }
 }
 
@@ -197,6 +211,10 @@ where
         let tag_value = &full_tag.0.as_slice()[..tag_len];
 
         Ok(Tag(Array::try_from(tag_value).unwrap()))
+    }
+
+    pub fn generate_nonce() -> Nonce<NonceSize> {
+        Nonce::<NonceSize>::generate()
     }
 }
 

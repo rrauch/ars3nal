@@ -6,7 +6,7 @@ use crate::types::file::{FileEntity, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{ArfsEntity, HasName, Model};
 use crate::vfs::ROOT_INODE_ID;
-use crate::wal::WalFileMetadata;
+use crate::wal::{WalDirMetadata, WalFileMetadata};
 use crate::{Directory, File, Inode, InodeId, Name, Timestamp, VfsPath};
 use ario_client::ByteSize;
 use chrono::Utc;
@@ -180,13 +180,7 @@ where
         }
         self.delete_orphaned_entities().await?;
 
-        let affected_inode_ids = collect_affected_inode_ids(self)
-            .await?
-            .map(|id| {
-                InodeId::try_from(id as u64)
-                    .map_err(|e| DataError::ConversionError(e.to_string()).into())
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+        let affected_inode_ids = collect_affected_inode_ids(self).await?;
 
         clear_temp_tables(self).await?;
 
@@ -329,16 +323,15 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
                     .wal_entity
                     .ok_or_else(|| DataError::MissingData("wal_entity not set".to_string()))?;
 
-                let metadata = sqlx::query!(
+                let jsonb = sqlx::query!(
                     "SELECT metadata from wal_entity WHERE id = ? AND entity_type = 'FI'",
                     wal_id
                 )
                 .fetch_one(tx.conn())
                 .await?
-                .metadata
-                .map(|jsonb| serde_sqlite_jsonb::from_slice::<WalFileMetadata>(&jsonb))
-                .transpose()
-                .map_err(|e| DataError::ConversionError(e.to_string()))?;
+                .metadata;
+                let metadata = serde_sqlite_jsonb::from_slice::<WalFileMetadata>(&jsonb)
+                    .map_err(|e| DataError::ConversionError(e.to_string()))?;
 
                 Ok(Some(Inode::File(File::new_wal(
                     id,
@@ -350,12 +343,29 @@ async fn get_inode<C: Read>(inode_id: i64, tx: &mut C) -> Result<Option<Inode>, 
                     metadata,
                 ))))
             }
-            <FolderKind as DbEntity>::TYPE => Ok(Some(Inode::Directory(Directory::new_wal(
-                id,
-                name,
-                last_modified,
-                path,
-            )))),
+            <FolderKind as DbEntity>::TYPE => {
+                let wal_id = vfs_row
+                    .wal_entity
+                    .ok_or_else(|| DataError::MissingData("wal_entity not set".to_string()))?;
+
+                let jsonb = sqlx::query!(
+                    "SELECT metadata from wal_entity WHERE id = ? AND entity_type = 'FO'",
+                    wal_id
+                )
+                .fetch_one(tx.conn())
+                .await?
+                .metadata;
+                let metadata = serde_sqlite_jsonb::from_slice::<WalDirMetadata>(&jsonb)
+                    .map_err(|e| DataError::ConversionError(e.to_string()))?;
+
+                Ok(Some(Inode::Directory(Directory::new_wal(
+                    id,
+                    name,
+                    last_modified,
+                    path,
+                    metadata,
+                ))))
+            }
             other => Err(DataError::NotInodeEntityType(other.to_string()))?,
         },
         other => Err(DataError::InvalidPermType(other.to_string()))?,

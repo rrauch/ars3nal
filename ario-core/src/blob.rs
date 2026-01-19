@@ -90,6 +90,12 @@ impl From<Vec<u8>> for OwnedBlob {
     }
 }
 
+impl From<()> for OwnedBlob {
+    fn from(_: ()) -> Self {
+        Self::Slice(&[])
+    }
+}
+
 impl<const N: usize> From<[u8; N]> for OwnedBlob {
     fn from(value: [u8; N]) -> Self {
         Self::Bytes(Bytes::from(Box::<[u8]>::from(value)))

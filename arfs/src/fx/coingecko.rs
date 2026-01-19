@@ -1,6 +1,6 @@
 use crate::fx::fiat::{CNY, EUR, GBP, JPY, USD};
-use crate::fx::{Rates, XeSource};
-use ario_core::money::{ConversionRate, Currency, Money};
+use crate::fx::{Rate, Rates, XeSource};
+use ario_core::money::Currency;
 use ario_core::{BigDecimal, money};
 use reqwest::StatusCode;
 use std::collections::HashMap;
@@ -72,16 +72,17 @@ fn deserialize_response(bytes: &[u8]) -> Result<Rates, CoinGeckoError> {
     {
         if symbol.eq_ignore_ascii_case("arweave") {
             for (symbol, value) in value.into_iter() {
+                let value = value.inverse();
                 if symbol.eq_ignore_ascii_case(USD::SYMBOL) {
-                    usd = Some(Money::try_from(value)?);
+                    usd = Some(Rate::new(value));
                 } else if symbol.eq_ignore_ascii_case(EUR::SYMBOL) {
-                    eur = Some(Money::try_from(value)?);
+                    eur = Some(Rate::new(value));
                 } else if symbol.eq_ignore_ascii_case(CNY::SYMBOL) {
-                    cny = Some(Money::try_from(value)?);
+                    cny = Some(Rate::new(value));
                 } else if symbol.eq_ignore_ascii_case(JPY::SYMBOL) {
-                    jpy = Some(Money::try_from(value)?);
+                    jpy = Some(Rate::new(value));
                 } else if symbol.eq_ignore_ascii_case(GBP::SYMBOL) {
-                    gbp = Some(Money::try_from(value)?);
+                    gbp = Some(Rate::new(value));
                 }
             }
         }
@@ -115,11 +116,11 @@ mod tests {
         "#;
 
         let xe = deserialize_response(json_ok.as_bytes())?;
-        assert_eq!(xe.usd.0, Money::from_str("4.13")?);
-        assert_eq!(xe.eur.0, Money::from_str("3.55")?);
-        assert_eq!(xe.cny.0, Money::from_str("28.83")?);
-        assert_eq!(xe.jpy.0, Money::from_str("653.83")?);
-        assert_eq!(xe.gbp.0, Money::from_str("3.07")?);
+        assert_eq!(xe.usd.0, BigDecimal::from_str("4.13")?.inverse());
+        assert_eq!(xe.eur.0, BigDecimal::from_str("3.55")?.inverse());
+        assert_eq!(xe.cny.0, BigDecimal::from_str("28.83")?.inverse());
+        assert_eq!(xe.jpy.0, BigDecimal::from_str("653.83")?.inverse());
+        assert_eq!(xe.gbp.0, BigDecimal::from_str("3.07")?.inverse());
 
         let xe = deserialize_response(json_no_arweave.as_bytes());
         assert!(xe.is_err());

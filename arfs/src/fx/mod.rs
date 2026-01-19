@@ -5,20 +5,12 @@ use ario_core::BigDecimal;
 use ario_core::money::{AR, ConversionRate, Currency, Money};
 use bon::bon;
 use std::fmt::Display;
+use std::marker::PhantomData;
 use std::ops::Deref;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use thiserror::Error;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-#[derive(Error, Debug)]
-pub enum FxError {
-    #[error("exchange rate retrieval failure: {0}")]
-    SourceError(String),
-    #[error("cached error: {}", self.to_string())]
-    CachedError(#[from] Arc<Self>),
-}
 pub struct FxService {
     current: watch::Receiver<Rates>,
     jh: JoinHandle<()>,
@@ -102,8 +94,7 @@ trait SupportedCurrency: Currency {
 }
 
 impl FxService {
-    pub fn convert<C: SupportedCurrency>(&self, amount: impl Into<Money<AR>>) -> Money<C> {
-        let amount = amount.into();
+    pub fn convert<C: SupportedCurrency>(&self, amount: Money<C>) -> Money<AR> {
         let current_rates = self.current.borrow();
         let rate = C::get_xe(current_rates.deref());
         amount.convert_with(rate)
@@ -119,11 +110,17 @@ pub trait XeSource {
 
 #[derive(Clone, PartialEq)]
 #[repr(transparent)]
-struct Rate<C: Currency>(Money<C>);
+pub struct Rate<C: Currency>(BigDecimal, PhantomData<C>);
 
-impl<C: Currency> ConversionRate<AR, C> for Rate<C> {
+impl<C: Currency> Rate<C> {
+    pub fn new(multiplier: BigDecimal) -> Rate<C> {
+        Self(multiplier, PhantomData::default())
+    }
+}
+
+impl<C: Currency> ConversionRate<C, AR> for Rate<C> {
     fn multiplier(&self) -> &BigDecimal {
-        self.0.as_big_decimal()
+        &self.0
     }
 }
 
@@ -138,18 +135,18 @@ pub struct Rates {
 
 impl Rates {
     pub fn new(
-        usd: impl Into<Money<USD>>,
-        eur: impl Into<Money<EUR>>,
-        cny: impl Into<Money<CNY>>,
-        jpy: impl Into<Money<JPY>>,
-        gbp: impl Into<Money<GBP>>,
+        usd: Rate<USD>,
+        eur: Rate<EUR>,
+        cny: Rate<CNY>,
+        jpy: Rate<JPY>,
+        gbp: Rate<GBP>,
     ) -> Self {
         Self {
-            usd: Rate(usd.into()),
-            eur: Rate(eur.into()),
-            cny: Rate(cny.into()),
-            jpy: Rate(jpy.into()),
-            gbp: Rate(gbp.into()),
+            usd,
+            eur,
+            cny,
+            jpy,
+            gbp,
         }
     }
 }

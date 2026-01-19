@@ -3,7 +3,7 @@ use crate::{Client, tx};
 use ario_core::BlockNumber;
 use ario_core::blob::OwnedBlob;
 use ario_core::bundle::{
-    AuthenticatedBundleItem, BundleItemAuthenticator, BundleItemId, BundleType,
+    AuthenticatedBundleItem, BundleItemAuthenticator, BundleItemDraft, BundleItemId, BundleType,
 };
 use ario_core::chunking::DefaultChunker;
 use ario_core::data::{DataItem, ExternalDataItemAuthenticator};
@@ -13,7 +13,9 @@ use ario_core::tx::{AuthenticatedTx, Reward, TxBuilder, TxId};
 use async_stream::try_stream;
 use bytes::{BufMut, BytesMut};
 use futures_lite::io::Cursor;
-use futures_lite::{AsyncRead, AsyncSeek, AsyncSeekExt, Stream, StreamExt, ready};
+use futures_lite::{
+    AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, Stream, StreamExt, ready,
+};
 use itertools::Itertools;
 use rangemap::RangeMap;
 use std::collections::{BTreeMap, HashSet};
@@ -58,6 +60,8 @@ pub enum Error {
     Other(String),
     #[error(transparent)]
     IoError(#[from] std::io::Error),
+    #[error(transparent)]
+    JsonError(#[from] serde_json::Error),
 }
 
 #[derive(Clone, Debug)]
@@ -239,7 +243,6 @@ type UploadedItem = Item<Uploaded>;
 
 pub struct AsyncBundler<State> {
     id: Uuid,
-    client: Client,
     ct: CancellationToken,
     state: State,
     _drop_guard: DropGuard,
@@ -250,6 +253,7 @@ pub struct AcceptingItems {
     item_ids: HashSet<BundleItemId>,
     bundler_app_name: Option<String>,
     estimated_data_size: u64,
+    extra_tags: Option<Vec<Tag<'static>>>,
     processor_handle: JoinHandle<
         Result<
             (
@@ -262,6 +266,7 @@ pub struct AcceptingItems {
     >,
 }
 pub struct Uploading {
+    client: Client,
     tx_id: TxId,
     started: SystemTime,
     reward_paid: Reward,
@@ -271,6 +276,7 @@ pub struct Uploading {
 }
 
 pub struct Submitted {
+    client: Client,
     tx_id: TxId,
     reward_paid: Reward,
     data_size: u64,
@@ -280,6 +286,7 @@ pub struct Submitted {
 }
 
 pub struct TxSigning {
+    client: Client,
     header: OwnedBlob,
     items: Vec<ProcessedItem>,
     data_authenticator: ExternalDataItemAuthenticator<'static>,
@@ -287,15 +294,12 @@ pub struct TxSigning {
     tx_submission: TxSubmission<Prepared>,
 }
 
-pub fn new_async_bundler(
-    client: Client,
-    bundler_app_name: Option<String>,
-) -> AsyncBundler<AcceptingItems> {
-    AsyncBundler::new(client, bundler_app_name)
+pub fn new_async_bundler(bundler_app_name: Option<String>) -> AsyncBundler<AcceptingItems> {
+    AsyncBundler::new(bundler_app_name)
 }
 
 impl AsyncBundler<AcceptingItems> {
-    pub fn new(client: Client, bundler_app_name: Option<String>) -> Self {
+    pub fn new(bundler_app_name: Option<String>) -> Self {
         let id = Uuid::now_v7();
         let ct = CancellationToken::new();
         let (item_tx, item_rx) = mpsc::channel(10);
@@ -306,6 +310,7 @@ impl AsyncBundler<AcceptingItems> {
         let state = AcceptingItems {
             item_tx,
             item_ids: HashSet::new(),
+            extra_tags: None,
             bundler_app_name,
             processor_handle,
             estimated_data_size: 0,
@@ -313,7 +318,6 @@ impl AsyncBundler<AcceptingItems> {
 
         Self {
             id,
-            client,
             _drop_guard: ct.clone().drop_guard(),
             ct,
             state,
@@ -372,10 +376,28 @@ impl AsyncBundler<AcceptingItems> {
         self.state.estimated_data_size
     }
 
-    pub async fn transition<'a>(
+    pub fn set_extra_tags(&mut self, extra_tags: Vec<Tag<'static>>) {
+        self.state.extra_tags = Some(extra_tags);
+    }
+
+    pub fn extra_tags(&self) -> Option<&Vec<Tag<'static>>> {
+        self.state.extra_tags.as_ref()
+    }
+
+    async fn prepare_transition(
         mut self,
-        extra_tags: Option<Vec<Tag<'a>>>,
-    ) -> Result<AsyncBundler<TxSigning>, Arc<Error>> {
+    ) -> Result<
+        (
+            Uuid,
+            CancellationToken,
+            DropGuard,
+            Vec<ProcessedItem>,
+            OwnedBlob,
+            ExternalDataItemAuthenticator<'static>,
+            Vec<Tag<'static>>,
+        ),
+        Arc<Error>,
+    > {
         let processor_handle = self.state.processor_handle;
         drop(self.state.item_tx);
         let (items, header, data_authenticator) = processor_handle
@@ -386,13 +408,6 @@ impl AsyncBundler<AcceptingItems> {
             return Err(Arc::new(Error::EmptyBundle));
         }
 
-        // create a new tx
-        let tx_submission = self
-            .client
-            .tx_begin()
-            .await
-            .map_err(|e| Arc::new(e.into()))?;
-
         let mut tags = vec![
             ("Bundle-Version", "2.0.0").into(),
             ("Bundle-Format", "binary").into(),
@@ -402,11 +417,39 @@ impl AsyncBundler<AcceptingItems> {
             tags.push(("Bundler-App-Name".to_string(), name).into());
         }
 
-        if let Some(extra_tags) = extra_tags {
-            extra_tags
-                .into_iter()
-                .for_each(|t| tags.push(t.into_owned()))
+        if let Some(extra_tags) = self.state.extra_tags {
+            tags.extend(extra_tags)
         }
+
+        Ok((
+            self.id,
+            self.ct,
+            self._drop_guard,
+            items,
+            header,
+            data_authenticator,
+            tags,
+        ))
+    }
+
+    pub async fn into_nested(
+        mut self,
+        writer: impl AsyncWrite,
+    ) -> Result<BundleItemDraft<'static>, Arc<Error>> {
+        //let (_, _, _drop_guard, items, header, data_authenticator, tags) =
+        //    self.prepare_transition().await?;
+        todo!()
+    }
+
+    pub async fn transition(
+        mut self,
+        client: Client,
+    ) -> Result<AsyncBundler<TxSigning>, Arc<Error>> {
+        let (id, ct, drop_guard, items, header, data_authenticator, tags) =
+            self.prepare_transition().await?;
+
+        // create a new tx
+        let tx_submission = client.tx_begin().await.map_err(|e| Arc::new(e.into()))?;
 
         let tx_draft = TxBuilder::v2()
             .tags(tags)
@@ -417,6 +460,7 @@ impl AsyncBundler<AcceptingItems> {
             .draft();
 
         let state = TxSigning {
+            client,
             header,
             items,
             data_authenticator,
@@ -425,11 +469,10 @@ impl AsyncBundler<AcceptingItems> {
         };
 
         Ok(AsyncBundler {
-            id: self.id,
-            client: self.client,
-            ct: self.ct,
+            id,
+            ct,
             state,
-            _drop_guard: self._drop_guard,
+            _drop_guard: drop_guard,
         })
     }
 }
@@ -447,22 +490,49 @@ impl AsyncBundler<TxSigning> {
         self.state.tx_draft.clone()
     }
 
-    pub async fn transition(
-        self,
+    pub async fn serialize(
+        mut self,
         signed_tx: AuthenticatedTx<'_>,
-    ) -> Result<AsyncBundler<Uploading>, Error> {
+        mut writer: impl AsyncWrite + Send + Unpin,
+    ) -> Result<(), Error> {
+        self.check(&signed_tx)?;
+        let json = signed_tx.to_json_string()?;
+        let json_len = json.as_bytes().len() as u64;
+        writer.write_all(json_len.to_be_bytes().as_slice()).await?;
+        writer.write_all(json.as_bytes()).await?;
+        let data_len = signed_tx.data_item().map(|d| d.size()).unwrap_or(0);
+        let mut combinator =
+            BundleItemCombinator::new(self.state.header.bytes(), self.state.items.iter_mut());
+        let n = futures_lite::io::copy(&mut combinator, writer).await?;
+        if n != signed_tx.data_item().unwrap().size() {
+            Err(Error::InvalidDataLength {
+                expected: data_len,
+                actual: n,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn check(&self, signed_tx: &AuthenticatedTx<'_>) -> Result<(), Error> {
         let data_item = match signed_tx.data_item() {
             Some(DataItem::External(di)) => di,
             _ => return Err(Error::TxMismatch),
         };
-        let data_authenticator = self.state.data_authenticator;
+        let data_authenticator = &self.state.data_authenticator;
         if data_item.data_size() != data_authenticator.data_item().data_size()
             || data_item.data_root() != data_authenticator.data_item().data_root()
         {
             return Err(Error::TxMismatch);
         }
+        Ok(())
+    }
 
-        let data_size = data_authenticator.data_item().data_size();
+    pub async fn transition(
+        self,
+        signed_tx: AuthenticatedTx<'_>,
+    ) -> Result<AsyncBundler<Uploading>, Error> {
+        self.check(&signed_tx)?;
+        let data_size = self.state.data_authenticator.data_item().data_size();
         let item_count = self.state.items.len();
         let reward_paid = signed_tx.reward().clone();
 
@@ -476,7 +546,7 @@ impl AsyncBundler<TxSigning> {
         let mut uploader = Uploader::new(
             self.id,
             tx_sub
-                .data(data_authenticator.into())
+                .data(self.state.data_authenticator.into())
                 .map_err(|(_, e)| Error::from(e))?,
             self.state.header,
             self.state.items,
@@ -486,9 +556,9 @@ impl AsyncBundler<TxSigning> {
 
         Ok(AsyncBundler {
             id: self.id,
-            client: self.client,
             ct: self.ct,
             state: Uploading {
+                client: self.state.client,
                 tx_id,
                 reward_paid,
                 started: SystemTime::now(),
@@ -536,9 +606,9 @@ impl AsyncBundler<Uploading> {
         });
         Ok(AsyncBundler {
             id: self.id,
-            client: self.client,
             ct: self.ct,
             state: Submitted {
+                client: self.state.client,
                 tx_id: self.state.tx_id,
                 reward_paid: self.state.reward_paid,
                 data_size: self.state.data_size,
@@ -860,8 +930,10 @@ impl AsyncRead for BundleItemCombinator<'_> {
             return Poll::Ready(Ok(0));
         }
 
-        let prev_state = this.state.replace(CombiState::Reading(pos));
-        let seek = &prev_state != &this.state;
+        let seek = this.state.as_ref().map(|s| match s {
+            CombiState::Reading(prev_pos) if prev_pos == &pos => false,
+            _ => true
+        }).unwrap_or(true);
 
         let mut data_source = ready!(this.poll_get(cx, pos, seek))?;
         let n = ready!(Pin::new(&mut data_source).poll_read(cx, buf))?;
@@ -1002,7 +1074,7 @@ mod tests {
         let jwk = Jwk::from_json(json.as_str())?;
         let wallet = Wallet::from_jwk(&jwk)?;
 
-        let mut bundler_accepting = AsyncBundler::new(client.clone(), None);
+        let mut bundler_accepting = AsyncBundler::new(None);
 
         let mut file = tokio::fs::File::open(FILE_1_PATH).await?.compat();
         let data = V2BundleItemDataProcessor::try_from_async_reader(&mut file).await?;
@@ -1038,7 +1110,7 @@ mod tests {
             )
             .await?;
 
-        let bundler_signing = bundler_accepting.transition(None).await?;
+        let bundler_signing = bundler_accepting.transition(client.clone()).await?;
 
         let mut tx_draft = bundler_signing.tx_draft();
         tx_draft.set_reward("100000")?;

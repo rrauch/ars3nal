@@ -258,20 +258,38 @@ pub fn to_tags<T>(value: &T) -> Result<Vec<Tag<'static>>, Error>
 where
     T: Serialize,
 {
-    Ok(match serde_content::Serializer::new()
-        .serialize(value)
-        .map_err(Error::SerializationError)?
-    {
-        serde_content::Value::Map(entries) => entries
-            .into_iter()
-            .filter_map(|(k, v)| try_into_tag(k, v).transpose()),
-        _ => {
-            return Err(Error::SerializationError(
-                <serde_content::Error as SerError>::custom("expected a Map"),
-            ));
-        }
-    }
-    .collect::<Result<Vec<Tag<'static>>, Error>>()?)
+    Ok(
+        match serde_content::Serializer::new()
+            .serialize(value)
+            .map_err(Error::SerializationError)?
+        {
+            serde_content::Value::Map(entries) => entries
+                .into_iter()
+                .filter_map(|(k, v)| try_into_tag(k, v).transpose())
+                .collect::<Result<Vec<Tag<'static>>, Error>>()?,
+            serde_content::Value::Struct(inner_struct) => {
+                let inner_struct = inner_struct.into_owned();
+                if let serde_content::Data::Struct { fields } = inner_struct.data {
+                    fields
+                        .into_iter()
+                        .filter_map(|(k, v)| {
+                            let k = serde_content::Value::from(k);
+                            try_into_tag(k, v).transpose()
+                        })
+                        .collect::<Result<Vec<Tag<'static>>, Error>>()?
+                } else {
+                    return Err(Error::SerializationError(
+                        <serde_content::Error as SerError>::custom("expected a Map or a Struct"),
+                    ));
+                }
+            }
+            _ => {
+                return Err(Error::SerializationError(
+                    <serde_content::Error as SerError>::custom("expected a Map or a Struct"),
+                ));
+            }
+        },
+    )
 }
 
 fn try_into_tag<'a>(

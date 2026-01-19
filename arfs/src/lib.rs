@@ -50,6 +50,7 @@ use num_traits::identities::Zero;
 use serde_json::Error as JsonError;
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
+use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, Div, Mul};
 use std::path::Path;
@@ -83,6 +84,8 @@ pub enum Error {
     WalError(#[from] WalError),
     #[error(transparent)]
     SyncError(#[from] sync::Error),
+    #[error(transparent)]
+    UploadError(#[from] sync::upload::Error),
     #[error("read-only file system")]
     ReadOnlyFileSystem,
     #[error("file is encrypted")]
@@ -148,28 +151,48 @@ pub struct ArFs(Arc<ErasedArFs>);
 
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct SyncLimit(Arc<Semaphore>);
+pub struct Limit<T>(Arc<Semaphore>, PhantomData<T>);
 
 #[repr(transparent)]
-pub(crate) struct SyncPermit(OwnedSemaphorePermit);
+pub(crate) struct Permit<T>(OwnedSemaphorePermit, PhantomData<T>);
 
-impl SyncLimit {
+impl<T> Limit<T> {
     pub fn new(max_concurrency: NonZeroUsize) -> Self {
-        Self(Arc::new(Semaphore::new(max_concurrency.get())))
+        Self(
+            Arc::new(Semaphore::new(max_concurrency.get())),
+            PhantomData::default(),
+        )
     }
 
-    pub(crate) async fn acquire_permit(&self) -> Result<SyncPermit, sync::Error> {
-        Ok(SyncPermit(
+    pub(crate) async fn acquire_permit(&self) -> Result<Permit<T>, sync::Error> {
+        Ok(Permit(
             self.0
                 .clone()
                 .acquire_owned()
                 .await
                 .map_err(|_| sync::Error::PermitAcquisitionFailed)?,
+            PhantomData::default(),
         ))
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SyncType;
+pub type SyncLimit = Limit<SyncType>;
+pub type SyncPermit = Permit<SyncType>;
+
 impl Default for SyncLimit {
+    fn default() -> Self {
+        unsafe { Self::new(NonZeroUsize::new_unchecked(1)) }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UploadType;
+pub type UploadLimit = Limit<UploadType>;
+pub type UploadPermit = Permit<UploadType>;
+
+impl Default for UploadLimit {
     fn default() -> Self {
         unsafe { Self::new(NonZeroUsize::new_unchecked(1)) }
     }
@@ -344,6 +367,19 @@ impl Price {
             _ => false,
         }
     }
+
+    pub fn to_winston(&self, fx_service: Option<&FxService>) -> Option<Money<Winston>> {
+        match (self, fx_service) {
+            (Self::Winston(w), _) => Some(w.clone()),
+            (Self::AR(ar), _) => Some(ar.clone().into()),
+            (Self::USD(usd), Some(fx)) => Some(fx.convert(usd.clone()).into()),
+            (Self::EUR(eur), Some(fx)) => Some(fx.convert(eur.clone()).into()),
+            (Self::CNY(cny), Some(fx)) => Some(fx.convert(cny.clone()).into()),
+            (Self::JPY(jpy), Some(fx)) => Some(fx.convert(jpy.clone()).into()),
+            (Self::GBP(gbp), Some(fx)) => Some(fx.convert(gbp.clone()).into()),
+            _ => None,
+        }
+    }
 }
 
 fn check_negative_money<C: Currency>(value: &Money<C>) -> Result<(), PriceError> {
@@ -482,6 +518,20 @@ impl Default for CacheSettings {
     }
 }
 
+#[derive(Builder, Clone, Debug)]
+pub struct UploadSettings {
+    #[builder(default)]
+    upload_limit: UploadLimit,
+    #[builder(default = Duration::from_secs(300))]
+    batch_settle_time: Duration,
+}
+
+impl Default for UploadSettings {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+
 #[bon::bon]
 impl ArFs {
     #[builder(derive(Debug))]
@@ -498,6 +548,7 @@ impl ArFs {
         #[builder(default)] sync_limit: SyncLimit,
         #[builder(default)] cache_settings: CacheSettings,
         proactive_cache_interval: Option<Duration>,
+        #[builder(default)] upload_settings: UploadSettings,
     ) -> Result<Self, Error> {
         tokio::fs::create_dir_all(db_dir).await?;
 
@@ -543,7 +594,18 @@ impl ArFs {
         .await?;
 
         Ok(Self(Arc::new(
-            ErasedArFs::new(client, db, vfs, status, sync_settings, drive_config, scope).await?,
+            ErasedArFs::new(
+                client,
+                db,
+                drive_id,
+                vfs,
+                status,
+                sync_settings,
+                upload_settings,
+                drive_config,
+                scope,
+            )
+            .await?,
         )))
     }
 
@@ -712,7 +774,7 @@ pub enum Status {
     },
     Wal {
         last_sync: Timestamp,
-        last_wal_modification: Timestamp,
+        last_wal_modification: Option<Timestamp>,
     },
 }
 
@@ -823,9 +885,11 @@ impl ErasedArFs {
     async fn new(
         client: Client,
         db: Db,
+        drive_id: DriveId,
         vfs: Vfs,
         status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
+        upload_settings: UploadSettings,
         drive_config: DriveConfig,
         scope: Scope,
     ) -> Result<Self, Error> {
@@ -835,6 +899,7 @@ impl ErasedArFs {
                     ArFsInner::new_public_ro(
                         client,
                         db,
+                        drive_id,
                         vfs,
                         status,
                         sync_settings,
@@ -847,9 +912,11 @@ impl ErasedArFs {
                     ArFsInner::new_public_rw(
                         client,
                         db,
+                        drive_id,
                         vfs,
                         status,
                         sync_settings,
+                        upload_settings,
                         drive_config,
                         wallet,
                         uploader,
@@ -862,6 +929,7 @@ impl ErasedArFs {
                     ArFsInner::new_private_ro(
                         client,
                         db,
+                        drive_id,
                         vfs,
                         status,
                         sync_settings,
@@ -874,9 +942,11 @@ impl ErasedArFs {
                     ArFsInner::new_private_rw(
                         client,
                         db,
+                        drive_id,
                         vfs,
                         status,
                         sync_settings,
+                        upload_settings,
                         drive_config,
                         drive_key,
                         wallet,
@@ -893,6 +963,7 @@ impl ArFsInner<Public, ReadOnly> {
     async fn new_public_ro(
         client: Client,
         db: Db,
+        drive_id: DriveId,
         vfs: Vfs,
         status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
@@ -901,10 +972,11 @@ impl ArFsInner<Public, ReadOnly> {
     ) -> Result<Self, Error> {
         let privacy = Arc::new(Public { owner });
         let mode = Arc::new(ReadOnly);
-
+        let upload_settings = UploadSettings::default();
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
+            drive_id,
             vfs.clone(),
             privacy.clone(),
             mode.clone(),
@@ -912,6 +984,8 @@ impl ArFsInner<Public, ReadOnly> {
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
+            upload_settings.upload_limit,
+            upload_settings.batch_settle_time,
         )
         .await?;
         Ok(ArFsInner {
@@ -931,9 +1005,11 @@ impl ArFsInner<Public, ReadWrite> {
     async fn new_public_rw(
         client: Client,
         db: Db,
+        drive_id: DriveId,
         vfs: Vfs,
         status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
+        upload_settings: UploadSettings,
         drive_config: DriveConfig,
         wallet: Wallet,
         uploader: UploadService,
@@ -945,6 +1021,7 @@ impl ArFsInner<Public, ReadWrite> {
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
+            drive_id,
             vfs.clone(),
             privacy.clone(),
             mode.clone(),
@@ -952,6 +1029,8 @@ impl ArFsInner<Public, ReadWrite> {
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
+            upload_settings.upload_limit,
+            upload_settings.batch_settle_time,
         )
         .await?;
         Ok(ArFsInner {
@@ -971,6 +1050,7 @@ impl ArFsInner<Private, ReadOnly> {
     async fn new_private_ro(
         client: Client,
         db: Db,
+        drive_id: DriveId,
         vfs: Vfs,
         status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
@@ -979,9 +1059,11 @@ impl ArFsInner<Private, ReadOnly> {
     ) -> Result<Self, Error> {
         let privacy = Arc::new(Private::new(drive_config.owner.clone(), key_ring));
         let mode = Arc::new(ReadOnly);
+        let upload_settings = UploadSettings::default();
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
+            drive_id,
             vfs.clone(),
             privacy.clone(),
             mode.clone(),
@@ -989,6 +1071,8 @@ impl ArFsInner<Private, ReadOnly> {
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
+            upload_settings.upload_limit,
+            upload_settings.batch_settle_time,
         )
         .await?;
         Ok(ArFsInner {
@@ -1008,9 +1092,11 @@ impl ArFsInner<Private, ReadWrite> {
     async fn new_private_rw(
         client: Client,
         db: Db,
+        drive_id: DriveId,
         vfs: Vfs,
         status: Arc<Mutex<Arc<Status>>>,
         sync_settings: SyncSettings,
+        upload_settings: UploadSettings,
         drive_config: DriveConfig,
         key_ring: KeyRing,
         wallet: Wallet,
@@ -1021,6 +1107,7 @@ impl ArFsInner<Private, ReadWrite> {
         let syncer = Syncer::new(
             client.clone(),
             db.clone(),
+            drive_id,
             vfs.clone(),
             privacy.clone(),
             mode.clone(),
@@ -1028,6 +1115,8 @@ impl ArFsInner<Private, ReadWrite> {
             sync_settings.sync_min_initial,
             sync_settings.sync_limit,
             sync_settings.proactive_cache_interval,
+            upload_settings.upload_limit,
+            upload_settings.batch_settle_time,
         )
         .await?;
         Ok(ArFsInner {
@@ -1058,10 +1147,6 @@ impl<PRIVACY, MODE> ArFsInner<PRIVACY, MODE> {
 
     fn created_at(&self) -> &Timestamp {
         &self.drive_config.drive.header().as_inner().time
-    }
-
-    async fn vfs(&self) -> Arc<Vfs> {
-        todo!()
     }
 
     fn display(
@@ -1289,10 +1374,18 @@ mod tests {
             .password("foo".to_string())
             .build()?;
 
-        let mode = Box::new(Direct::new(wallet.clone(), PriceAdjustment::default()));
+        let mode = Box::new(Direct::new(
+            client.clone(),
+            wallet.clone(),
+            PriceAdjustment::default(),
+        ));
 
         let uploader = Arc::new(tokio::sync::Mutex::new(
-            Uploader::builder().mode(mode).build(),
+            Uploader::builder()
+                .mode(mode)
+                .client(client.clone())
+                .build()
+                .await?,
         ));
 
         let arfs = ArFs::builder()
@@ -1332,7 +1425,9 @@ mod tests {
             let mut status = arfs.sync_status();
             while let Some(status) = status.next().await {
                 match status {
-                    SyncStatus::Syncing { .. } | SyncStatus::ProactiveCaching { .. } => {
+                    SyncStatus::Syncing { .. }
+                    | SyncStatus::Uploading { .. }
+                    | SyncStatus::ProactiveCaching { .. } => {
                         started = true;
                     }
                     SyncStatus::Dead => {

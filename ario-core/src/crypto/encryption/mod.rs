@@ -1,6 +1,7 @@
 pub mod decryption;
 pub mod encryption;
 
+use crate::blob::OwnedBlob;
 use crate::buffer::{BufError, BufMutExt};
 use crate::crypto::encryption::decryption::DecryptingReader;
 use crate::crypto::encryption::encryption::EncryptingWriter;
@@ -29,7 +30,7 @@ pub enum Error {
 pub trait Encryptor<'a> {
     type Error: Into<Error>;
     /// The type returned after finalization (e.g., an authentication tag for AEAD, or `()` if not applicable).
-    type AuthenticationTag: Send + Sync;
+    type AuthenticationTag: Send + Sync + Into<OwnedBlob>;
 
     /// Required alignment for certain operations such as buffering and seeking.
     /// Typically, the cipher's block size.
@@ -147,10 +148,10 @@ pub trait EncryptionExt {
         ciphertext: &mut O,
     ) -> Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>;
 
-    fn encrypt_readwrite<'a, I: Read, O: Write>(
+    fn encrypt_readwrite<'a, I: Read + 'a, O: Write + 'a>(
         params: Self::EncryptionParams<'a>,
-        plaintext_reader: &'a mut I,
-        ciphertext_writer: &'a mut O,
+        plaintext_reader: I,
+        ciphertext_writer: O,
     ) -> Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>
     where
         Self: Unpin + 'a,
@@ -162,17 +163,17 @@ pub trait EncryptionExt {
         )
     }
 
-    fn encrypt_readwrite_with_buf_size<'a, I: Read, O: Write, const BUF_SIZE: usize>(
+    fn encrypt_readwrite_with_buf_size<'a, I: Read + 'a, O: Write + 'a, const BUF_SIZE: usize>(
         params: Self::EncryptionParams<'a>,
-        plaintext_reader: &'a mut I,
-        ciphertext_writer: &'a mut O,
+        plaintext_reader: I,
+        ciphertext_writer: O,
     ) -> Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>
     where
         Self: Unpin + 'a;
 
-    fn encrypting_writer<'a, O: Write>(
+    fn encrypting_writer<'a, O: Write + 'a>(
         params: Self::EncryptionParams<'a>,
-        ciphertext_writer: &'a mut O,
+        ciphertext_writer: O,
     ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
     where
         Self: Unpin + 'a,
@@ -180,17 +181,21 @@ pub trait EncryptionExt {
         Self::encrypting_writer_with_buf_size::<O, { 64 * 1024 }>(params, ciphertext_writer)
     }
 
-    fn encrypting_writer_with_buf_size<'a, O: Write, const BUF_SIZE: usize>(
+    fn encrypting_writer_with_buf_size<'a, O: Write + 'a, const BUF_SIZE: usize>(
         params: Self::EncryptionParams<'a>,
-        ciphertext_writer: &'a mut O,
+        ciphertext_writer: O,
     ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
     where
         Self: Unpin + 'a;
 
-    fn encrypt_async_readwrite<'a, I: AsyncRead + Unpin + Send, O: AsyncWrite + Unpin + Send>(
+    fn encrypt_async_readwrite<
+        'a,
+        I: AsyncRead + Unpin + Send + 'a,
+        O: AsyncWrite + Unpin + Send + 'a,
+    >(
         params: Self::EncryptionParams<'a>,
-        plaintext_reader: &'a mut I,
-        ciphertext_writer: &'a mut O,
+        plaintext_reader: I,
+        ciphertext_writer: O,
     ) -> impl Future<
         Output = Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>,
     > + Send
@@ -208,13 +213,13 @@ pub trait EncryptionExt {
 
     fn encrypt_async_readwrite_with_buf_size<
         'a,
-        I: AsyncRead + Unpin + Send,
-        O: AsyncWrite + Unpin + Send,
+        I: AsyncRead + Unpin + Send + 'a,
+        O: AsyncWrite + Unpin + Send + 'a,
         const BUF_SIZE: usize,
     >(
         params: Self::EncryptionParams<'a>,
-        plaintext_reader: &'a mut I,
-        ciphertext_writer: &'a mut O,
+        plaintext_reader: I,
+        ciphertext_writer: O,
     ) -> impl Future<
         Output = Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>,
     > + Send
@@ -225,7 +230,7 @@ pub trait EncryptionExt {
 
     fn encrypting_async_writer<'a, O: AsyncWrite + Unpin>(
         params: Self::EncryptionParams<'a>,
-        ciphertext_writer: &'a mut O,
+        ciphertext_writer: O,
     ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
     where
         Self: Unpin + 'a,
@@ -237,7 +242,7 @@ pub trait EncryptionExt {
 
     fn encrypting_async_writer_with_buf_size<'a, O: AsyncWrite + Unpin, const BUF_SIZE: usize>(
         params: Self::EncryptionParams<'a>,
-        ciphertext_writer: &'a mut O,
+        ciphertext_writer: O,
     ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
     where
         Self: Unpin + 'a,
@@ -279,23 +284,23 @@ where
         Ok(tag)
     }
 
-    fn encrypt_readwrite_with_buf_size<'a, I: Read, O: Write, const BUF_SIZE: usize>(
+    fn encrypt_readwrite_with_buf_size<'a, I: Read + 'a, O: Write + 'a, const BUF_SIZE: usize>(
         params: Self::EncryptionParams<'a>,
-        plaintext_reader: &'a mut I,
-        ciphertext_writer: &'a mut O,
+        mut plaintext_reader: I,
+        ciphertext_writer: O,
     ) -> Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>
     where
         Self: Unpin + 'a,
     {
         let mut writer =
             encrypting_writer_with_buf_size::<O, Self>(params, ciphertext_writer, BUF_SIZE)?;
-        io::copy(plaintext_reader, &mut writer)?;
+        io::copy(&mut plaintext_reader, &mut writer)?;
         Ok(writer.finalize()?)
     }
 
-    fn encrypting_writer_with_buf_size<'a, O: Write, const BUF_SIZE: usize>(
+    fn encrypting_writer_with_buf_size<'a, O: Write + 'a, const BUF_SIZE: usize>(
         params: Self::EncryptionParams<'a>,
-        ciphertext_writer: &'a mut O,
+        ciphertext_writer: O,
     ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
     where
         Self: Unpin + 'a,
@@ -305,13 +310,13 @@ where
 
     fn encrypt_async_readwrite_with_buf_size<
         'a,
-        I: AsyncRead + Unpin + Send,
-        O: AsyncWrite + Unpin + Send,
+        I: AsyncRead + Unpin + Send + 'a,
+        O: AsyncWrite + Unpin + Send + 'a,
         const BUF_SIZE: usize,
     >(
         params: Self::EncryptionParams<'a>,
-        plaintext_reader: &'a mut I,
-        ciphertext_writer: &'a mut O,
+        plaintext_reader: I,
+        ciphertext_writer: O,
     ) -> impl Future<
         Output = Result<<Self::Encryptor<'a> as Encryptor<'a>>::AuthenticationTag, Error>,
     > + Send
@@ -333,7 +338,7 @@ where
 
     fn encrypting_async_writer_with_buf_size<'a, O: AsyncWrite + Unpin, const BUF_SIZE: usize>(
         params: Self::EncryptionParams<'a>,
-        ciphertext_writer: &'a mut O,
+        ciphertext_writer: O,
     ) -> Result<EncryptingWriter<'a, Self::Encryptor<'a>, O>, Error>
     where
         Self: Unpin + 'a,
@@ -344,9 +349,9 @@ where
     }
 }
 
-fn encrypting_writer_with_buf_size<'a, O: Write, T>(
+fn encrypting_writer_with_buf_size<'a, O: Write + 'a, T>(
     params: <T as Scheme>::EncryptionParams<'a>,
-    ciphertext_writer: &'a mut O,
+    ciphertext_writer: O,
     buf_size: usize,
 ) -> Result<EncryptingWriter<'a, <T as Scheme>::Encryptor<'a>, O>, Error>
 where
@@ -363,7 +368,7 @@ where
 
 fn encrypting_async_writer_with_buf_size<'a, O: AsyncWrite + Unpin, T>(
     params: <T as Scheme>::EncryptionParams<'a>,
-    ciphertext_writer: &'a mut O,
+    ciphertext_writer: O,
     buf_size: usize,
 ) -> Result<EncryptingWriter<'a, <T as Scheme>::Encryptor<'a>, O>, Error>
 where

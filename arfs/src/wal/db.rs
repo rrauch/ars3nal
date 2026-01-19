@@ -64,6 +64,24 @@ ORDER BY wc.chunk_nr;
         .fetch_optional(self.conn())
         .await?)
     }
+
+    pub async fn uncommitted_wal_entry_count(&mut self) -> Result<usize, crate::db::Error> {
+        Ok(
+            sqlx::query!("SELECT COUNT(*) as uncommitted FROM wal WHERE block_height IS NULL")
+                .map(|r| r.uncommitted as usize)
+                .fetch_one(self.conn())
+                .await?,
+        )
+    }
+
+    pub async fn pending_wal_entry_count(&mut self) -> Result<usize, crate::db::Error> {
+        Ok(sqlx::query!(
+            "SELECT COUNT(*) as pending FROM wal WHERE upload IS NOT NULL AND block_height IS NULL"
+        )
+        .map(|r| r.pending as usize)
+        .fetch_one(self.conn())
+        .await?)
+    }
 }
 
 impl<C: TxScope> Transaction<C>
@@ -130,15 +148,6 @@ where
         Ok(())
     }
 
-    pub async fn uncommitted_wal_entry_count(&mut self) -> Result<usize, crate::db::Error> {
-        Ok(
-            sqlx::query!("SELECT COUNT(*) as uncommitted FROM wal WHERE block_height IS NULL")
-                .map(|r| r.uncommitted as usize)
-                .fetch_one(self.conn())
-                .await?,
-        )
-    }
-
     pub async fn new_wal_dir(
         &mut self,
         path: &VfsPath,
@@ -194,13 +203,7 @@ where
 
         self.wal_create(inode_id, &Utc::now()).await?;
 
-        let affected_inode_ids = collect_affected_inode_ids(self)
-            .await?
-            .map(|id| {
-                InodeId::try_from(id as u64)
-                    .map_err(|e| DataError::ConversionError(e.to_string()).into())
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+        let affected_inode_ids = collect_affected_inode_ids(self).await?;
         clear_temp_tables(self).await?;
 
         Ok((inode_id, affected_inode_ids))
@@ -238,6 +241,10 @@ where
     pub async fn discard_wal_changes(&mut self) -> Result<(), Error> {
         if self.status().await?.state() != Some(State::Wal) {
             Err(Error::DbStateError(DbStateError::NotInWalState))?
+        }
+
+        if self.pending_wal_entry_count().await? > 0 {
+            Err(Error::DbStateError(DbStateError::HasPendingWalEntries))?
         }
 
         sqlx::query!("DELETE FROM vfs;")
@@ -415,13 +422,33 @@ FROM vfs_snapshot;
             ))
         }?;
 
-        let affected_inode_ids = collect_affected_inode_ids(self)
+        // update wal_entity metadata
+        {
+            let wal_entity = wal_entity_id as i64;
+            let metadata = sqlx::query!(
+                "SELECT metadata FROM wal_entity WHERE id = ? and entity_type = 'FI'",
+                wal_entity
+            )
+            .fetch_one(self.conn())
             .await?
-            .map(|id| {
-                InodeId::try_from(id as u64)
-                    .map_err(|e| DataError::ConversionError(e.to_string()).into())
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+            .metadata;
+            let mut metadata =
+                serde_sqlite_jsonb::from_slice::<WalFileMetadata>(metadata.as_slice())
+                    .map_err(|e| DataError::ConversionError(e.to_string()))?;
+            metadata.size = size.as_u64();
+            metadata.last_modified = last_modified.clone();
+            let metadata = serde_sqlite_jsonb::to_vec(&metadata)
+                .map_err(|e| DataError::ConversionError(e.to_string()))?;
+            sqlx::query!(
+                "UPDATE wal_entity SET metadata = ? WHERE id = ? and entity_type = 'FI'",
+                metadata,
+                wal_entity
+            )
+            .execute(self.conn())
+            .await?;
+        }
+
+        let affected_inode_ids = collect_affected_inode_ids(self).await?;
         clear_temp_tables(self).await?;
 
         Ok((inode_id, affected_inode_ids, is_new))

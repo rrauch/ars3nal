@@ -7,11 +7,14 @@ use crate::types::file::FileKind;
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{ArfsEntity, ArfsEntityId};
 use crate::vfs::{InodeError, InodeId};
-use crate::{Inode, KeyRing, Private, Public, State, SyncLimit, Vfs, resolve};
+use crate::{
+    Inode, KeyRing, Private, Public, ReadOnly, ReadWrite, State, SyncLimit, UploadLimit,
+    UploadService, Vfs, resolve,
+};
 use ario_client::Client;
 use ario_client::graphql::BlockRange;
 use ario_core::BlockNumber;
-use ario_core::wallet::WalletAddress;
+use ario_core::wallet::{Wallet, WalletAddress};
 use async_stream::{stream, try_stream};
 use chrono::{DateTime, Utc};
 use futures_lite::{AsyncReadExt, Stream, StreamExt};
@@ -77,6 +80,7 @@ impl Syncer {
     pub(crate) async fn new<PRIVACY: Send + Sync + 'static, MODE: Send + Sync + 'static>(
         client: Client,
         db: Db,
+        drive_id: DriveId,
         vfs: Vfs,
         privacy: Arc<PRIVACY>,
         mode: Arc<MODE>,
@@ -84,10 +88,13 @@ impl Syncer {
         min_initial_wait: Duration,
         sync_limit: SyncLimit,
         proactive_cache_interval: Option<Duration>,
+        upload_limit: UploadLimit,
+        upload_batch_settle_time: Duration,
     ) -> Result<Self, crate::Error>
     where
         BackgroundTask<PRIVACY, MODE>: SyncNow,
         BackgroundTask<PRIVACY, MODE>: CacheNow,
+        BackgroundTask<PRIVACY, MODE>: UploadNow,
     {
         let root_ct = CancellationToken::new();
 
@@ -112,6 +119,7 @@ impl Syncer {
         let task = BackgroundTask::new(
             client,
             db,
+            drive_id,
             vfs,
             privacy,
             mode,
@@ -121,7 +129,9 @@ impl Syncer {
             next_sync,
             sync_interval,
             sync_limit,
+            upload_limit,
             proactive_cache_interval,
+            upload_batch_settle_time,
         );
         let task_handle = tokio::spawn(async move { task.run().await });
 
@@ -165,6 +175,7 @@ impl Syncer {
             Default,
             ExpectSyncing,
             Syncing,
+            Uploading,
             ProactiveCaching,
         }
 
@@ -181,13 +192,14 @@ impl Syncer {
                     return Err(Error::SyncerDead)?;
                 }
                 Status::Syncing { .. } => sync_state = State::Syncing,
+                Status::Uploading { .. } => sync_state = State::Uploading,
                 Status::ProactiveCaching { .. } => sync_state = State::ProactiveCaching,
                 Status::Idle {
                     last_activity: last_sync,
                     ..
                 } => {
                     match sync_state {
-                        State::ExpectSyncing | State::ProactiveCaching => {
+                        State::ExpectSyncing | State::Uploading | State::ProactiveCaching => {
                             return Err(Error::StartFailure)?;
                         }
                         State::Syncing => {
@@ -250,6 +262,9 @@ pub enum Status {
     ProactiveCaching {
         start_time: DateTime<Utc>,
     },
+    Uploading {
+        start_time: DateTime<Utc>,
+    },
     Dead,
 }
 
@@ -257,6 +272,7 @@ pub enum Status {
 pub enum Activity {
     Sync { log_entry: LogEntry },
     ProactiveCaching,
+    Uploading,
 }
 
 trait CacheNow {
@@ -268,26 +284,38 @@ trait SyncNow {
     fn sync(&mut self) -> impl Future<Output = Result<Option<Success>, crate::Error>> + Send;
 }
 
+trait UploadNow {
+    fn initial_upload_pause() -> Duration;
+    fn upload(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<DateTime<Utc>>, crate::Error>> + Send;
+}
+
 struct BackgroundTask<PRIVACY, MODE> {
     client: Client,
     db: Db,
+    drive_id: DriveId,
     vfs: Vfs,
     privacy: Arc<PRIVACY>,
     mode: Arc<MODE>,
     ct: CancellationToken,
     status_tx: watch::Sender<Status>,
     sync_trigger: mpsc::Receiver<oneshot::Sender<()>>,
+    next_upload: DateTime<Utc>,
     next_sync: DateTime<Utc>,
     next_cache: DateTime<Utc>,
     proactive_cache_interval: Option<Duration>,
     sync_interval: Duration,
     sync_limit: SyncLimit,
+    upload_limit: UploadLimit,
+    upload_batch_settle_time: Duration,
 }
 
 impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
     fn new(
         client: Client,
         db: Db,
+        drive_id: DriveId,
         vfs: Vfs,
         privacy: Arc<PRIVACY>,
         mode: Arc<MODE>,
@@ -297,27 +325,38 @@ impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
         next_sync: DateTime<Utc>,
         sync_interval: Duration,
         sync_limit: SyncLimit,
+        upload_limit: UploadLimit,
         proactive_cache_interval: Option<Duration>,
-    ) -> Self {
+        upload_batch_settle_time: Duration,
+    ) -> Self
+    where
+        Self: UploadNow,
+    {
         let next_cache = match proactive_cache_interval.as_ref() {
             Some(_) => Utc::now() + Duration::from_secs(60), // proactive caching enabled,
             None => Utc::now() + Duration::from_secs(86400 * 365 * 1000), // proactive caching disabled,
         };
 
+        let next_upload = Utc::now() + Self::initial_upload_pause();
+
         Self {
             client,
             db,
+            drive_id,
             vfs,
             privacy,
             mode,
             ct,
             status_tx,
             sync_trigger,
+            next_upload,
             next_sync,
             next_cache,
             proactive_cache_interval,
             sync_interval,
             sync_limit,
+            upload_limit,
+            upload_batch_settle_time,
         }
     }
 
@@ -326,8 +365,14 @@ impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
     where
         Self: SyncNow,
         Self: CacheNow,
+        Self: UploadNow,
     {
         loop {
+            let next_upload_in = (self.next_upload - Utc::now())
+                .to_std()
+                .ok()
+                .unwrap_or_default();
+
             let next_sync_in = (self.next_sync - Utc::now())
                 .to_std()
                 .ok()
@@ -339,8 +384,11 @@ impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
                 .unwrap_or_default();
 
             tracing::debug!(
-                next_activity_in_ms = next_sync_in.as_millis().min(next_cache_in.as_millis()),
-                "sleeping until next sync / proactive caching"
+                next_activity_in_ms = next_sync_in
+                    .as_millis()
+                    .min(next_cache_in.as_millis())
+                    .min(next_upload_in.as_millis()),
+                "sleeping until next sync / upload / proactive caching"
             );
             tokio::select! {
                 ack = self.sync_trigger.recv() => {
@@ -360,7 +408,7 @@ impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
 
                     let next_cache_in = match self.cache().await {
                         Ok(Some(next)) => {
-                            max(Utc::now().signed_duration_since(next).to_std().unwrap_or_default(), Duration::from_secs(1))
+                            max(next.signed_duration_since(Utc::now()).to_std().unwrap_or_default(), Duration::from_secs(1))
                         }
                         Ok(None) => {
                             Duration::from_secs(900)
@@ -375,7 +423,7 @@ impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
 
                     let _ = self.status_tx.send(Status::Idle {
                         last_activity: Some(Activity::ProactiveCaching),
-                        next_activity: min(self.next_sync, self.next_cache),
+                        next_activity: self.next_activity(),
                     });
                 }
                 _ = tokio::time::sleep(next_sync_in) => {
@@ -431,7 +479,33 @@ impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
 
                     let _ = self.status_tx.send(Status::Idle {
                         last_activity,
-                        next_activity: min(self.next_sync, self.next_cache),
+                        next_activity: self.next_activity(),
+                    });
+                }
+                _ = tokio::time::sleep(next_upload_in) => {
+                    let start_time = Utc::now();
+                    let _ = self.status_tx.send(Status::Uploading {
+                        start_time
+                    });
+
+                    let next_upload_in = match self.upload().await {
+                        Ok(Some(next)) => {
+                            max(next.signed_duration_since(Utc::now()).to_std().unwrap_or_default(), Duration::from_secs(1))
+                        }
+                        Ok(None) => {
+                            Duration::from_secs(300)
+                        }
+                        Err(err) => {
+                            tracing::error!(error= %err, "uploading failed");
+                            Duration::from_secs(300)
+                        }
+                    };
+
+                    self.next_upload = Utc::now() + next_upload_in;
+
+                    let _ = self.status_tx.send(Status::Idle {
+                        last_activity: Some(Activity::Uploading),
+                        next_activity: self.next_activity(),
                     });
                 }
                 _ = self.ct.cancelled() => {
@@ -445,6 +519,10 @@ impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
         tracing::info!("shutting down");
 
         Ok(())
+    }
+
+    fn next_activity(&self) -> DateTime<Utc> {
+        min(self.next_sync, self.next_cache).min(self.next_upload)
     }
 
     #[tracing::instrument(name = "update_log", skip(self, log_entry))]
@@ -486,13 +564,51 @@ impl<MODE: Send + Sync> SyncNow for BackgroundTask<Private, MODE> {
     }
 }
 
+impl<PRIVACY: Send + Sync> UploadNow for BackgroundTask<PRIVACY, ReadOnly> {
+    fn initial_upload_pause() -> Duration {
+        Duration::from_secs(86400 * 365 * 30)
+    }
+
+    async fn upload(&mut self) -> Result<Option<DateTime<Utc>>, crate::Error> {
+        // nothing to do here
+        Ok(Some(Utc::now() + Duration::from_secs(86400 * 365 * 30)))
+    }
+}
+
+impl UploadNow for BackgroundTask<Public, ReadWrite> {
+    fn initial_upload_pause() -> Duration {
+        Duration::from_secs(1)
+    }
+
+    #[tracing::instrument(name = "background_upload_public", skip(self))]
+    async fn upload(&mut self) -> Result<Option<DateTime<Utc>>, crate::Error> {
+        let wallet = self.mode.0.clone();
+        let upload_service = self.mode.1.clone();
+        self._upload(wallet, upload_service, None).await
+    }
+}
+
+impl UploadNow for BackgroundTask<Private, ReadWrite> {
+    fn initial_upload_pause() -> Duration {
+        Duration::from_secs(120)
+    }
+
+    #[tracing::instrument(name = "background_upload_private", skip(self))]
+    async fn upload(&mut self) -> Result<Option<DateTime<Utc>>, crate::Error> {
+        let wallet = self.mode.0.clone();
+        let upload_service = self.mode.1.clone();
+        self._upload(wallet, upload_service, Some(self.privacy.key_ring.clone()))
+            .await
+    }
+}
+
 impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
     #[tracing::instrument(skip(self))]
     async fn current_block_height(&self) -> Result<BlockNumber, crate::Error> {
         Ok(self.client.any_gateway_info().await?.height)
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(fields(owner = %owner) skip(self))]
     async fn _sync(
         &self,
         owner: &WalletAddress,
@@ -740,6 +856,80 @@ impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
                 None => None,
             },
         )
+    }
+}
+
+impl<PRIVACY> BackgroundTask<PRIVACY, ReadWrite> {
+    #[tracing::instrument(skip_all)]
+    async fn _upload(
+        &mut self,
+        wallet: Wallet,
+        upload_service: UploadService,
+        key_ring: Option<KeyRing>,
+    ) -> Result<Option<DateTime<Utc>>, crate::Error> {
+        tracing::debug!("waiting for upload permit");
+        let _permit = self.upload_limit.acquire_permit().await?;
+
+        tracing::debug!("acquiring write tx");
+        let mut tx = self
+            .db
+            .write()
+            .timeout(Duration::from_secs(60))
+            .await
+            .map_err(|_| Error::TxAcquisitionTimeout)??;
+
+        if tx.status().await?.state() != Some(State::Wal) {
+            tracing::debug!("not in wal mode, skipping upload processing");
+            return Ok(None);
+        }
+
+        crate::db::clear_temp_tables(&mut tx).await?;
+
+        let mut upload_service = match upload_service.lock().timeout(Duration::from_secs(3)).await {
+            Ok(upload_service) => upload_service,
+            Err(_) => {
+                let retry = Duration::from_secs(60);
+                tracing::debug!(
+                    retry_in_ms = retry.as_millis(),
+                    "unable to acquire upload_service lock, will retry later"
+                );
+                return Ok(Some(Utc::now() + retry));
+            }
+        };
+
+        let next_pending = upload_service
+            .process_pending(&mut tx, &self.drive_id)
+            .await?;
+
+        // only process new uploads if no existing ones are pending
+        let next_new = if next_pending.is_none() {
+            upload_service
+                .process_new(
+                    &mut tx,
+                    &self.drive_id,
+                    &wallet,
+                    key_ring.as_ref(),
+                    self.upload_batch_settle_time,
+                )
+                .await?
+        } else {
+            None
+        };
+
+        tx.delete_orphaned_entities().await?;
+        let affected_inode_ids = crate::db::collect_affected_inode_ids(&mut tx).await?;
+        crate::db::clear_temp_tables(&mut tx).await?;
+        tx.commit().await?;
+
+        if !affected_inode_ids.is_empty() {
+            self.vfs.invalidate_cache(Some(affected_inode_ids)).await;
+        }
+
+        Ok(match (next_pending, next_new) {
+            (None, Some(next)) | (Some(next), None) => Some(next),
+            (Some(next_pending), Some(next_new)) => Some(min(next_pending, next_new)),
+            (None, None) => None,
+        })
     }
 }
 

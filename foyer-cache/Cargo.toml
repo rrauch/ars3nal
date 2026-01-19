@@ -7,7 +7,7 @@ edition = "2024"
 ario-client = { workspace = true }
 ario-core = { workspace = true }
 
-blocking = "1.6"
+blocking = { workspace = true }
 bon = { workspace = true }
 equivalent = "1"
 foyer = { git = "https://github.com/rrauch/foyer.git", branch = "storage_load_non_static_key", features = ["default", "serde"] }

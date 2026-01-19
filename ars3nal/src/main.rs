@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail};
 use arfs::{
     AccessMode, ArFs, CoinGeckoFxService, Direct, DriveId, FxService, KeyRing, PriceAdjustment,
-    PriceLimit, Scope, SyncLimit, Turbo, UploadMode,
+    PriceLimit, Scope, SyncLimit, Turbo, UploadLimit, UploadMode, UploadSettings,
 };
 use ario_client::{ByteSize, Cache, Client};
 use ario_core::confidential::Confidential;
@@ -11,6 +11,7 @@ use ario_core::network::Network;
 use ario_core::wallet::{Wallet, WalletAddress};
 use ario_core::{Gateway, GatewayError};
 use ars3nal::{Server, ServerHandle, ServerStatus};
+use blocking::unblock;
 use clap::Parser;
 use directories::ProjectDirs;
 use foyer_cache::{FoyerChunkCache, FoyerMetadataCache};
@@ -23,6 +24,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
+use tempfile::TempDir;
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -116,6 +118,23 @@ impl Default for TomlSyncingConfig {
             interval_secs: None,
             min_initial_wait_secs: None,
             max_concurrent_syncs: 1,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TomlUploadingConfig {
+    #[serde(default, deserialize_with = "deserialize_duration_option")]
+    batch_settle_time_secs: Option<Duration>,
+    #[serde(default = "default_one")]
+    max_concurrent_uploads: usize,
+}
+
+impl Default for TomlUploadingConfig {
+    fn default() -> Self {
+        Self {
+            batch_settle_time_secs: None,
+            max_concurrent_uploads: 1,
         }
     }
 }
@@ -455,11 +474,16 @@ struct TomlPermabucketConfig {
 struct TomlGeneralConfig {
     #[serde(default)]
     data_dir: Option<PathBuf>,
+    #[serde(default)]
+    temp_dir: Option<PathBuf>,
 }
 
 impl Default for TomlGeneralConfig {
     fn default() -> Self {
-        Self { data_dir: None }
+        Self {
+            data_dir: None,
+            temp_dir: None,
+        }
     }
 }
 
@@ -475,6 +499,8 @@ struct TomlConfig {
     caching: TomlCachingConfig,
     #[serde(default)]
     syncing: TomlSyncingConfig,
+    #[serde(default)]
+    uploading: TomlUploadingConfig,
     #[serde(default, rename = "permabucket")]
     permabuckets: Vec<TomlPermabucketConfig>,
     #[serde(default, rename = "user")]
@@ -506,8 +532,11 @@ struct Config {
     policies: HashMap<String, PolicyConfig>,
     permabuckets: HashMap<String, PermabucketConfig>,
     max_sync_concurrency: NonZeroUsize,
+    max_upload_concurrency: NonZeroUsize,
+    maybe_upload_batch_settle_time: Option<Duration>,
     proactive_cache_interval: Option<Duration>,
     users: HashMap<String, UserConfig>,
+    temp_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -817,6 +846,12 @@ impl Config {
                 .max_concurrent_syncs
                 .try_into()
                 .map_err(|_| anyhow!("max_concurrent_syncs cannot be zero or negative"))?,
+            max_upload_concurrency: toml
+                .uploading
+                .max_concurrent_uploads
+                .try_into()
+                .map_err(|_| anyhow!("max_concurrent_uploads cannot be zero or negative"))?,
+            maybe_upload_batch_settle_time: toml.uploading.batch_settle_time_secs,
             proactive_cache_interval: if toml.caching.proactive_caching_enabled {
                 Some(
                     toml.caching
@@ -826,6 +861,7 @@ impl Config {
             } else {
                 None
             },
+            temp_path: toml.general.temp_dir,
         })
     }
 }
@@ -977,7 +1013,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
     }
 
     let mut fx_service: Option<Arc<FxService>> = None;
-
+    let mut _temp_dirs = vec![]; // keep alive until end of run
     let mut uploaders = HashMap::with_capacity(config.uploaders.len());
     for (name, conf) in config.uploaders {
         let wallet = wallets
@@ -985,13 +1021,20 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .map(|w| w.clone())
             .expect("wallet to be configured");
 
+        let temp_dir = Arc::new(if let Some(temp_path) = &config.temp_path {
+            let temp_path = temp_path.to_path_buf();
+            unblock(move || TempDir::new_in(&temp_path)).await?
+        } else {
+            unblock(move || TempDir::new()).await?
+        });
+
         let mode: Box<dyn UploadMode + Send + Sync + 'static> = match conf.mode {
             UploadType::Direct => Box::new(Direct::new(
                 client.clone(),
                 wallet.clone(),
                 conf.price_adjustment,
             )),
-            UploadType::Turbo => Box::new(Turbo::new()),
+            UploadType::Turbo => Box::new(Turbo::new(temp_dir.clone())),
         };
 
         let fx = if let Some(price_limit) = &conf.price_limit {
@@ -1021,9 +1064,12 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .mode(mode)
             .maybe_price_limit(conf.price_limit)
             .maybe_fx_service(fx)
-            .build()?;
+            .temp_dir(temp_dir.path().to_path_buf())
+            .build()
+            .await?;
 
         uploaders.insert(name, Arc::new(tokio::sync::Mutex::new(uploader)));
+        _temp_dirs.push(temp_dir);
     }
 
     let mut server = Server::builder()
@@ -1033,6 +1079,11 @@ async fn run(config: Config) -> anyhow::Result<()> {
         .await?;
 
     let sync_limit = SyncLimit::new(config.max_sync_concurrency);
+    let upload_settings = UploadSettings::builder()
+        .upload_limit(UploadLimit::new(config.max_upload_concurrency))
+        .maybe_batch_settle_time(config.maybe_upload_batch_settle_time)
+        .build();
+
     let bucket_count = config.permabuckets.len();
 
     for (name, bucket) in config.permabuckets {
@@ -1105,6 +1156,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .maybe_sync_min_initial(bucket.maybe_sync_min_initial_wait)
             .maybe_proactive_cache_interval(config.proactive_cache_interval)
             .sync_limit(sync_limit.clone())
+            .upload_settings(upload_settings.clone())
             .build()
             .await?;
 

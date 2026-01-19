@@ -1,4 +1,4 @@
-mod bundler;
+pub mod bundler;
 
 use crate::location::{Arl, BundleItemArl};
 use crate::{Client, api};

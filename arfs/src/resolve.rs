@@ -347,7 +347,7 @@ where
 
 async fn drive_entity(
     client: &Client,
-    drive_id: &DriveId,
+    _drive_id: &DriveId,
     location: &Arl,
     owner: &WalletAddress,
     key_ring: Option<&KeyRing>,

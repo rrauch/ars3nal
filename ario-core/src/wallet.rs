@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(tx.format(), Format::V2);
         assert_eq!(tx.signature().signature_type(), SignatureType::RsaPss);
         assert_eq!(tx.reward(), &Reward::try_from("12345")?);
-        assert_eq!(tx.quantity(), Some(&Quantity::try_from("999999")?));
+        assert_eq!(tx.quantity(), &Quantity::try_from("999999")?);
         assert_eq!(tx.target().unwrap().to_base64(), target_str);
 
         Ok(())
@@ -394,7 +394,7 @@ mod tests {
             SignatureType::EcdsaSecp256k1
         );
         assert_eq!(tx.reward(), &Reward::try_from("22345")?);
-        assert_eq!(tx.quantity(), Some(&Quantity::try_from("099999")?));
+        assert_eq!(tx.quantity(), &Quantity::try_from("099999")?);
         assert_eq!(tx.target().unwrap().to_base64(), target_str);
 
         Ok(())

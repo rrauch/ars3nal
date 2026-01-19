@@ -29,7 +29,11 @@ use k256::Secp256k1;
 use maybe_owned::MaybeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::marker::PhantomData;
+use std::ops::Deref;
+use std::sync::LazyLock;
 use thiserror::Error;
+
+static ZERO_QUANTITY: LazyLock<Quantity> = LazyLock::new(|| Quantity::zero());
 
 #[derive(Clone, Debug, PartialEq, Hash, Serialize)]
 #[repr(transparent)]
@@ -83,7 +87,7 @@ impl<'a, Auth: AuthenticationState> From<V2Tx<'a, Auth>> for RawTx<'a, Auth> {
                 .map(|o| o.as_blob().into_owned()),
             tags: v2.tags.into_iter().map(|t| t.into()).collect(),
             target: v2.target.map(|w| w.as_blob().into_owned()),
-            quantity: v2.quantity.map(|q| q.into_inner().into()),
+            quantity: v2.quantity.into_inner().into(),
             data_tree: vec![],
             data_root: v2.data_root.map(|dr| dr.as_blob().into_owned()),
             data_size: v2.data_size,
@@ -204,7 +208,7 @@ pub(crate) struct V2TxData<'a> {
     last_tx: TxAnchor,
     tags: Vec<Tag<'a>>,
     target: Option<WalletAddress>,
-    quantity: Option<Quantity>,
+    quantity: Quantity,
     data_size: u64,
     data_root: Option<DataRoot>,
     reward: Reward,
@@ -246,8 +250,8 @@ impl<'a> V2TxData<'a> {
         self.target.as_ref()
     }
 
-    pub fn quantity(&self) -> Option<&Quantity> {
-        self.quantity.as_ref()
+    pub fn quantity(&self) -> &Quantity {
+        &self.quantity
     }
 
     pub fn data_root(&self) -> Option<&DataRoot> {
@@ -331,7 +335,7 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
                 let tx_hash = TxHashBuilder {
                     owner: None,
                     target: common_data.target.as_ref(),
-                    quantity: common_data.quantity.as_ref(),
+                    quantity: &common_data.quantity,
                     reward: &common_data.reward,
                     last_tx: &last_tx,
                     tags: &common_data.tags,
@@ -369,7 +373,7 @@ impl<'a> TryFrom<ValidatedRawTx<'a>> for V2TxData<'a> {
 struct TxHashBuilder<'a> {
     owner: Option<&'a Blob<'a>>,
     target: Option<&'a WalletAddress>,
-    quantity: Option<&'a Quantity>,
+    quantity: &'a Quantity,
     reward: &'a Reward,
     last_tx: &'a TxAnchor,
     tags: &'a Vec<Tag<'a>>,
@@ -383,7 +387,7 @@ impl<'a> From<&'a V2TxData<'a>> for TxHashBuilder<'a> {
         Self {
             owner: None,
             target: value.target.as_ref(),
-            quantity: value.quantity.as_ref(),
+            quantity: &value.quantity,
             reward: &value.reward,
             last_tx: &value.last_tx,
             tags: &value.tags,
@@ -496,8 +500,8 @@ pub struct TxDraft<'a> {
 impl<'a> From<&'a TxDraft<'a>> for TxHashBuilder<'a> {
     fn from(value: &'a TxDraft<'a>) -> Self {
         let (target, quantity) = match &value.transfer {
-            Some(transfer) => (Some(&transfer.target), Some(&transfer.quantity)),
-            None => (None, None),
+            Some(transfer) => (Some(&transfer.target), &transfer.quantity),
+            None => (None, ZERO_QUANTITY.deref()),
         };
 
         let (data_size, data_root) = match &value.data_upload {
@@ -535,8 +539,8 @@ impl<'a> TxDraft<'a> {
     pub(crate) fn sign<T: TxSigner>(self, signer: &T) -> Result<AuthenticatedV2Tx<'a>, TxError> {
         let signature_data = signer.sign(&self)?;
         let (target, quantity) = match self.transfer {
-            Some(transfer) => (Some(transfer.target), Some(transfer.quantity)),
-            None => (None, None),
+            Some(transfer) => (Some(transfer.target), transfer.quantity),
+            None => (None, Quantity::zero()),
         };
 
         let (data_size, data_root) = match self.data_upload {
@@ -613,7 +617,7 @@ mod tests {
             "gVhey9KN6Fjc3nZbSOqLPRyDjjw6O5-sLSWPLZ_S7LoX5XOrFRja8A_wuj22OpHj"
         );
         assert!(tx_data.target.is_none());
-        assert_eq!(tx_data.quantity.as_ref().unwrap(), ZERO_QUANTITY.deref(),);
+        assert_eq!(&tx_data.quantity, ZERO_QUANTITY.deref(),);
         //todo: data root
         assert_eq!(tx_data.data_size, 128355);
         assert_eq!(tx_data.reward, Reward::try_from(557240107)?,);
@@ -683,8 +687,8 @@ mod tests {
             "mxi51DabflJu7YNcJSIm54cWjXDu69MAknQFuujhzDp7lEI7MT5zCufHlyhpq5lm"
         );
         assert_eq!(
-            tx_data.quantity.as_ref(),
-            Some(&Quantity::try_from(Winston::from_str("2199990000000000")?)?)
+            &tx_data.quantity,
+            &Quantity::try_from(Winston::from_str("2199990000000000")?)?
         );
         assert_eq!(
             tx_data.target.as_ref().unwrap().to_base64(),

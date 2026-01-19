@@ -13,6 +13,7 @@ anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 axum = "0.8"
+blocking = { workspace = true }
 bon = { workspace = true }
 bytesize = { workspace = true, features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env", "string"] }
@@ -28,6 +29,7 @@ s3s = "0.12.0"
 s3s-policy = "0.12.0"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["compat"] }
 toml = { version = "0.9", features = ["preserve_order", "display"] }

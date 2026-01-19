@@ -11,15 +11,17 @@ use ario_core::confidential::{NewSecretExt, RevealExt, RevealMutExt};
 use ario_core::crypto::aes::ctr::{AesCtr, AesCtrParams};
 use ario_core::crypto::aes::gcm::{AesGcmParams, DefaultAesGcm, Tag as AesGcmTag, Tag};
 use ario_core::crypto::aes::{AesKey, Nonce};
-use ario_core::crypto::encryption;
-use ario_core::crypto::encryption::{DecryptionExt, Decryptor};
+use ario_core::crypto::encryption::encryption::EncryptingWriter as CoreEncryptingWriter;
+use ario_core::crypto::encryption::{DecryptionExt, EncryptionExt, Encryptor};
 use ario_core::crypto::hash::{Hasher, HasherExt, Sha256};
 use ario_core::crypto::rsa::RsaPrivateKey;
 use ario_core::crypto::rsa::pss::DeterministicRsaPss;
 use ario_core::crypto::signature::Signature;
+use ario_core::crypto::{OutputLen, encryption};
 use ario_core::wallet::hazmat::SigningKey;
 use ario_core::wallet::{Wallet, WalletSk};
-use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
+use async_trait::async_trait;
+use futures_lite::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite};
 use hkdf::Hkdf;
 use hkdf::hmac::digest::array::Array;
 use hkdf::hmac::digest::consts::U16;
@@ -137,6 +139,14 @@ impl DriveKey {
     ) -> Result<Vec<u8>, DriveKeyError> {
         Ok(decrypt_metadata(ciphertext, nonce, tag, &self.0)?)
     }
+
+    pub fn encrypt_metadata(
+        &self,
+        plaintext: &[u8],
+        nonce: &Nonce<U12>,
+    ) -> Result<Vec<u8>, DriveKeyError> {
+        Ok(encrypt_metadata(plaintext, nonce, &self.0)?)
+    }
 }
 
 #[derive(Error, Debug)]
@@ -181,6 +191,21 @@ fn decrypt_metadata(
     Ok(plaintext)
 }
 
+fn encrypt_metadata(
+    plaintext: &[u8],
+    nonce: &Nonce<U12>,
+    key: &AesKey<256>,
+) -> Result<Vec<u8>, encryption::Error> {
+    let params = AesGcmParams::new(key, nonce, "".as_bytes());
+    let len = plaintext.len();
+    let mut plaintext = Cursor::new(plaintext);
+    let mut ciphertext = Vec::with_capacity(len + U16::to_usize());
+    let tag = DefaultAesGcm::encrypt(params, &mut plaintext, &mut ciphertext)?.into_bytes();
+    // append the tag
+    ciphertext.extend_from_slice(tag.as_slice());
+    Ok(ciphertext)
+}
+
 impl FileKey {
     pub fn derive_from(file_id: &FileId, drive_key: &DriveKey) -> Self {
         Self(Arc::new(derive_file_key(file_id, drive_key.0.as_ref())))
@@ -195,13 +220,13 @@ impl FileKey {
         Ok(decrypt_metadata(ciphertext, nonce, tag, &self.0)?)
     }
 
-    pub async fn decrypt_content<T: AsyncRead + AsyncSeek + Send + Sync + Unpin + 'static>(
+    pub async fn decrypt_content<'a, T: AsyncRead + AsyncSeek + Send + Sync + Unpin + 'a>(
         &self,
         mut ciphertext: T,
         plaintext_len: u64,
         cipher: Cipher,
         iv: Option<OwnedBlob>,
-    ) -> Result<Box<dyn FileReader + 'static>, FileKeyError> {
+    ) -> Result<Box<dyn FileReader + 'a>, FileKeyError> {
         let iv = iv.ok_or_else(|| FileKeyError::IvMissing)?;
         let nonce = Nonce::try_from(iv).map_err(|_| FileKeyError::InvalidNonce)?;
 
@@ -229,6 +254,58 @@ impl FileKey {
                 )?))
             }
         }
+    }
+
+    pub fn encrypt_metadata(
+        &self,
+        plaintext: &[u8],
+        nonce: &Nonce<U12>,
+    ) -> Result<Vec<u8>, DriveKeyError> {
+        Ok(encrypt_metadata(plaintext, nonce, &self.0)?)
+    }
+
+    pub async fn encrypt_content<'a, T: AsyncWrite + Send + Sync + Unpin + 'a>(
+        &self,
+        ciphertext: T,
+        cipher: Cipher,
+        iv: Option<OwnedBlob>,
+    ) -> Result<Box<dyn EncryptingWriter + 'a>, FileKeyError> {
+        let iv = iv.ok_or_else(|| FileKeyError::IvMissing)?;
+        let nonce = Nonce::try_from(iv).map_err(|_| FileKeyError::InvalidNonce)?;
+        match cipher {
+            Cipher::Aes256Gcm => {
+                let params = AesGcmParams::new(self.0.as_ref().clone(), nonce, b"");
+                Ok(Box::new(DefaultAesGcm::encrypting_async_writer(
+                    params, ciphertext,
+                )?))
+            }
+            Cipher::Aes256Ctr => {
+                let params = AesCtrParams::new(self.0.as_ref().clone(), nonce);
+                Ok(Box::new(AesCtr::encrypting_async_writer(
+                    params, ciphertext,
+                )?))
+            }
+        }
+    }
+}
+
+pub trait EncryptingWriter: AsyncWrite + FinalizeWithTag + Send + Sync + Unpin {}
+impl<T> EncryptingWriter for T where T: AsyncWrite + FinalizeWithTag + Send + Sync + Unpin {}
+
+#[async_trait]
+pub trait FinalizeWithTag {
+    async fn finalize(self: Box<Self>) -> std::io::Result<OwnedBlob>;
+}
+
+#[async_trait]
+impl<'a, E: Encryptor<'a>, W: AsyncWrite> FinalizeWithTag for CoreEncryptingWriter<'a, E, W>
+where
+    W: Unpin + Send,
+    E: Unpin + Send,
+{
+    async fn finalize(self: Box<Self>) -> std::io::Result<OwnedBlob> {
+        let maybe_tag = CoreEncryptingWriter::finalize_async_boxed(self).await?;
+        Ok(maybe_tag.into())
     }
 }
 
@@ -307,6 +384,16 @@ impl DriveKeyMetadataCryptor {
             signature_format,
         })
     }
+
+    fn drive_key(&self, key_ring: &KeyRing) -> Result<DriveKey, MetadataCryptorError> {
+        Ok(match self.signature_format {
+            Some(SignatureFormat::V1) => key_ring.v1_drive_key(),
+            Some(SignatureFormat::V2) => key_ring.v2_drive_key(),
+            None => key_ring
+                .drive_key()
+                .ok_or_else(|| MetadataCryptorError::NoDefaultKeyInKeyRing)?,
+        })
+    }
 }
 
 impl MetadataCryptor<'_> for DriveKeyMetadataCryptor {
@@ -318,7 +405,8 @@ impl MetadataCryptor<'_> for DriveKeyMetadataCryptor {
         plaintext_metadata: &[u8],
         key_ring: &KeyRing,
     ) -> Result<Vec<u8>, Self::EncryptionError> {
-        todo!()
+        let drive_key = self.drive_key(key_ring)?;
+        Ok(drive_key.encrypt_metadata(plaintext_metadata, &self.nonce)?)
     }
 
     fn decrypt(
@@ -327,15 +415,7 @@ impl MetadataCryptor<'_> for DriveKeyMetadataCryptor {
         key_ring: &KeyRing,
     ) -> Result<Vec<u8>, Self::DecryptionError> {
         let (ciphertext, tag) = prepare_encrypted_metadata(encrypted_metadata)?;
-
-        let drive_key = match self.signature_format {
-            Some(SignatureFormat::V1) => key_ring.v1_drive_key(),
-            Some(SignatureFormat::V2) => key_ring.v2_drive_key(),
-            None => key_ring
-                .drive_key()
-                .ok_or_else(|| MetadataCryptorError::NoDefaultKeyInKeyRing)?,
-        };
-
+        let drive_key = self.drive_key(key_ring)?;
         Ok(drive_key.decrypt_metadata(ciphertext, &self.nonce, tag)?)
     }
 }
@@ -366,6 +446,16 @@ impl<'a> FileMetadataCryptor<'a> {
             signature_format,
         })
     }
+
+    fn file_key(&self, key_ring: &KeyRing) -> Result<FileKey, MetadataCryptorError> {
+        Ok(match self.signature_format {
+            Some(SignatureFormat::V1) => key_ring.v1_file_key(self.file_id),
+            Some(SignatureFormat::V2) => key_ring.v2_file_key(self.file_id),
+            None => key_ring
+                .file_key(self.file_id)
+                .ok_or_else(|| MetadataCryptorError::NoDefaultKeyInKeyRing)?,
+        })
+    }
 }
 
 impl<'a> MetadataCryptor<'a> for FileMetadataCryptor<'a> {
@@ -377,7 +467,8 @@ impl<'a> MetadataCryptor<'a> for FileMetadataCryptor<'a> {
         plaintext_metadata: &[u8],
         key_ring: &KeyRing,
     ) -> Result<Vec<u8>, Self::EncryptionError> {
-        todo!()
+        let file_key = self.file_key(key_ring)?;
+        Ok(file_key.encrypt_metadata(plaintext_metadata, &self.nonce)?)
     }
 
     fn decrypt(
@@ -386,15 +477,7 @@ impl<'a> MetadataCryptor<'a> for FileMetadataCryptor<'a> {
         key_ring: &KeyRing,
     ) -> Result<Vec<u8>, Self::DecryptionError> {
         let (ciphertext, tag) = prepare_encrypted_metadata(encrypted_metadata)?;
-
-        let file_key = match self.signature_format {
-            Some(SignatureFormat::V1) => key_ring.v1_file_key(self.file_id),
-            Some(SignatureFormat::V2) => key_ring.v2_file_key(self.file_id),
-            None => key_ring
-                .file_key(self.file_id)
-                .ok_or_else(|| MetadataCryptorError::NoDefaultKeyInKeyRing)?,
-        };
-
+        let file_key = self.file_key(key_ring)?;
         Ok(file_key.decrypt_metadata(ciphertext, &self.nonce, tag)?)
     }
 }
@@ -479,5 +562,120 @@ impl<T: AsyncSeek + Unpin> AsyncSeek for Take<T> {
         } else {
             result
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::crypto::{AesGcmTag, FileKey};
+    use crate::types::Cipher;
+    use crate::types::file::FileId;
+    use crate::{DriveId, KeyRing};
+    use ario_core::blob::OwnedBlob;
+    use ario_core::crypto::aes::Nonce;
+    use ario_core::jwk::Jwk;
+    use ario_core::wallet::Wallet;
+    use futures_lite::io::Cursor;
+    use futures_lite::{AsyncReadExt, AsyncWriteExt};
+    use hkdf::hmac::digest::consts::U12;
+    use rsa::signature::digest::crypto_common::Generate;
+    use std::str::FromStr;
+
+    static WALLET_RSA_JWK: &'static [u8] =
+        include_bytes!("../../ario-core/testdata/ar_wallet_tests_PS256_65537_fixture.json");
+
+    static TEST_FILE: &'static [u8] = include_bytes!("../../ario-core/testdata/1mb.bin");
+
+    fn init() -> anyhow::Result<KeyRing> {
+        let wallet = Wallet::from_jwk(&Jwk::from_json(WALLET_RSA_JWK)?)?;
+        Ok(KeyRing::builder()
+            .drive_id(&DriveId::from_str("a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8")?)
+            .password("test-password".to_string())
+            .wallet(&wallet)
+            .build()?)
+    }
+
+    #[test]
+    fn metadata_encryption_roundtrip() -> anyhow::Result<()> {
+        let key_ring = init()?;
+        let reference_pt = "This is a short metadata test. Data is held in memory.".as_bytes();
+        let len = reference_pt.len();
+        let nonce = Nonce::<U12>::generate();
+
+        let v1_drive_key = key_ring.v1_drive_key();
+        let encrypted_metadata = v1_drive_key.encrypt_metadata(reference_pt, &nonce)?;
+        let ciphertext = &encrypted_metadata[..len];
+        let tag = AesGcmTag::try_from_bytes(&encrypted_metadata[len..]).unwrap();
+        let plaintext = v1_drive_key.decrypt_metadata(ciphertext, &nonce, tag)?;
+        assert_eq!(plaintext.as_slice(), reference_pt);
+
+        let v2_drive_key = key_ring.v2_drive_key();
+        let encrypted_metadata = v2_drive_key.encrypt_metadata(reference_pt, &nonce)?;
+        let ciphertext = &encrypted_metadata[..len];
+        let tag = AesGcmTag::try_from_bytes(&encrypted_metadata[len..]).unwrap();
+        let plaintext = v2_drive_key.decrypt_metadata(ciphertext, &nonce, tag)?;
+        assert_eq!(plaintext.as_slice(), reference_pt);
+
+        let file_id = FileId::from_str("b1a2a3a4-a1b2-c1c2-c1d2-f3d4d5a1d7d8")?;
+
+        let v1_file_key = key_ring.v1_file_key(&file_id);
+        let encrypted_metadata = v1_file_key.encrypt_metadata(reference_pt, &nonce)?;
+        let ciphertext = &encrypted_metadata[..len];
+        let tag = AesGcmTag::try_from_bytes(&encrypted_metadata[len..]).unwrap();
+        let plaintext = v1_file_key.decrypt_metadata(ciphertext, &nonce, tag)?;
+        assert_eq!(plaintext.as_slice(), reference_pt);
+
+        let v2_file_key = key_ring.v2_file_key(&file_id);
+        let encrypted_metadata = v2_file_key.encrypt_metadata(reference_pt, &nonce)?;
+        let ciphertext = &encrypted_metadata[..len];
+        let tag = AesGcmTag::try_from_bytes(&encrypted_metadata[len..]).unwrap();
+        let plaintext = v2_file_key.decrypt_metadata(ciphertext, &nonce, tag)?;
+        assert_eq!(plaintext.as_slice(), reference_pt);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_encryption_roundtrip() -> anyhow::Result<()> {
+        let key_ring = init()?;
+        let file_id = FileId::from_str("c2a2a3a4-61b2-c1c2-c1d2-f3d4d5a1d7d8")?;
+        let ciphers = [Cipher::Aes256Gcm, Cipher::Aes256Ctr];
+        for cipher in ciphers {
+            let nonce = cipher.generate_nonce();
+
+            let v1_file_key = key_ring.v1_file_key(&file_id);
+            test_file_encryption(&v1_file_key, cipher, nonce.clone(), TEST_FILE).await?;
+
+            let v2_file_key = key_ring.v2_file_key(&file_id);
+            test_file_encryption(&v2_file_key, cipher, nonce.clone(), TEST_FILE).await?;
+        }
+        Ok(())
+    }
+
+    async fn test_file_encryption(
+        file_key: &FileKey,
+        cipher: Cipher,
+        nonce: OwnedBlob,
+        plaintext: &[u8],
+    ) -> anyhow::Result<()> {
+        let mut buffer = Vec::new();
+        let mut cursor = Cursor::new(&mut buffer);
+        let mut encryptor = file_key
+            .encrypt_content(&mut cursor, cipher, Some(nonce.clone()))
+            .await?;
+        let n = futures_lite::io::copy(Cursor::new(plaintext), &mut encryptor).await?;
+        assert_eq!(n, plaintext.len() as u64);
+        let tag = encryptor.finalize().await?;
+        cursor.write_all(tag.bytes()).await?;
+        cursor.close().await?;
+
+        let cursor = Cursor::new(&buffer);
+        let mut decryptor = file_key
+            .decrypt_content(cursor, plaintext.len() as u64, cipher, Some(nonce))
+            .await?;
+        let mut buffer = Vec::with_capacity(plaintext.len());
+        decryptor.read_to_end(&mut buffer).await?;
+        assert_eq!(buffer.as_slice(), plaintext);
+        Ok(())
     }
 }

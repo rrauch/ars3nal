@@ -16,11 +16,18 @@ use serde::{Deserialize, Serialize};
 use serde_with::base64::{Base64, UrlSafe};
 use serde_with::formats::Unpadded;
 use serde_with::{serde_as, skip_serializing_none};
+use std::marker::PhantomData;
 use uuid::Uuid;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct FileKind;
 pub type FileId = TaggedId<Uuid, FileKind>;
+
+impl FileId {
+    pub fn generate() -> Self {
+        Self(Uuid::new_v4(), PhantomData::default())
+    }
+}
 
 impl Entity for FileKind {
     const TYPE: &'static str = "file";

@@ -2,11 +2,13 @@ mod db;
 
 use crate::db::{DataError, Db, Read, ReadWrite, Transaction, TxScope, Write};
 use crate::serde_tag::{BytesToStr, Chain};
-use crate::types::file::{FileEntity, FileKind};
+use crate::types::file::{FileEntity, FileId, FileKind};
 use crate::types::folder::{FolderEntity, FolderKind};
 use crate::types::{Cipher, Entity, Model};
 use crate::wal::{WalDirMetadata, WalFileMetadata, WalNode};
-use crate::{CacheSettings, ContentType, EntityError, KeyRing, State, Status, serde_tag, wal};
+use crate::{
+    CacheSettings, ContentType, EntityError, FolderId, KeyRing, State, Status, serde_tag, wal,
+};
 use ario_client::data_reader::DataReader;
 use ario_client::location::Arl;
 use ario_client::{ByteSize, Client};
@@ -15,9 +17,7 @@ use ario_core::wallet::WalletAddress;
 use chrono::{DateTime, Utc};
 pub(crate) use db::{VfsRow, get_vfs_row, insert_arfs_inode, insert_vfs_row};
 use derive_more::Display;
-use futures_lite::{
-    AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, Stream, stream,
-};
+use futures_lite::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, Stream, stream};
 use maybe_owned::MaybeOwnedMut;
 use moka::future::Cache;
 use ouroboros::self_referencing;
@@ -163,11 +163,13 @@ where
 {
     let config = conn.config().await?;
     let ts = config.drive.timestamp().clone();
+    let folder_id = config.root_folder.id().clone();
 
     let ids = conn.list_root().await?;
     let content = inode_ids_to_inodes(inode_cache, path_cache, ids.into_iter(), conn).await?;
 
     let root = Root(Arc::new(RootInner {
+        folder_id,
         last_modified: ts,
         content,
     }));
@@ -430,7 +432,7 @@ impl Vfs {
                 }
                 Ok(FileHandle(ReadOnly(Box::new(reader))))
             }
-            WalNode::Directory => Err(wal::Error::InvalidWalNodeType(
+            WalNode::Directory(_) => Err(wal::Error::InvalidWalNodeType(
                 "File".to_string(),
                 "Directory".to_string(),
             ))?,
@@ -446,7 +448,7 @@ impl Vfs {
                 "data_location not set for file".to_ascii_lowercase(),
             ))
         })?;
-        let mut reader = self.0.client.read_any(data_location).await?;
+        let reader = self.0.client.read_any(data_location).await?;
         let actual_len = reader.len();
         let mut expected_len = model.size();
 
@@ -541,23 +543,24 @@ impl Vfs {
 
         let mut affected_inode_ids = vec![];
 
-        if create_dirs {
-            let (_, affected) = self
+        let parent = if create_dirs {
+            let (inode, affected) = self
                 .ensure_dir_exists(dir, last_modified.as_ref(), &mut tx)
                 .await?;
             affected_inode_ids.extend(affected);
+            inode.folder_id().map(|id| id.clone())
         } else {
-            match self
+            let inode = self
                 ._inode_by_path(dir, &mut tx, false)
                 .await?
-                .ok_or_else(|| Error::InodeError(InodeError::NotFoundByPath(dir.clone())))?
-            {
-                Inode::Directory(_) | Inode::Root(_) => {}
-                _ => Err(Error::InodeError(InodeError::IncorrectType))?,
-            }
+                .ok_or_else(|| Error::InodeError(InodeError::NotFoundByPath(dir.clone())))?;
+            inode.folder_id().map(|id| id.clone())
         }
+        .ok_or_else(|| Error::InodeError(InodeError::ParentNotDirOrRoot))?;
 
         let metadata = WalDirMetadata {
+            id: FolderId::generate(),
+            parent,
             name: name.to_string(),
             last_modified: last_modified.unwrap_or_else(|| Utc::now()),
         };
@@ -589,9 +592,11 @@ impl Vfs {
         Transaction<C>: Write,
     {
         let mut affected_inode_ids = vec![];
+        let mut parent = None;
         for path in dir.parts() {
             match self._inode_by_path(&path, &mut *tx, false).await? {
-                Some(Inode::Directory(_)) | Some(Inode::Root(_)) => {} // exists,
+                Some(Inode::Root(root)) => parent = Some(root.folder_id().clone()),
+                Some(Inode::Directory(dir)) => parent = Some(dir.folder_id().clone()),
                 Some(Inode::File(_)) => Err(Error::InodeError(InodeError::IncorrectType))?,
                 None => {
                     // create dir
@@ -601,8 +606,15 @@ impl Vfs {
                             "cannot create directory without name".to_string(),
                         ))
                     })?;
+                    let parent_id = parent.ok_or_else(|| {
+                        crate::db::Error::DataError(DataError::MissingData(
+                            "cannot create directory without parent".to_string(),
+                        ))
+                    })?;
 
                     let metadata = WalDirMetadata {
+                        id: FolderId::generate(),
+                        parent: parent_id,
                         name: name.to_string(),
                         last_modified: last_modified
                             .map(|ts| ts.clone())
@@ -611,6 +623,7 @@ impl Vfs {
 
                     let (_, affected) = tx.new_wal_dir(&path, &metadata).await?;
                     affected_inode_ids.extend(affected);
+                    parent = Some(metadata.id);
                 }
             }
         }
@@ -640,14 +653,6 @@ impl Vfs {
         self.check_status()?;
         let mut tx = self.wal_mode().await?;
 
-        let metadata = WalFileMetadata {
-            name: name.to_string(),
-            size: 0,
-            last_modified: last_modified.clone().unwrap_or(Utc::now()),
-            content_type,
-            extra: extra.unwrap_or_default(),
-        };
-
         let mut affected_inode_ids = vec![];
 
         let dir = match self._inode_by_path(dir, &mut tx, false).await? {
@@ -660,6 +665,20 @@ impl Vfs {
                 inode
             }
             None => Err(Error::InodeError(InodeError::NotFoundByPath(dir.clone())))?,
+        };
+
+        let metadata = WalFileMetadata {
+            id: FileId::generate(),
+            parent: dir
+                .folder_id()
+                .map(|id| id.clone())
+                .ok_or_else(|| Error::InodeError(InodeError::ParentNotDirOrRoot))?,
+            name: name.to_string(),
+            size: 0,
+            last_modified: last_modified.clone().unwrap_or(Utc::now()),
+            content_type,
+            extra: extra.unwrap_or_default(),
+            existing_data_item_id: None,
         };
 
         let path = match dir {
@@ -718,7 +737,7 @@ impl Vfs {
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct MaybeEncryptedDataItem {
+pub(crate) struct MaybeEncryptedDataItem {
     #[serde_as(as = "Option<Chain<(BytesToStr, DisplayFromStr)>>")]
     #[serde(default, rename = "Cipher")]
     pub cipher: Option<Cipher>,
@@ -1131,7 +1150,7 @@ impl File {
         last_modified: Timestamp,
         path: VfsPath,
         wal_entity_id: u64,
-        metadata: Option<WalFileMetadata>,
+        metadata: WalFileMetadata,
     ) -> Self {
         Self(Arc::new(VfsNodeInner {
             id,
@@ -1146,7 +1165,7 @@ impl File {
     pub fn content_type(&self) -> &ContentType {
         match &self.0.inner {
             Variant::Permanent(model) => model.content_type(),
-            Variant::Wal(WalNode::File(_, Some(metadata))) => metadata
+            Variant::Wal(WalNode::File(_, metadata)) => metadata
                 .content_type
                 .as_ref()
                 .unwrap_or_else(|| &ContentType::Binary),
@@ -1169,6 +1188,16 @@ impl File {
         match &self.0.inner {
             Variant::Permanent(model) => model.data_location(),
             Variant::Wal(_) => None,
+        }
+    }
+
+    pub fn file_id(&self) -> &FileId {
+        match &self.0.inner {
+            Variant::Permanent(permanent) => permanent.id(),
+            Variant::Wal(wal) => match wal {
+                WalNode::File(_, metadata) => &metadata.id,
+                _ => unreachable!("wal_node expected to be of variant File"),
+            },
         }
     }
 }
@@ -1198,6 +1227,7 @@ impl Directory {
         name: Name,
         last_modified: Timestamp,
         path: VfsPath,
+        metadata: WalDirMetadata,
     ) -> Self {
         Self(Arc::new(VfsNodeInner {
             id,
@@ -1205,8 +1235,18 @@ impl Directory {
             last_modified,
             size: ByteSize::b(0),
             path,
-            inner: Variant::Wal(WalNode::Directory),
+            inner: Variant::Wal(WalNode::Directory(metadata)),
         }))
+    }
+
+    pub(crate) fn folder_id(&self) -> &FolderId {
+        match &self.0.inner {
+            Variant::Permanent(permanent) => permanent.id(),
+            Variant::Wal(wal) => match wal {
+                WalNode::Directory(metadata) => &metadata.id,
+                _ => unreachable!("wal_node expected to be of variant Directory"),
+            },
+        }
     }
 }
 
@@ -1272,7 +1312,7 @@ impl<E: Entity> VfsNode<E> {
                     }
                 })
                 .collect(),
-            Variant::Wal(WalNode::File(_, Some(metadata))) => metadata
+            Variant::Wal(WalNode::File(_, metadata)) => metadata
                 .extra
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.borrow()))
@@ -1314,8 +1354,15 @@ pub enum Inode {
 #[repr(transparent)]
 pub struct Root(Arc<RootInner>);
 
+impl Root {
+    pub(crate) fn folder_id(&self) -> &FolderId {
+        &self.0.folder_id
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 struct RootInner {
+    folder_id: FolderId,
     last_modified: Timestamp,
     content: Vec<Inode>,
 }
@@ -1354,6 +1401,15 @@ impl Inode {
             Self::Root(_) => ROOT_PATH.deref(),
             Self::File(file) => file.path(),
             Self::Directory(dir) => dir.path(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn folder_id(&self) -> Option<&FolderId> {
+        match self {
+            Self::Root(root) => Some(root.folder_id()),
+            Self::File(_) => None,
+            Self::Directory(dir) => Some(dir.folder_id()),
         }
     }
 }

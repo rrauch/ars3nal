@@ -2,14 +2,19 @@ use crate::db::{
     DataError, Error, Read, Transaction, TxScope, Write, clear_temp_tables,
     collect_affected_inode_ids, insert_entity,
 };
+use crate::sync::upload::{Mode, UploadDetails, WalEntry};
 use crate::sync::{LogEntry, Success, SyncResult};
 use crate::types::ArfsEntity;
 use crate::vfs::insert_arfs_inode;
 use crate::{FolderId, InodeId, Timestamp};
-use ario_core::BlockNumber;
+use ario_core::bundle::BundleItemId;
+use ario_core::tx::TxId;
+use ario_core::{BlockNumber, ItemId};
 use chrono::{DateTime, Utc};
 use futures_lite::{Stream, StreamExt};
+use num_traits::ToPrimitive;
 use std::ops::Deref;
+use std::str::FromStr;
 use std::time::Duration;
 
 impl<C: TxScope> Transaction<C>
@@ -87,6 +92,120 @@ LIMIT 1;",
         })
         .transpose()?)
     }
+
+    pub async fn uploadable_wal_entries(
+        &mut self,
+        settle_deadline: &DateTime<Utc>,
+    ) -> Result<Vec<WalEntry>, Error> {
+        let deadline = settle_deadline.timestamp();
+        sqlx::query!(
+            r#"
+SELECT w.id, w.op_type,
+       w.wal_entity AS wal_id,
+       COALESCE(we.entity_type, e.entity_type) AS entity_type,
+       we.metadata
+FROM wal w
+LEFT JOIN wal_entity we ON w.wal_entity = we.id
+LEFT JOIN entity e ON w.entity = e.id
+WHERE w.timestamp <= ?
+  AND w.block_height IS NULL
+  AND w.upload IS NULL
+"#,
+            deadline
+        )
+        .fetch_all(self.conn())
+        .await?
+        .into_iter()
+        .map(|r| -> Result<WalEntry, Error> {
+            match (
+                r.id as u64,
+                r.op_type.as_str(),
+                r.wal_id.map(|id| id as u64),
+                r.entity_type.as_ref().map(|s| s.as_str()),
+                r.metadata,
+            ) {
+                (id, "C", Some(wal_entity_id), Some("FI"), Some(metadata)) => Ok(
+                    WalEntry::create_file(id, wal_entity_id, metadata.as_slice())?,
+                ),
+                (id, "U", Some(wal_entity_id), Some("FI"), Some(metadata)) => Ok(
+                    WalEntry::update_file(id, wal_entity_id, metadata.as_slice())?,
+                ),
+                (id, "D", _, Some("FI"), Some(metadata)) => {
+                    Ok(WalEntry::delete_file(id, metadata.as_slice())?)
+                }
+                (id, "C", _, Some("FO"), Some(metadata)) => {
+                    Ok(WalEntry::create_dir(id, metadata.as_slice())?)
+                }
+                (id, "U", _, Some("FO"), Some(metadata)) => {
+                    Ok(WalEntry::update_dir(id, metadata.as_slice())?)
+                }
+                (id, "D", _, Some("FO"), Some(metadata)) => {
+                    Ok(WalEntry::delete_dir(id, metadata.as_slice())?)
+                }
+                _ => Err(DataError::InvalidWalEntry)?,
+            }
+        })
+        .collect::<Result<_, _>>()
+    }
+
+    pub async fn has_uploadable_wal_entries(
+        &mut self,
+        settle_deadline: &DateTime<Utc>,
+    ) -> Result<(bool, Option<DateTime<Utc>>), Error> {
+        let deadline = settle_deadline.timestamp();
+        let (before, after, latest_timestamp) = sqlx::query!(
+            r#"
+    SELECT
+        SUM(CASE WHEN timestamp <= ?1 THEN 1 ELSE 0 END) AS before_deadline,
+        SUM(CASE WHEN timestamp > ?1 THEN 1 ELSE 0 END) AS after_deadline,
+        MAX(timestamp) AS "latest_timestamp: i64"
+    FROM wal
+    WHERE block_height IS NULL AND upload IS NULL
+    "#,
+            deadline
+        )
+        .map(|r| {
+            (
+                r.before_deadline.unwrap_or_default() as usize,
+                r.after_deadline.unwrap_or_default() as usize,
+                r.latest_timestamp
+                    .map(|ts| DateTime::from_timestamp(ts, 0))
+                    .flatten(),
+            )
+        })
+        .fetch_one(self.conn())
+        .await?;
+
+        Ok((before > 0 && after == 0, latest_timestamp))
+    }
+
+    pub async fn pending_uploads(&mut self) -> Result<Vec<(u64, DateTime<Utc>, ItemId)>, Error> {
+        Ok(sqlx::query!(
+            "SELECT id, uploaded AS \"uploaded: i64\", item_type, item_id FROM upload WHERE status = 'P'"
+        )
+            .fetch_all(self.conn())
+            .await?
+            .into_iter()
+            .map(|r| -> Result<(_, _, _), Error> {
+                Ok((
+                    r.id as u64,
+                    DateTime::from_timestamp(r.uploaded, 0)
+                        .ok_or_else(|| DataError::ConversionError("invalid timestamp".to_string()))?,
+                    match r.item_type.as_str() {
+                        "TX" => ItemId::Tx(
+                            TxId::from_str(r.item_id.as_str())
+                                .map_err(|e| DataError::ConversionError(e.to_string()))?,
+                        ),
+                        "B" => ItemId::BundleItem(
+                            BundleItemId::from_str(r.item_id.as_str())
+                                .map_err(|e| DataError::ConversionError(e.to_string()))?,
+                        ),
+                        _ => Err(DataError::InvalidItemType(r.item_type))?,
+                    }
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?)
+    }
 }
 
 impl<C: TxScope> Transaction<C>
@@ -141,7 +260,7 @@ where
         let config = self.config().await?;
 
         while let Some(entity) = stream.try_next().await? {
-            let (entity_id, is_folder, entry) = match entity {
+            let (_, _, entry) = match entity {
                 ArfsEntity::File(ref file) => {
                     let (db_id, superseded) = insert_entity(&file, self).await?;
                     let entry = if file.is_hidden() {
@@ -255,13 +374,7 @@ where
 
         self.delete_orphaned_entities().await?;
 
-        let affected_inode_ids = collect_affected_inode_ids(self)
-            .await?
-            .map(|id| {
-                InodeId::try_from(id as u64)
-                    .map_err(|e| DataError::ConversionError(e.to_string()).into())
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+        let affected_inode_ids = collect_affected_inode_ids(self).await?;
         clear_temp_tables(self).await?;
 
         Ok((updated, inserted, deleted, affected_inode_ids))
@@ -288,6 +401,106 @@ where
         )
         .execute(self.conn())
         .await?;
+        Ok(())
+    }
+
+    pub async fn new_upload(&mut self, details: &UploadDetails, mode: Mode) -> Result<u64, Error> {
+        let created = details.created.timestamp();
+        let uploaded = details.uploaded.timestamp();
+        let item_id = details.item_id.to_string();
+        let mode = match mode {
+            Mode::Direct => "D",
+            Mode::Turbo => "T",
+        };
+        let data_size = details.data_size.as_u64() as i64;
+        let cost = details
+            .cost
+            .as_big_decimal()
+            .to_i64()
+            .ok_or_else(|| DataError::InvalidCost(details.cost.to_plain_string()))?;
+        let item_type = match details.item_id {
+            ItemId::Tx(_) => "TX",
+            ItemId::BundleItem(_) => "B",
+        };
+
+        Ok(sqlx::query!(
+            "INSERT INTO upload
+               (created, uploaded, item_type, item_id, mode, data_size, cost, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'P')
+           ",
+            created,
+            uploaded,
+            item_type,
+            item_id,
+            mode,
+            data_size,
+            cost
+        )
+        .execute(self.conn())
+        .await?
+        .last_insert_rowid() as u64)
+    }
+
+    pub async fn mark_upload_success(
+        &mut self,
+        upload_id: u64,
+        block_height: BlockNumber,
+    ) -> Result<(), Error> {
+        let completed = Utc::now().timestamp();
+        let upload_id = upload_id as i64;
+        let block_height = *block_height.as_ref() as i64;
+
+        sqlx::query!(
+            "UPDATE upload SET status = 'S', block_height = ?, completed = ? WHERE id = ?",
+            block_height,
+            completed,
+            upload_id
+        )
+        .execute(self.conn())
+        .await?;
+
+        sqlx::query!(
+            "UPDATE wal SET block_height = ? WHERE upload = ?",
+            block_height,
+            upload_id
+        )
+        .execute(self.conn())
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn mark_upload_failed(&mut self, upload_id: u64) -> Result<(), Error> {
+        let completed = Utc::now().timestamp();
+        let upload_id = upload_id as i64;
+
+        sqlx::query!(
+            "UPDATE upload SET status = 'E', completed = ? WHERE id = ?",
+            completed,
+            upload_id
+        )
+        .execute(self.conn())
+        .await?;
+
+        sqlx::query!("UPDATE wal SET upload = NULL WHERE upload = ?", upload_id)
+            .execute(self.conn())
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn set_upload_id(
+        &mut self,
+        upload_id: u64,
+        wal_ids: impl Iterator<Item = u64>,
+    ) -> Result<(), Error> {
+        let upload_id = upload_id as i64;
+        for wal_id in wal_ids {
+            let wal_id = wal_id as i64;
+            sqlx::query!("UPDATE wal SET upload = ? WHERE id = ?", upload_id, wal_id)
+                .execute(self.conn())
+                .await?;
+        }
         Ok(())
     }
 }

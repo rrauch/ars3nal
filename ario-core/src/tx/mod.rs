@@ -356,9 +356,9 @@ impl<'a, Auth: AuthenticationState> Tx<'a, Auth> {
         }
     }
 
-    pub fn quantity(&self) -> Option<&Quantity> {
+    pub fn quantity(&self) -> &Quantity {
         match &self.0 {
-            TxInner::V1(tx) => tx.as_inner().quantity.as_ref(),
+            TxInner::V1(tx) => &tx.as_inner().quantity,
             TxInner::V2(tx) => tx.as_inner().quantity(),
         }
     }
@@ -642,7 +642,7 @@ pub(crate) struct CommonData<'a> {
     pub id: TxId,
     pub tags: Vec<Tag<'a>>,
     pub target: Option<WalletAddress>,
-    pub quantity: Option<Quantity>,
+    pub quantity: Quantity,
     pub reward: Reward,
     pub denomination: Option<u32>,
 }
@@ -652,7 +652,7 @@ impl<'a> CommonData<'a> {
         raw_id: Blob<'a>,
         raw_tags: Vec<RawTag<'a>>,
         raw_target: Option<Blob<'a>>,
-        raw_quantity: Option<BigDecimal>,
+        raw_quantity: BigDecimal,
         raw_reward: BigDecimal,
         raw_denomination: Option<u32>,
     ) -> Result<Self, CommonTxDataError> {
@@ -668,10 +668,7 @@ impl<'a> CommonData<'a> {
             .transpose()
             .map_err(|e| CommonTxDataError::InvalidTarget(e.to_string()))?;
 
-        let quantity = raw_quantity
-            .map(|raw| Quantity::try_from(raw))
-            .transpose()?;
-
+        let quantity = Quantity::try_from(raw_quantity)?;
         let reward = Reward::try_from(raw_reward)?;
 
         Ok(CommonData {
@@ -1136,7 +1133,7 @@ mod tests {
 
         assert_eq!(
             authentic_tx.quantity(),
-            Some(Quantity::try_from(Winston::from_str("101")?)?).as_ref()
+            &(Quantity::try_from(Winston::from_str("101")?)?)
         );
 
         let data = match authentic_tx.data_item() {
@@ -1191,7 +1188,7 @@ mod tests {
 
         assert_eq!(
             authentic_tx.quantity(),
-            Some(Quantity::try_from(Winston::from_str("2101")?)?).as_ref()
+            &(Quantity::try_from(Winston::from_str("2101")?)?)
         );
 
         assert!(authentic_tx.data_item().is_none());

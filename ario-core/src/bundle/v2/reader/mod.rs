@@ -5,7 +5,7 @@ use crate::buffer::BufMutExt;
 use bytes::{Buf, BufMut};
 use futures_lite::AsyncRead;
 use itertools::Either;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, ErrorKind, Read};
 use thiserror::Error;
 
 type Result<T> = core::result::Result<T, Error>;
@@ -69,7 +69,19 @@ impl<T: Flow> FlowExt for T {
         loop {
             if this.required_bytes() > 0 {
                 let mut buf = this.buffer();
-                buf.fill(&mut reader)?;
+                if buf.fill(&mut reader)? == 0 {
+                    drop(buf);
+                    if this.required_bytes() > 0 {
+                        // premature eof
+                        Err(std::io::Error::new(
+                            ErrorKind::UnexpectedEof,
+                            format!(
+                                "unexpected eof; {} more bytes expected",
+                                this.required_bytes()
+                            ),
+                        ))?
+                    }
+                }
             }
             match this.try_process()? {
                 Either::Left(l) => this = l,
@@ -83,7 +95,19 @@ impl<T: Flow> FlowExt for T {
         loop {
             if this.required_bytes() > 0 {
                 let mut buf = this.buffer();
-                buf.fill_async(&mut reader).await?;
+                if buf.fill_async(&mut reader).await? == 0 {
+                    drop(buf);
+                    if this.required_bytes() > 0 {
+                        // premature eof
+                        Err(std::io::Error::new(
+                            ErrorKind::UnexpectedEof,
+                            format!(
+                                "unexpected eof; {} more bytes expected",
+                                this.required_bytes()
+                            ),
+                        ))?
+                    }
+                }
             }
             match this.try_process()? {
                 Either::Left(l) => this = l,

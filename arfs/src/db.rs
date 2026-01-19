@@ -73,6 +73,8 @@ pub enum DbStateError {
     NotInPermanentState,
     #[error("database not in 'wal' state")]
     NotInWalState,
+    #[error("database has pending wal entries")]
+    HasPendingWalEntries,
     #[error("database state is invalid")]
     InvalidState,
 }
@@ -100,10 +102,16 @@ pub enum DataError {
     NotInodeEntityType(String),
     #[error("not a valid perm_type: '{0}'")]
     InvalidPermType(String),
+    #[error("invalid wal entry")]
+    InvalidWalEntry,
     #[error("deletion of inode '{0}' failed. (recursive_delete: '{1}')")]
     DeletionFailure(InodeId, bool),
     #[error("VFS root cannot be deleted")]
     RootDeletionAttempt,
+    #[error("value '{0}' not valid")]
+    InvalidCost(String),
+    #[error("invalid item type: '{0}'")]
+    InvalidItemType(String),
 }
 
 #[derive(Debug, Clone)]
@@ -319,7 +327,7 @@ where
                 .await?;
 
         Ok(match (wal_state, last_sync, last_wal_modification) {
-            (Some(State::Wal), Some(last_sync), Some(last_wal_modification)) => Status::Wal {
+            (Some(State::Wal), Some(last_sync), last_wal_modification) => Status::Wal {
                 last_sync,
                 last_wal_modification,
             },
@@ -474,12 +482,23 @@ where
         .execute(self.conn())
         .await?;
 
-        // wal entries that were already deleted are obsolete
+        // unsubmitted wal entries that were already deleted are obsolete
         sqlx::query!(
             "
              DELETE FROM wal
              WHERE perm_type = 'W'
+             AND upload IS NULL
              AND wal_entity NOT IN (SELECT wal_entity FROM vfs WHERE wal_entity IS NOT NULL);
+            "
+        )
+        .execute(self.conn())
+        .await?;
+
+        // fully uploaded wal entries are obsolete
+        sqlx::query!(
+            "
+             DELETE FROM wal
+                    WHERE block_height IS NOT NULL;
             "
         )
         .execute(self.conn())
@@ -779,8 +798,8 @@ pub(crate) async fn reset_state_if_empty_wal<C: Write>(tx: &mut C) -> Result<(),
     sqlx::query!(
         "UPDATE config SET state = 'P' WHERE state = 'W' AND (SELECT Count(*) FROM wal) = 0 AND NOT EXISTS(SELECT 1 FROM vfs WHERE perm_type != 'P')"
     )
-    .execute(tx.conn())
-    .await?;
+        .execute(tx.conn())
+        .await?;
     sqlx::query!(
         "DELETE FROM vfs_snapshot WHERE (SELECT Count(*) FROM wal) = 0 AND NOT EXISTS(SELECT 1 FROM vfs WHERE perm_type != 'P')"
     )
@@ -791,12 +810,16 @@ pub(crate) async fn reset_state_if_empty_wal<C: Write>(tx: &mut C) -> Result<(),
 
 pub(crate) async fn collect_affected_inode_ids<C: Write>(
     tx: &mut C,
-) -> Result<impl Iterator<Item = i64>, Error> {
+) -> Result<Vec<InodeId>, Error> {
     Ok(sqlx::query!("SELECT DISTINCT(id) FROM vfs_affected_inodes")
         .fetch_all(tx.as_mut())
         .await?
         .into_iter()
-        .map(|r| r.id))
+        .map(|r| -> Result<InodeId, Error> {
+            InodeId::try_from(r.id as u64)
+                .map_err(|e| DataError::ConversionError(e.to_string()).into())
+        })
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 #[derive(Debug)]

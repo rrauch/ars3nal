@@ -165,7 +165,7 @@ impl<C: Currency> Money<C> {
             // imprecise mode allows rounding and never fails
             Ok(Money::<T>::new_unchecked((self.0 * rate).with_scale_round(
                 T::DECIMAL_POINTS as i64,
-                RoundingMode::HalfEven,
+                RoundingMode::HalfUp,
             )))
         }
     }
@@ -270,6 +270,22 @@ impl<C: Currency> ConversionRate<C, C> for () {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+#[repr(transparent)]
+pub struct Inverse<From: Currency, To: Currency>(BigDecimal, PhantomData<(From, To)>);
+
+impl<From: Currency, To: Currency> ConversionRate<From, To> for Inverse<From, To> {
+    fn multiplier(&self) -> &BigDecimal {
+        &self.0
+    }
+}
+
+pub trait ConversionRateExt<From: Currency, To: Currency>: ConversionRate<From, To> {
+    fn inverse(&self) -> Inverse<To, From> {
+        Inverse(self.multiplier().inverse(), PhantomData::default())
+    }
+}
+
 pub trait Convertible<From: Currency, To: Currency> {
     // Converts a monetary amound from currency `From` into currency `To`.
     // This conversion never fails but may lead to a loss of precision.
@@ -312,7 +328,7 @@ impl<C: Currency, M: Into<BigDecimal>> Mul<M> for Money<C> {
 
     fn mul(self, rhs: M) -> Self::Output {
         let result = (self.0 * rhs.into())
-            .with_scale_round(C::DECIMAL_POINTS as i64, RoundingMode::HalfEven);
+            .with_scale_round(C::DECIMAL_POINTS as i64, RoundingMode::HalfUp);
         Self::new_unchecked(result)
     }
 }
@@ -322,8 +338,8 @@ impl<C: Currency, D: Into<BigDecimal>> Div<D> for Money<C> {
 
     fn div(self, rhs: D) -> Self::Output {
         // Perform division, then set the scale to the currency's precision, rounding as needed.
-        let result = (self.0 / rhs.into())
-            .with_scale_round(C::DECIMAL_POINTS as i64, RoundingMode::HalfEven);
+        let result =
+            (self.0 / rhs.into()).with_scale_round(C::DECIMAL_POINTS as i64, RoundingMode::HalfUp);
         Self::new_unchecked(result)
     }
 }

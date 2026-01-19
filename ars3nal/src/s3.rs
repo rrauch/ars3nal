@@ -794,7 +794,7 @@ async fn revert_bucket_changes(
         Status::Wal {
             last_sync,
             last_wal_modification,
-        } => (last_sync, Some(last_wal_modification)),
+        } => (last_sync, last_wal_modification.as_ref()),
         Status::Synchronized { last_sync } => (last_sync, None),
         Status::Initial => Err(S3Error::with_message(
             S3ErrorCode::InvalidBucketState,
@@ -1188,7 +1188,7 @@ impl S3 for ArS3 {
             Status::Wal {
                 last_sync,
                 last_wal_modification,
-            } => (last_sync, Some(last_wal_modification)),
+            } => (last_sync, last_wal_modification.as_ref()),
             Status::Initial => Err(S3Error::with_message(
                 S3ErrorCode::InvalidBucketState,
                 "bucket not ready yet",

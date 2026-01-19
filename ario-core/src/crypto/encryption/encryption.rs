@@ -98,11 +98,11 @@ impl<'a, E: Encryptor<'a>> Drop for EncryptingCore<'a, E> {
 
 pub struct EncryptingWriter<'a, E: Encryptor<'a>, W> {
     core: EncryptingCore<'a, E>,
-    writer: &'a mut W,
+    writer: W,
 }
 
 impl<'a, E: Encryptor<'a>, W> EncryptingWriter<'a, E, W> {
-    pub fn new(encryptor: E, writer: &'a mut W, buf_size: usize) -> Self {
+    pub fn new(encryptor: E, writer: W, buf_size: usize) -> Self {
         Self {
             core: EncryptingCore::new(encryptor, buf_size),
             writer,
@@ -152,19 +152,29 @@ where
     W: Unpin,
     E: Unpin,
 {
+    async fn finalize_inner_async(
+        mut writer: W,
+        tag: E::AuthenticationTag,
+        residual: Option<Vec<u8>>,
+    ) -> std::io::Result<E::AuthenticationTag> {
+        if let Some(residual) = residual {
+            writer.write_all(&residual).await?;
+            writer.flush().await?;
+        }
+        Ok(tag)
+    }
     pub async fn finalize_async(mut self) -> std::io::Result<E::AuthenticationTag> {
         self.flush().await?;
-
         let (tag, residual) = self.core.close()?;
+        Self::finalize_inner_async(self.writer, tag, residual).await
+    }
 
-        if let Some(residual) = residual {
-            self.writer.write_all(&residual).await?;
-            self.writer.flush().await?;
-        }
-
-        self.writer.close().await?;
-
-        Ok(tag)
+    pub async fn finalize_async_boxed(
+        mut self: Box<Self>,
+    ) -> std::io::Result<E::AuthenticationTag> {
+        self.flush().await?;
+        let (tag, residual) = self.core.close()?;
+        Self::finalize_inner_async(self.writer, tag, residual).await
     }
 }
 

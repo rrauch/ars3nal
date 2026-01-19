@@ -10,7 +10,6 @@ use crate::validation::SupportsValidation;
 use crate::{Authenticated, AuthenticationState, JsonError, JsonValue, Unauthenticated};
 use bigdecimal::{BigDecimal, Zero};
 use serde::{Deserialize, Serialize};
-use serde_with::NoneAsEmptyString;
 use serde_with::base64::Base64;
 use serde_with::base64::UrlSafe;
 use serde_with::formats::Unpadded;
@@ -127,25 +126,19 @@ impl<'a> UnvalidatedRawTx<'a> {
             validate_byte_len(data_root.bytes(), VALID_DATA_ROOT_LENGTHS, "data_root")?;
         }
 
-        let mut positive_quantity = false;
-        if let Some(quantity) = &self.0.quantity {
-            validate_positive_integer(quantity, "quantity")?;
-
-            if quantity != ZERO_BD.deref() {
-                if self.0.target.is_none() {
-                    return Err(RawTxDataError::MissingTarget);
-                }
-                positive_quantity = true;
+        validate_positive_integer(&self.0.quantity, "quantity")?;
+        if &self.0.quantity != ZERO_BD.deref() {
+            if self.0.target.is_none() {
+                return Err(RawTxDataError::MissingTarget);
+            }
+        }
+        if self.0.target.is_some() {
+            if &self.0.quantity <= ZERO_BD.deref() {
+                return Err(RawTxDataError::MissingQuantity);
             }
         }
 
         validate_positive_integer(&self.0.reward, "reward")?;
-
-        if self.0.target.is_some() {
-            if !positive_quantity {
-                return Err(RawTxDataError::MissingQuantity);
-            }
-        }
 
         let expected_tx_id = self.0.signature.bytes().digest::<Sha256>();
         if expected_tx_id.as_slice() != self.0.id.bytes() {
@@ -234,9 +227,7 @@ pub(super) struct RawTxData<'a> {
     #[serde_as(as = "OptionalBase64As")]
     #[serde(default)]
     pub target: Option<Blob<'a>>,
-    #[serde_as(as = "NoneAsEmptyString")]
-    #[serde(default)]
-    pub quantity: Option<BigDecimal>,
+    pub quantity: BigDecimal,
     #[serde(default)]
     pub data_tree: Vec<JsonValue>,
     #[serde_as(as = "OptionalBase64As")]
@@ -408,7 +399,7 @@ mod tests {
     fn check_v1() -> anyhow::Result<()> {
         let tx = RawTxData::from_json(TX_V1)?;
         assert_eq!(tx.format, Format::V1);
-        assert_eq!(tx.quantity, Some(BigDecimal::from(0)));
+        assert_eq!(tx.quantity, BigDecimal::from(0));
         assert_eq!(tx.data_size, 1033478);
         assert_eq!(tx.reward, BigDecimal::from_str("124145681682")?);
         assert!(tx.data.is_some());
@@ -424,7 +415,7 @@ mod tests {
     fn check_v2() -> anyhow::Result<()> {
         let tx = RawTxData::from_json(TX_V2)?;
         assert_eq!(tx.format, Format::V2);
-        assert_eq!(tx.quantity, Some(BigDecimal::from(0)));
+        assert_eq!(tx.quantity, BigDecimal::from(0));
         assert_eq!(tx.data_size, 128355);
         assert_eq!(tx.reward, BigDecimal::from_str("557240107")?);
         assert!(tx.data.is_none());
@@ -439,7 +430,7 @@ mod tests {
     fn check_v2_3() -> anyhow::Result<()> {
         let tx = RawTxData::from_json(TX_V2_3)?;
         assert_eq!(tx.format, Format::V2);
-        assert_eq!(tx.quantity, Some(BigDecimal::from(100000)));
+        assert_eq!(tx.quantity, BigDecimal::from(100000));
         assert_eq!(tx.data_size, 0);
         assert_eq!(tx.reward, BigDecimal::from(600912));
         assert!(tx.data.is_none());

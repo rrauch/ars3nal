@@ -144,6 +144,8 @@ impl Api {
     ) -> Result<(), api::Error> {
         let tx_json = tx.to_json()?;
 
+        //let json_str = serde_json::to_string(&tx_json)?;
+
         let req = ApiRequest::builder()
             .endpoint(gateway.join("./tx").map_err(api::Error::InvalidUrl)?)
             .request_method(Post)
