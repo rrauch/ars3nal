@@ -455,16 +455,11 @@ struct TomlPermabucketConfig {
 struct TomlGeneralConfig {
     #[serde(default)]
     data_dir: Option<PathBuf>,
-    #[serde(default)]
-    policy: Option<String>,
 }
 
 impl Default for TomlGeneralConfig {
     fn default() -> Self {
-        Self {
-            data_dir: None,
-            policy: None,
-        }
+        Self { data_dir: None }
     }
 }
 
@@ -486,6 +481,8 @@ struct TomlConfig {
     users: Vec<TomlUserConfig>,
     #[serde(default, rename = "wallet")]
     wallets: Vec<TomlWalletConfig>,
+    #[serde(default, rename = "policy")]
+    policies: Vec<TomlPolicyConfig>,
     #[serde(default, rename = "uploader")]
     uploaders: Vec<TomlUploaderConfig>,
 }
@@ -506,11 +503,52 @@ struct Config {
     chunk_l2_cache_size: ByteSize,
     wallets: HashMap<String, WalletConfig>,
     uploaders: HashMap<String, UploaderConfig>,
+    policies: HashMap<String, PolicyConfig>,
     permabuckets: HashMap<String, PermabucketConfig>,
     max_sync_concurrency: NonZeroUsize,
     proactive_cache_interval: Option<Duration>,
     users: HashMap<String, UserConfig>,
-    policy: Option<String>,
+}
+
+#[derive(Debug)]
+enum PolicyConfig {
+    Json(String),
+    Path(PathBuf),
+}
+
+impl PolicyConfig {
+    async fn try_into_policy_string(self) -> anyhow::Result<String> {
+        match self {
+            Self::Json(json) => Ok(json),
+            Self::Path(path) => Ok(tokio::fs::read_to_string(&path).await?),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TomlPolicyConfig {
+    name: String,
+    #[serde(default)]
+    json: Option<String>,
+    #[serde(default)]
+    file: Option<PathBuf>,
+}
+
+impl TryFrom<TomlPolicyConfig> for PolicyConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(value: TomlPolicyConfig) -> Result<Self, Self::Error> {
+        if let Some(json) = value.json {
+            Ok(PolicyConfig::Json(json))
+        } else if let Some(file) = value.file {
+            Ok(PolicyConfig::Path(file))
+        } else {
+            Err(anyhow!(
+                "policy [{}] invalid, set either json or file",
+                &value.name
+            ))
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -710,6 +748,16 @@ impl Config {
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
 
+        let policies = toml
+            .policies
+            .into_iter()
+            .map(|conf| -> anyhow::Result<(String, PolicyConfig)> {
+                let name = conf.name.clone();
+                let policy_config = conf.try_into()?;
+                Ok((name, policy_config))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+
         let permabuckets = toml
             .permabuckets
             .into_iter()
@@ -729,6 +777,11 @@ impl Config {
                 if let Some(uploader_name) = permabucket_config.uploader_name() {
                     if !uploaders.contains_key(uploader_name) {
                         bail!("uploader {} not configured", uploader_name)
+                    }
+                }
+                if let Some(policy_name) = permabucket_config.policy.as_ref() {
+                    if !policies.contains_key(policy_name) {
+                        bail!("policy {} not configured", policy_name)
                     }
                 }
                 Ok((name, permabucket_config))
@@ -756,9 +809,9 @@ impl Config {
             chunk_l2_cache_size,
             wallets,
             uploaders,
+            policies,
             permabuckets,
             users,
-            policy: toml.general.policy,
             max_sync_concurrency: toml
                 .syncing
                 .max_concurrent_syncs
@@ -918,6 +971,11 @@ async fn run(config: Config) -> anyhow::Result<()> {
         wallets.insert(name, conf.try_into_wallet().await?);
     }
 
+    let mut policies = HashMap::with_capacity(config.policies.len());
+    for (name, conf) in config.policies {
+        policies.insert(name, conf.try_into_policy_string().await?);
+    }
+
     let mut fx_service: Option<Arc<FxService>> = None;
 
     let mut uploaders = HashMap::with_capacity(config.uploaders.len());
@@ -1051,13 +1109,10 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .await?;
 
         server.insert_bucket(&name, arfs)?;
-        if let Some(policy) = bucket.policy {
+        if let Some(policy_name) = bucket.policy {
+            let policy = policies.get(&policy_name).expect("policy to be there");
             server.insert_bucket_policy(&name, policy)?;
         }
-    }
-
-    if let Some(policy) = config.policy {
-        server.set_default_policy(policy)?;
     }
 
     for (access_key, user) in config.users {
