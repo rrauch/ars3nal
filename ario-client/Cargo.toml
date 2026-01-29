@@ -3,6 +3,10 @@ name = "ario-client"
 version = "0.2.0"
 edition = "2024"
 
+[features]
+default = []
+turbo = []
+
 [dependencies]
 ario-core = { workspace = true, features = ["hazmat"] }
 
@@ -24,6 +28,7 @@ futures-concurrency = "7.6"
 futures-lite = { workspace = true }
 hybrid-array = { workspace = true }
 itertools = "0.14"
+maybe-owned = { workspace = true }
 moka = { workspace = true, features = ["future"] }
 n0-watcher = "0.3"
 netwatch = "0.8"

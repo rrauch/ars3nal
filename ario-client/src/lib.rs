@@ -11,6 +11,9 @@ mod routemaster;
 pub mod tx;
 mod wallet;
 
+#[cfg(feature = "turbo")]
+mod turbo;
+
 pub use crate::cache::Cache;
 pub use bytesize::ByteSize;
 pub use chrono::{DateTime, Utc};
@@ -28,6 +31,9 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
+
+#[cfg(feature = "turbo")]
+pub use turbo::Turbo;
 
 #[derive(Debug, Clone)]
 pub struct Client(Arc<Inner>);
@@ -52,6 +58,9 @@ pub enum Error {
     LocationError(#[from] location::Error),
     #[error(transparent)]
     GatewayError(#[from] gateway::Error),
+    #[cfg(feature = "turbo")]
+    #[error(transparent)]
+    TurboError(#[from] turbo::Error),
 }
 
 #[bon::bon]
@@ -70,6 +79,9 @@ impl Client {
         #[builder(default = true)] enable_netwatch: bool,
         #[builder(default = true)] allow_api_retry: bool,
         #[builder(default)] mut cache: Cache,
+        #[cfg(feature = "turbo")]
+        #[builder(default)]
+        turbo: Turbo,
     ) -> Result<Self, Error> {
         let api = Api::new(reqwest_client, network.clone(), allow_api_retry);
         let routemaster = Routemaster::new(
@@ -83,11 +95,26 @@ impl Client {
 
         cache.init(network).await?;
 
-        Ok(Self(Arc::new(Inner {
-            api,
-            routemaster,
-            cache,
-        })))
+        #[cfg(feature = "turbo")]
+        let inner = {
+            Inner {
+                api,
+                routemaster,
+                cache,
+                turbo,
+            }
+        };
+
+        #[cfg(not(feature = "turbo"))]
+        let inner = {
+            Inner {
+                api,
+                routemaster,
+                cache,
+            }
+        };
+
+        Ok(Self(Arc::new(inner)))
     }
 
     pub(crate) async fn with_gw<T, E: Into<crate::Error>>(
@@ -128,4 +155,6 @@ struct Inner {
     api: Api,
     routemaster: Routemaster,
     cache: Cache,
+    #[cfg(feature = "turbo")]
+    turbo: Turbo,
 }

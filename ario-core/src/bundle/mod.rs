@@ -912,6 +912,15 @@ impl<'a> Owner<'a> {
             Self::MultiAptos(inner) => inner.derive_address(),
         }
     }
+
+    pub fn into_owned(self) -> Owner<'static> {
+        match self {
+            Self::Rsa4096(inner) => Owner::Rsa4096(inner.into_owned().into()),
+            Self::Secp256k1(inner) => Owner::Secp256k1(inner.into_owned().into()),
+            Self::Ed25519(inner) => Owner::Ed25519(inner.into_owned().into()),
+            Self::MultiAptos(inner) => Owner::MultiAptos(inner.into_owned().into()),
+        }
+    }
 }
 
 impl AsBlob for Owner<'_> {

@@ -1,9 +1,10 @@
 use crate::tx::{Prepared, Status, Submitted as TxSubmitted, TxSubmission, UploadChunks};
 use crate::{Client, tx};
 use ario_core::BlockNumber;
-use ario_core::blob::OwnedBlob;
+use ario_core::blob::{Blob, OwnedBlob};
 use ario_core::bundle::{
-    AuthenticatedBundleItem, BundleItemAuthenticator, BundleItemDraft, BundleItemId, BundleType,
+    AuthenticatedBundleItem, BundleItemAuthenticator, BundleItemBuilder, BundleItemDraft,
+    BundleItemId, BundleType, V2BundleItemDataProcessor,
 };
 use ario_core::chunking::DefaultChunker;
 use ario_core::data::{DataItem, ExternalDataItemAuthenticator};
@@ -17,6 +18,7 @@ use futures_lite::{
     AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, Stream, StreamExt, ready,
 };
 use itertools::Itertools;
+use maybe_owned::MaybeOwnedMut;
 use rangemap::RangeMap;
 use std::collections::{BTreeMap, HashSet};
 use std::io::SeekFrom;
@@ -433,18 +435,32 @@ impl AsyncBundler<AcceptingItems> {
     }
 
     pub async fn into_nested(
-        mut self,
-        writer: impl AsyncWrite,
-    ) -> Result<BundleItemDraft<'static>, Arc<Error>> {
-        //let (_, _, _drop_guard, items, header, data_authenticator, tags) =
-        //    self.prepare_transition().await?;
-        todo!()
+        self,
+    ) -> Result<
+        (
+            BundleItemDraft<'static>,
+            BundleItemAuthenticator<'static>,
+            Box<dyn BundleDataReader + 'static>,
+        ),
+        Arc<Error>,
+    > {
+        let (_, _, _, mut items, header, _, tags) = self.prepare_transition().await?;
+        let mut combinator = BundleItemCombinator::new(header, items.into_iter());
+        let data = V2BundleItemDataProcessor::try_from_async_reader(&mut combinator)
+            .await
+            .map_err(|e| Arc::new(e.into()))?;
+        let authenticator = data.authenticator();
+
+        let draft = BundleItemBuilder::v2()
+            .tags(tags)
+            .data_upload(data)
+            .draft()
+            .map_err(|e| Arc::new(Error::ItemError(e.to_string())))?;
+
+        Ok((draft, authenticator, Box::new(combinator)))
     }
 
-    pub async fn transition(
-        mut self,
-        client: Client,
-    ) -> Result<AsyncBundler<TxSigning>, Arc<Error>> {
+    pub async fn transition(self, client: Client) -> Result<AsyncBundler<TxSigning>, Arc<Error>> {
         let (id, ct, drop_guard, items, header, data_authenticator, tags) =
             self.prepare_transition().await?;
 
@@ -477,6 +493,15 @@ impl AsyncBundler<AcceptingItems> {
     }
 }
 
+pub trait BundleDataReader: AsyncRead + AsyncSeek + Send + Sync + Unpin {
+    fn len(&self) -> u64;
+}
+impl<'a> BundleDataReader for BundleItemCombinator<'a> {
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
+
 impl AsyncBundler<TxSigning> {
     pub fn item_count(&self) -> usize {
         self.state.items.len()
@@ -502,7 +527,7 @@ impl AsyncBundler<TxSigning> {
         writer.write_all(json.as_bytes()).await?;
         let data_len = signed_tx.data_item().map(|d| d.size()).unwrap_or(0);
         let mut combinator =
-            BundleItemCombinator::new(self.state.header.bytes(), self.state.items.iter_mut());
+            BundleItemCombinator::new(self.state.header, self.state.items.iter_mut());
         let n = futures_lite::io::copy(&mut combinator, writer).await?;
         if n != signed_tx.data_item().unwrap().size() {
             Err(Error::InvalidDataLength {
@@ -798,17 +823,18 @@ impl Processor {
 
         let header = OwnedBlob::from(header.freeze());
 
-        let mut combinator = BundleItemCombinator::new(header.bytes(), items.into_iter());
+        let mut combinator = BundleItemCombinator::new(header.borrow(), items.into_iter());
         let authenticator = ExternalDataItemAuthenticator::try_from_async_reader(
             &mut combinator,
             DefaultChunker::new(),
         )
         .await?;
+        drop(combinator);
         Ok((header, authenticator))
     }
 }
 
-struct BundleItemCombinator<'a> {
+pub(crate) struct BundleItemCombinator<'a> {
     range_map: RangeMap<u64, u64>,
     entries: BTreeMap<u64, CombinedEntry<'a>>,
     pos: u64,
@@ -823,8 +849,8 @@ enum CombiState {
 }
 
 enum CombinedEntry<'a> {
-    Header((Cursor<&'a [u8]>, u64)),
-    Data((&'a mut Box<dyn AsyncDataSource>, u64)),
+    Header((Cursor<Blob<'a>>, u64)),
+    Data((Box<dyn AsyncDataSource + 'a>, u64)),
 }
 
 impl<'a> CombinedEntry<'a> {
@@ -847,7 +873,37 @@ impl<'a> CombinedEntry<'a> {
 }
 
 impl<'a> BundleItemCombinator<'a> {
-    fn new(header: &'a [u8], items: impl Iterator<Item = &'a mut ProcessedItem>) -> Self {
+    pub(crate) fn single_item(
+        header: Blob<'a>,
+        data: impl AsyncDataSource + 'a,
+        data_len: u64,
+    ) -> Self {
+        let mut range_map = RangeMap::new();
+        let mut entries = BTreeMap::new();
+        let mut pos = 0;
+
+        let len = header.len() as u64;
+        entries.insert(pos, CombinedEntry::Header((Cursor::new(header), len)));
+        range_map.insert(pos..(pos + len), pos);
+        pos += len;
+
+        entries.insert(pos, CombinedEntry::Data((Box::new(data), data_len)));
+        range_map.insert(pos..(pos + data_len), pos);
+        pos += data_len;
+
+        Self {
+            len: pos,
+            pos: 0,
+            range_map,
+            entries,
+            state: None,
+        }
+    }
+
+    fn new<I: Into<MaybeOwnedMut<'a, ProcessedItem>>>(
+        header: Blob<'a>,
+        items: impl Iterator<Item = I>,
+    ) -> Self {
         let mut range_map = RangeMap::new();
         let mut entries = BTreeMap::new();
         let mut pos = 0;
@@ -858,13 +914,23 @@ impl<'a> BundleItemCombinator<'a> {
         pos += len;
 
         items.into_iter().for_each(|i| {
-            let header = i.state.header.bytes();
-            let len = header.len() as u64;
-            entries.insert(pos, CombinedEntry::Header((Cursor::new(header), len)));
-            range_map.insert(pos..(pos + len), pos);
-            pos += len;
+            let i = i.into();
+            let header_len = i.state.header.len() as u64;
             let data_len = i.item.data_size();
-            entries.insert(pos, CombinedEntry::Data((&mut i.data_source, data_len)));
+            let (header, data) = match i {
+                MaybeOwnedMut::Owned(i) => (
+                    CombinedEntry::Header((Cursor::new(i.state.header), header_len)),
+                    CombinedEntry::Data((i.data_source, data_len)),
+                ),
+                MaybeOwnedMut::Borrowed(i) => (
+                    CombinedEntry::Header((Cursor::new(i.state.header.borrow()), header_len)),
+                    CombinedEntry::Data((Box::new(i.data_source.as_mut()), data_len)),
+                ),
+            };
+            entries.insert(pos, header);
+            range_map.insert(pos..(pos + header_len), pos);
+            pos += header_len;
+            entries.insert(pos, data);
             range_map.insert(pos..(pos + data_len), pos);
             pos += data_len;
         });
@@ -930,10 +996,14 @@ impl AsyncRead for BundleItemCombinator<'_> {
             return Poll::Ready(Ok(0));
         }
 
-        let seek = this.state.as_ref().map(|s| match s {
-            CombiState::Reading(prev_pos) if prev_pos == &pos => false,
-            _ => true
-        }).unwrap_or(true);
+        let seek = this
+            .state
+            .as_ref()
+            .map(|s| match s {
+                CombiState::Reading(prev_pos) if prev_pos == &pos => false,
+                _ => true,
+            })
+            .unwrap_or(true);
 
         let mut data_source = ready!(this.poll_get(cx, pos, seek))?;
         let n = ready!(Pin::new(&mut data_source).poll_read(cx, buf))?;
@@ -1002,13 +1072,14 @@ impl Uploader {
             }));
         });
 
-        let mut combinator = BundleItemCombinator::new(self.header.bytes(), self.items.iter_mut());
+        let mut combinator = BundleItemCombinator::new(self.header.borrow(), self.items.iter_mut());
         tokio::select! {
             _ = ct.cancelled() => {
                 // task cancelled
                 Err(Arc::new(Error::Cancelled))
             }
             res = tx_sub.from_async_reader(&mut combinator) => {
+                drop(combinator);
                 let tx_sub = match res {
                     Ok(tx_sub) => tx_sub,
                     Err((_, err)) => {

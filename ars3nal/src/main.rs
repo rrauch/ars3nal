@@ -29,6 +29,7 @@ use tracing::Level;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use url::Url;
 
 static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
     LazyLock::new(|| ProjectDirs::from("io", "AR", "Ars3nal"));
@@ -158,6 +159,23 @@ impl Default for TomlRoutemasterConfig {
             netwatch_enabled: true,
             gateways: default_gateways(),
             network: Network::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TomlTurboConfig {
+    #[serde(default)]
+    upload_endpoint: Option<Url>,
+    #[serde(default)]
+    payment_endpoint: Option<Url>,
+}
+
+impl Default for TomlTurboConfig {
+    fn default() -> Self {
+        Self {
+            upload_endpoint: None,
+            payment_endpoint: None,
         }
     }
 }
@@ -496,6 +514,8 @@ struct TomlConfig {
     #[serde(default)]
     routemaster: TomlRoutemasterConfig,
     #[serde(default)]
+    turbo: TomlTurboConfig,
+    #[serde(default)]
     caching: TomlCachingConfig,
     #[serde(default)]
     syncing: TomlSyncingConfig,
@@ -537,6 +557,8 @@ struct Config {
     proactive_cache_interval: Option<Duration>,
     users: HashMap<String, UserConfig>,
     temp_path: Option<PathBuf>,
+    turbo_upload_endpoint: Option<Url>,
+    turbo_payment_endpoint: Option<Url>,
 }
 
 #[derive(Debug)]
@@ -862,6 +884,8 @@ impl Config {
                 None
             },
             temp_path: toml.general.temp_dir,
+            turbo_payment_endpoint: toml.turbo.payment_endpoint,
+            turbo_upload_endpoint: toml.turbo.upload_endpoint,
         })
     }
 }
@@ -999,6 +1023,12 @@ async fn run(config: Config) -> anyhow::Result<()> {
                 .maybe_chunk_l2_cache(maybe_l2_chunk_cache)
                 .build(),
         )
+        .turbo(
+            ario_client::Turbo::builder()
+                .maybe_payment_endpoint(config.turbo_payment_endpoint)
+                .maybe_upload_endpoint(config.turbo_upload_endpoint)
+                .build(),
+        )
         .build()
         .await?;
 
@@ -1034,7 +1064,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
                 wallet.clone(),
                 conf.price_adjustment,
             )),
-            UploadType::Turbo => Box::new(Turbo::new(temp_dir.clone())),
+            UploadType::Turbo => Box::new(Turbo::new(client.clone(), wallet.clone())),
         };
 
         let fx = if let Some(price_limit) = &conf.price_limit {

@@ -194,6 +194,7 @@ dependencies = [
  "hex-literal",
  "hybrid-array",
  "itertools",
+ "maybe-owned",
  "moka",
  "n0-watcher",
  "netwatch",
@@ -315,6 +316,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

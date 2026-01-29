@@ -7,13 +7,13 @@ use bon::Builder;
 use buf_list::{BufList, Cursor};
 use bytes::{Bytes, BytesMut};
 use bytesize::ByteSize;
-use futures_lite::{Stream, StreamExt};
+use futures_lite::{AsyncRead, Stream, StreamExt};
 use reqwest::Client as ReqwestClient;
 use reqwest::header::RANGE;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::borrow::Cow;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::ops::Range;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -22,6 +22,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
+use tokio_util::compat::FuturesAsyncReadCompatExt;
+use tokio_util::io::ReaderStream;
 use tracing::instrument;
 use url::Url;
 
@@ -125,6 +127,9 @@ impl Api {
             if let Some(body) = api_request.body.take() {
                 if let Some(content_type) = body.content_type {
                     builder = builder.header("Content-Type", content_type.as_str());
+                }
+                if let Some(content_length) = body.content_length {
+                    builder = builder.header("Content-Length", format!("{}", content_length));
                 }
                 let body: reqwest::Body = body.payload.try_into()?;
                 builder = builder.body(body)
@@ -402,6 +407,7 @@ impl From<RequestMethod> for reqwest::Method {
 pub(crate) enum ContentType {
     Json,
     Text,
+    OctetStream,
 }
 
 impl ContentType {
@@ -409,7 +415,14 @@ impl ContentType {
         match self {
             Self::Json => "application/json",
             Self::Text => "text/plain",
+            Self::OctetStream => "application/octet-stream",
         }
+    }
+}
+
+impl Display for ContentType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -423,6 +436,8 @@ impl<'a> TryFrom<&'a str> for ContentType {
             Ok(Self::Json)
         } else if main_type.eq_ignore_ascii_case("text/plain") {
             Ok(Self::Text)
+        } else if main_type.eq_ignore_ascii_case("application/octet-stream") {
+            Ok(Self::OctetStream)
         } else {
             Err(value)
         }
@@ -485,12 +500,20 @@ pub(crate) struct ApiRequest<'a> {
 #[derive(Builder, Debug)]
 pub(crate) struct ApiRequestBody<'a> {
     content_type: Option<ContentType>,
+    content_length: Option<u64>,
     payload: Payload<'a>,
 }
 
 pub(crate) enum Payload<'a> {
     Json(&'a JsonValue),
     GraphQL(Vec<u8>),
+    Reader(Pin<Box<dyn AsyncRead + Send + 'static>>),
+}
+
+impl Payload<'static> {
+    pub fn from_reader(reader: impl AsyncRead + Send + Unpin + 'static) -> Self {
+        Self::Reader(Box::pin(reader))
+    }
 }
 
 impl<'a> Into<Payload<'a>> for &'a JsonValue {
@@ -512,6 +535,7 @@ impl<'a> Debug for Payload<'a> {
         match self {
             Self::Json(_) => f.write_str("json"),
             Self::GraphQL(_) => f.write_str("graphql"),
+            Self::Reader(_) => f.write_str("stream(reader)"),
         }
     }
 }
@@ -533,6 +557,7 @@ impl<'a> TryInto<reqwest::Body> for Payload<'a> {
         Ok(match self {
             Self::Json(json) => reqwest::Body::from(serde_json::to_vec(json)?),
             Self::GraphQL(graphql) => reqwest::Body::from(graphql),
+            Self::Reader(reader) => reqwest::Body::wrap_stream(ReaderStream::new(reader.compat())),
         })
     }
 }

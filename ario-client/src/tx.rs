@@ -98,6 +98,10 @@ impl Api {
                                 .0,
                         )))
                     }
+                    other => Err(api::Error::UnexpectedResponse(format!(
+                        "expected text or json response, but got '{}'",
+                        other
+                    ))),
                 }
             }
             None => Ok(None),

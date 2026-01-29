@@ -21,7 +21,6 @@ use futures_lite::{AsyncReadExt, Stream, StreamExt};
 use std::cmp::{max, min};
 use std::collections::{HashSet, VecDeque};
 use std::io::ErrorKind;
-use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;

@@ -832,12 +832,19 @@ impl UploadMode for Direct {
 }
 
 pub struct Turbo {
-    temp_dir: Arc<TempDir>,
+    client: Client,
+    wallet: Wallet,
+    address: WalletAddress,
 }
 
 impl Turbo {
-    pub fn new(temp_dir: Arc<TempDir>) -> Self {
-        Self { temp_dir }
+    pub fn new(client: Client, wallet: Wallet) -> Self {
+        let address = wallet.address();
+        Self {
+            client,
+            wallet,
+            address,
+        }
     }
 }
 
@@ -848,28 +855,50 @@ impl UploadMode for Turbo {
     }
 
     async fn current_price(&self, data_size: ByteSize) -> Result<Money<Winston>, UploadModeError> {
-        todo!()
+        self.client
+            .turbo_price(data_size.as_u64(), Some(&self.address))
+            .await
+            .map_err(|e| UploadModeError::PricingError(e.to_string()))
     }
 
     async fn balance(&self) -> Result<Money<Winston>, UploadModeError> {
-        todo!()
+        self.client
+            .turbo_balance(&self.address)
+            .await
+            .map_err(|e| UploadModeError::BackendError(e.to_string()))
     }
 
     async fn submit(
         &mut self,
-        drive_id: &DriveId,
+        _drive_id: &DriveId,
         bundler: AsyncBundler<AcceptingItems>,
     ) -> Result<UploadDetails, UploadModeError> {
-        let path = self.temp_dir.clone();
-        let prefix = drive_id.to_string();
-        let work_dir =
-            Arc::new(unblock(move || TempDir::with_prefix_in(&prefix, path.path())).await?);
-        let mut output_file = AsyncTempFile::create_rw(work_dir.clone()).await?;
-        let item_draft = bundler
-            .into_nested(&mut output_file)
+        let (item_draft, _, reader) = bundler
+            .into_nested()
             .await
             .map_err(|e| UploadModeError::PreparationError(e.to_string()))?;
-        todo!()
+
+        let item = self
+            .wallet
+            .sign_bundle_item_draft::<ArweaveScheme>(item_draft)
+            .map_err(|e| UploadModeError::PreparationError(e.to_string()))?;
+
+        let len = reader.len();
+        let created = Utc::now();
+
+        let (response, data_size, cost) =
+            self.client
+                .turbo_upload(&item, reader, len)
+                .await
+                .map_err(|e| UploadModeError::UploadError(e.to_string()))?;
+
+        Ok(UploadDetails {
+            created,
+            uploaded: response.timestamp,
+            data_size: ByteSize::b(data_size),
+            cost,
+            item_id: response.id.into(),
+        })
     }
 }
 
