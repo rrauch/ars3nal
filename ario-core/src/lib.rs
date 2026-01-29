@@ -1,11 +1,11 @@
 extern crate core;
 
+pub use bigdecimal::BigDecimal;
 pub use maybe_owned::MaybeOwned;
 pub use rsa::BoxedUint as BigUint;
 pub use rsa::Error as RsaError;
 pub use serde_json::Error as JsonError;
 pub use serde_json::Value as JsonValue;
-pub use bigdecimal::BigDecimal;
 
 use crate::base64::{ToBase64, TryFromBase64, TryFromBase64Error};
 use crate::blob::Blob;
@@ -21,6 +21,7 @@ use std::convert::Infallible;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::str::FromStr;
 use thiserror::Error;
 use url::Url;
@@ -56,6 +57,9 @@ impl WithDisplay for BlockNumber {}
 impl BlockNumber {
     pub fn from_inner(number: u64) -> Self {
         Self::new_from_inner(number)
+    }
+    pub fn increment(&self, increment_by: u64) -> Self {
+        Self::new_from_inner(self.deref().saturating_add(increment_by))
     }
 }
 

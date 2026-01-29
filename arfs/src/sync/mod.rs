@@ -21,6 +21,7 @@ use futures_lite::{AsyncReadExt, Stream, StreamExt};
 use std::cmp::{max, min};
 use std::collections::{HashSet, VecDeque};
 use std::io::ErrorKind;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -650,14 +651,20 @@ impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
         tx.set_synced_state(Utc::now(), current_block_height)
             .await?;
 
-        let last_sync_block_height = tx
+        let start_block_height = tx
             .last_sync_block_height()
             .await?
+            .map(|b| b.increment(1))
             .unwrap_or_else(|| BlockNumber::from_inner(0));
         let block_range = BlockRange {
-            start: last_sync_block_height,
+            start: start_block_height,
             end: current_block_height,
         };
+
+        if block_range.start > block_range.end {
+            tracing::info!("already in sync");
+            return Ok(None);
+        }
 
         let latest_drive = self
             .find_latest_drive(
