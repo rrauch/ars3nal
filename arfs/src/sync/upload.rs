@@ -59,6 +59,7 @@ pub struct Uploader {
     fx_service: Option<Arc<FxService>>,
     settled_checks: HashMap<DriveId, HashMap<u64, SettledCheck>>,
     settlement_timeout: Duration,
+    dry_run: bool,
 }
 
 struct SettledCheck {
@@ -104,6 +105,8 @@ pub enum Error {
     ClientError(#[from] ario_client::Error),
     #[error("encryption error: {0}")]
     EncryptionError(String),
+    #[error("dry-run / operation not permitted")]
+    DryRun,
 }
 
 #[bon]
@@ -116,6 +119,7 @@ impl Uploader {
         fx_service: Option<Arc<FxService>>,
         temp_dir: Option<PathBuf>,
         #[builder(default = Duration::from_secs(86400))] settlement_timeout: Duration,
+        #[builder(default = false)] dry_run: bool,
     ) -> Result<Self, Error> {
         if let Some(price_limit) = price_limit.as_ref() {
             if !price_limit.is_native() && fx_service.is_none() {
@@ -137,6 +141,7 @@ impl Uploader {
             temp_dir: Arc::new(temp_dir),
             settled_checks: HashMap::default(),
             settlement_timeout,
+            dry_run,
         })
     }
 
@@ -311,6 +316,10 @@ impl Uploader {
             .await?;
 
         self.price_check().await?; // second price check in case prices changed
+
+        if self.dry_run {
+            Err(Error::DryRun)?
+        }
 
         let mode = self.mode.mode();
         let address = data_wallet.address();
@@ -886,11 +895,11 @@ impl UploadMode for Turbo {
         let len = reader.len();
         let created = Utc::now();
 
-        let (response, data_size, cost) =
-            self.client
-                .turbo_upload(&item, reader, len)
-                .await
-                .map_err(|e| UploadModeError::UploadError(e.to_string()))?;
+        let (response, data_size, cost) = self
+            .client
+            .turbo_upload(&item, reader, len)
+            .await
+            .map_err(|e| UploadModeError::UploadError(e.to_string()))?;
 
         Ok(UploadDetails {
             created,

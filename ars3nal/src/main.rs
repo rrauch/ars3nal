@@ -184,6 +184,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 fn default_gateways() -> Vec<Gateway> {
     vec![Gateway::default()]
 }
@@ -358,6 +362,7 @@ struct UploaderConfig {
     mode: UploadType,
     price_adjustment: PriceAdjustment,
     price_limit: Option<PriceLimit>,
+    dry_run: bool,
 }
 
 impl TryFrom<TomlUploaderConfig> for UploaderConfig {
@@ -377,6 +382,7 @@ impl TryFrom<TomlUploaderConfig> for UploaderConfig {
             mode,
             price_adjustment: value.price_adjustment.unwrap_or_default(),
             price_limit: value.price_limit,
+            dry_run: value.dry_run,
         })
     }
 }
@@ -390,6 +396,8 @@ struct TomlUploaderConfig {
     price_adjustment: Option<PriceAdjustment>,
     #[serde(default, deserialize_with = "deserialize_price_limit_option")]
     price_limit: Option<PriceLimit>,
+    #[serde(default = "default_false")]
+    dry_run: bool,
 }
 
 #[derive(Debug)]
@@ -1095,6 +1103,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .maybe_price_limit(conf.price_limit)
             .maybe_fx_service(fx)
             .temp_dir(temp_dir.path().to_path_buf())
+            .dry_run(conf.dry_run)
             .build()
             .await?;
 
