@@ -20,8 +20,8 @@ use futures_lite::{
 use itertools::Itertools;
 use maybe_owned::MaybeOwnedMut;
 use rangemap::RangeMap;
-use std::collections::{BTreeMap, HashSet};
-use std::io::SeekFrom;
+use std::collections::HashSet;
+use std::io::{ErrorKind, SeekFrom};
 use std::iter;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -444,7 +444,7 @@ impl AsyncBundler<AcceptingItems> {
         ),
         Arc<Error>,
     > {
-        let (_, _, _, mut items, header, _, tags) = self.prepare_transition().await?;
+        let (_, _, _, items, header, _, tags) = self.prepare_transition().await?;
         let mut combinator = BundleItemCombinator::new(header, items.into_iter());
         let data = V2BundleItemDataProcessor::try_from_async_reader(&mut combinator)
             .await
@@ -457,6 +457,10 @@ impl AsyncBundler<AcceptingItems> {
             .draft()
             .map_err(|e| Arc::new(Error::ItemError(e.to_string())))?;
 
+        combinator
+            .seek(SeekFrom::Start(0))
+            .await
+            .map_err(|e| Arc::new(Error::ItemError(e.to_string())))?;
         Ok((draft, authenticator, Box::new(combinator)))
     }
 
@@ -498,7 +502,7 @@ pub trait BundleDataReader: AsyncRead + AsyncSeek + Send + Sync + Unpin {
 }
 impl<'a> BundleDataReader for BundleItemCombinator<'a> {
     fn len(&self) -> u64 {
-        self.len
+        self.len()
     }
 }
 
@@ -834,43 +838,7 @@ impl Processor {
     }
 }
 
-pub(crate) struct BundleItemCombinator<'a> {
-    range_map: RangeMap<u64, u64>,
-    entries: BTreeMap<u64, CombinedEntry<'a>>,
-    pos: u64,
-    len: u64,
-    state: Option<CombiState>,
-}
-
-#[derive(PartialEq)]
-enum CombiState {
-    Reading(u64),
-    Seeking(u64),
-}
-
-enum CombinedEntry<'a> {
-    Header((Cursor<Blob<'a>>, u64)),
-    Data((Box<dyn AsyncDataSource + 'a>, u64)),
-}
-
-impl<'a> CombinedEntry<'a> {
-    fn relative_pos(&self, pos: u64) -> Option<u64> {
-        let (offset, len) = match self {
-            Self::Header((_, len)) => (0, *len),
-            Self::Data((_, len)) => (0, *len),
-        };
-
-        if pos > len { None } else { Some(pos + offset) }
-    }
-
-    fn as_data_source(&mut self) -> impl AsyncDataSource {
-        let source: Box<dyn AsyncDataSource> = match self {
-            Self::Header((cursor, _)) => Box::new(cursor),
-            Self::Data((data, _)) => Box::new(data),
-        };
-        source
-    }
-}
+pub(crate) type BundleItemCombinator<'a> = ChainedReader<Box<dyn AsyncDataSource + 'a>>;
 
 impl<'a> BundleItemCombinator<'a> {
     pub(crate) fn single_item(
@@ -878,159 +846,184 @@ impl<'a> BundleItemCombinator<'a> {
         data: impl AsyncDataSource + 'a,
         data_len: u64,
     ) -> Self {
-        let mut range_map = RangeMap::new();
-        let mut entries = BTreeMap::new();
-        let mut pos = 0;
+        let header_len = header.len() as u64;
+        let header: Box<dyn AsyncDataSource + 'a> = Box::new(Cursor::new(header));
+        let data = Box::new(data);
 
-        let len = header.len() as u64;
-        entries.insert(pos, CombinedEntry::Header((Cursor::new(header), len)));
-        range_map.insert(pos..(pos + len), pos);
-        pos += len;
-
-        entries.insert(pos, CombinedEntry::Data((Box::new(data), data_len)));
-        range_map.insert(pos..(pos + data_len), pos);
-        pos += data_len;
-
-        Self {
-            len: pos,
-            pos: 0,
-            range_map,
-            entries,
-            state: None,
-        }
+        Self::from_iter([(header, header_len), (data, data_len)])
     }
 
     fn new<I: Into<MaybeOwnedMut<'a, ProcessedItem>>>(
         header: Blob<'a>,
         items: impl Iterator<Item = I>,
     ) -> Self {
-        let mut range_map = RangeMap::new();
-        let mut entries = BTreeMap::new();
-        let mut pos = 0;
+        let mut readers: Vec<(Box<dyn AsyncDataSource + 'a>, u64)> = vec![];
 
-        let len = header.len() as u64;
-        entries.insert(pos, CombinedEntry::Header((Cursor::new(header), len)));
-        range_map.insert(pos..(pos + len), pos);
-        pos += len;
+        let header_len = header.len() as u64;
+        readers.push((Box::new(Cursor::new(header)), header_len));
 
         items.into_iter().for_each(|i| {
             let i = i.into();
             let header_len = i.state.header.len() as u64;
             let data_len = i.item.data_size();
-            let (header, data) = match i {
-                MaybeOwnedMut::Owned(i) => (
-                    CombinedEntry::Header((Cursor::new(i.state.header), header_len)),
-                    CombinedEntry::Data((i.data_source, data_len)),
-                ),
-                MaybeOwnedMut::Borrowed(i) => (
-                    CombinedEntry::Header((Cursor::new(i.state.header.borrow()), header_len)),
-                    CombinedEntry::Data((Box::new(i.data_source.as_mut()), data_len)),
-                ),
-            };
-            entries.insert(pos, header);
-            range_map.insert(pos..(pos + header_len), pos);
-            pos += header_len;
-            entries.insert(pos, data);
-            range_map.insert(pos..(pos + data_len), pos);
-            pos += data_len;
+            match i {
+                MaybeOwnedMut::Owned(i) => {
+                    readers.push((Box::new(Cursor::new(i.state.header)), header_len));
+                    readers.push((i.data_source, data_len));
+                }
+                MaybeOwnedMut::Borrowed(i) => {
+                    readers.push((Box::new(Cursor::new(i.state.header.borrow())), header_len));
+                    readers.push((Box::new(i.data_source.as_mut()), data_len));
+                }
+            }
         });
 
-        Self {
-            len: pos,
-            pos: 0,
-            range_map,
-            entries,
-            state: None,
-        }
-    }
-
-    fn get(&mut self, pos: u64) -> Option<(&mut CombinedEntry<'a>, u64)> {
-        let start_pos = *self.range_map.get(&pos)?;
-        let entry = self.entries.get_mut(&start_pos)?;
-        let offset = pos - start_pos;
-        Some((entry, offset))
-    }
-
-    fn poll_get(
-        &mut self,
-        cx: &mut Context<'_>,
-        pos: u64,
-        seek: bool,
-    ) -> Poll<std::io::Result<impl AsyncDataSource + use<'_, 'a>>> {
-        if pos > self.len {
-            return Poll::Ready(Err(std::io::Error::other(format!(
-                "offset {} is out of bounds",
-                pos
-            ))));
-        }
-
-        let (entry, offset) = self.get(pos).ok_or(std::io::Error::other(format!(
-            "no data found for offset {}",
-            pos
-        )))?;
-
-        let relative_pos = entry
-            .relative_pos(offset)
-            .ok_or(std::io::Error::other(format!(
-                "offset {} out of bounds for entry at pos {}",
-                offset, pos
-            )))?;
-
-        let mut data_source = entry.as_data_source();
-        if seek {
-            ready!(Pin::new(&mut data_source).poll_seek(cx, SeekFrom::Start(relative_pos)))?;
-        }
-        Poll::Ready(Ok(data_source))
+        Self::from_iter(readers)
     }
 }
 
-impl AsyncRead for BundleItemCombinator<'_> {
+pub(crate) struct ChainedReader<R> {
+    readers: Vec<(R, u64)>,
+    range_map: RangeMap<u64, usize>,
+    total_length: u64,
+    current_pos: u64,
+    current_index: Option<usize>,
+    must_seek: bool,
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> FromIterator<(R, u64)> for ChainedReader<R> {
+    fn from_iter<T: IntoIterator<Item = (R, u64)>>(iter: T) -> Self {
+        let readers: Vec<_> = iter.into_iter().filter(|(_, len)| *len > 0).collect();
+
+        let mut range_map = RangeMap::new();
+        let mut offset = 0u64;
+        for (i, (_, len)) in readers.iter().enumerate() {
+            range_map.insert(offset..offset + len, i);
+            offset += len;
+        }
+
+        Self {
+            readers,
+            range_map,
+            total_length: offset,
+            current_pos: 0,
+            current_index: None,
+            must_seek: true,
+        }
+    }
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> ChainedReader<R> {
+    pub async fn try_from_iter<T: IntoIterator<Item = R>>(iter: T) -> Result<Self, std::io::Error> {
+        let mut readers = vec![];
+        for mut reader in iter.into_iter() {
+            let len = reader.seek(SeekFrom::End(0)).await?;
+            readers.push((reader, len));
+        }
+
+        Ok(Self::from_iter(readers))
+    }
+}
+
+impl<R> ChainedReader<R> {
+    #[inline]
+    pub fn len(&self) -> u64 {
+        self.total_length
+    }
+
+    fn find_reader_for_pos(&self, pos: u64) -> Option<(usize, u64)> {
+        self.range_map.get_key_value(&pos).map(|(range, &index)| {
+            let local_offset = pos - range.start;
+            (index, local_offset)
+        })
+    }
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> AsyncRead for ChainedReader<R> {
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
-        let this = self.get_mut();
-        let pos = this.pos;
-        if pos >= this.len {
+        let this = &mut *self;
+
+        let Some((index, local_pos)) = this.find_reader_for_pos(this.current_pos) else {
             return Poll::Ready(Ok(0));
+        };
+        if this.current_index != Some(index) {
+            // reader has changed
+            this.must_seek = true;
+            this.current_index = Some(index);
         }
 
-        let seek = this
-            .state
-            .as_ref()
-            .map(|s| match s {
-                CombiState::Reading(prev_pos) if prev_pos == &pos => false,
-                _ => true,
-            })
-            .unwrap_or(true);
+        let (reader, len) = &mut this.readers[index];
 
-        let mut data_source = ready!(this.poll_get(cx, pos, seek))?;
-        let n = ready!(Pin::new(&mut data_source).poll_read(cx, buf))?;
-        drop(data_source);
-        this.pos += n as u64;
-        this.state.take();
+        if this.must_seek {
+            ready!(Pin::new(&mut *reader).poll_seek(cx, SeekFrom::Start(local_pos)))?;
+            this.must_seek = false;
+        }
+
+        let remaining_in_reader = *len - local_pos;
+        let max_read = (remaining_in_reader as usize).min(buf.len());
+        let read_buf = &mut buf[..max_read];
+
+        let n = ready!(Pin::new(reader).poll_read(cx, read_buf))?;
+
+        if n == 0 {
+            return Poll::Ready(Err(std::io::Error::new(
+                ErrorKind::UnexpectedEof,
+                "underlying reader returned EOF before declared length",
+            )));
+        }
+
+        this.current_pos += n as u64;
         Poll::Ready(Ok(n))
     }
 }
 
-impl AsyncSeek for BundleItemCombinator<'_> {
+impl<R: AsyncSeek + Unpin> AsyncSeek for ChainedReader<R> {
     fn poll_seek(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        pos: SeekFrom,
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        seek: SeekFrom,
     ) -> Poll<std::io::Result<u64>> {
-        let this = self.get_mut();
-        let pos = match pos {
-            SeekFrom::Start(pos) => pos,
-            SeekFrom::End(pos) => this.len.saturating_add_signed(pos),
-            SeekFrom::Current(pos) => this.pos.saturating_add_signed(pos),
+        let this = &mut *self;
+
+        let target: Option<u64> = match seek {
+            SeekFrom::Start(pos) => Some(pos),
+            SeekFrom::End(offset) => {
+                if offset >= 0 {
+                    this.total_length.checked_add(offset as u64)
+                } else {
+                    this.total_length.checked_sub(offset.unsigned_abs())
+                }
+            }
+            SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    this.current_pos.checked_add(offset as u64)
+                } else {
+                    this.current_pos.checked_sub(offset.unsigned_abs())
+                }
+            }
         };
-        this.state = Some(CombiState::Seeking(pos));
-        ready!(this.poll_get(cx, pos, true))?;
-        this.pos = pos;
-        this.state.take();
-        Poll::Ready(Ok(pos))
+
+        let Some(target) = target else {
+            return Poll::Ready(Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "seek position overflow",
+            )));
+        };
+
+        if target > this.total_length {
+            return Poll::Ready(Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "seek past end",
+            )));
+        }
+
+        this.current_pos = target;
+        this.must_seek = true;
+        Poll::Ready(Ok(target))
     }
 }
 
@@ -1101,18 +1094,23 @@ impl Uploader {
 
 #[cfg(test)]
 mod tests {
-    use super::AsyncBundler;
+    use super::{AsyncBundler, ChainedReader};
     use ario_core::Gateway;
     use ario_core::bundle::{ArweaveScheme, BundleItemBuilder, V2BundleItemDataProcessor};
     use ario_core::jwk::Jwk;
     use ario_core::network::Network;
     use ario_core::wallet::Wallet;
+    use futures_lite::io::Cursor;
+    use futures_lite::{AsyncReadExt, AsyncSeekExt};
+    use std::io::{ErrorKind, SeekFrom};
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use tokio_util::compat::TokioAsyncReadCompatExt;
 
     static FILE_1_PATH: &'static str = "./testdata/1mb.bin";
     static FILE_2_PATH: &'static str = "./testdata/rebar3";
+    static FILE_3_PATH: &'static str = "./testdata/ZIKx8GszPodILJx3yOA1HBZ1Ma12gkEod_Lz2R2Idnk.tx";
+    static FILE_4_PATH: &'static str = "./testdata/366659587055863.chunk2";
 
     fn init_tracing() {
         let _ = tracing_subscriber::fmt()
@@ -1201,6 +1199,324 @@ mod tests {
         let tx = client.tx_by_id(&tx_id).await?.unwrap();
 
         assert_eq!(tx.data_item().unwrap().size(), tx_data_size);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_readers_vec() -> Result<(), anyhow::Error> {
+        let mut reader =
+            ChainedReader::<Cursor<Vec<u8>>>::try_from_iter(std::iter::empty()).await?;
+
+        assert_eq!(reader.len(), 0);
+
+        let mut buf = [0u8; 10];
+        let n = reader.read(&mut buf).await?;
+        assert_eq!(n, 0);
+
+        let pos = reader.seek(SeekFrom::Start(0)).await?;
+        assert_eq!(pos, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn single_reader_read_all() -> Result<(), anyhow::Error> {
+        let mut reader =
+            ChainedReader::try_from_iter(vec![Cursor::new(b"hello")].into_iter()).await?;
+
+        assert_eq!(reader.len(), 5);
+
+        let mut buf = [0u8; 10];
+        let n = reader.read(&mut buf).await?;
+        assert_eq!(n, 5);
+        assert_eq!(&buf[..n], b"hello");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multiple_readers_sequential_read() -> Result<(), anyhow::Error> {
+        let mut reader = ChainedReader::try_from_iter(
+            vec![
+                Cursor::new(b"aaa"),
+                Cursor::new(b"bbb"),
+                Cursor::new(b"ccc"),
+            ]
+            .into_iter(),
+        )
+        .await?;
+
+        assert_eq!(reader.len(), 9);
+
+        let mut result = Vec::new();
+        loop {
+            let mut buf = [0u8; 2];
+            let n = reader.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            result.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(result, b"aaabbbccc");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_length_readers_filtered() -> Result<(), anyhow::Error> {
+        let mut reader = ChainedReader::try_from_iter(
+            vec![
+                Cursor::new(b"".as_slice()),
+                Cursor::new(b"abc".as_slice()),
+                Cursor::new(b"".as_slice()),
+                Cursor::new(b"def".as_slice()),
+            ]
+            .into_iter(),
+        )
+        .await?;
+
+        assert_eq!(reader.len(), 6);
+
+        let mut buf = [0u8; 10];
+        let mut result = Vec::new();
+        loop {
+            let n = reader.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            result.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(result, b"abcdef");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_start() -> Result<(), anyhow::Error> {
+        let mut reader = ChainedReader::try_from_iter(
+            vec![Cursor::new(b"aaa"), Cursor::new(b"bbb")].into_iter(),
+        )
+        .await?;
+
+        let pos = reader.seek(SeekFrom::Start(4)).await?;
+        assert_eq!(pos, 4);
+
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf).await?;
+
+        assert_eq!(buf.as_slice(), b"bb");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_current_forward() -> Result<(), anyhow::Error> {
+        let mut reader =
+            ChainedReader::try_from_iter(vec![Cursor::new(b"abcdef")].into_iter()).await?;
+
+        reader.seek(SeekFrom::Start(2)).await?;
+        let pos = reader.seek(SeekFrom::Current(2)).await?;
+        assert_eq!(pos, 4);
+
+        let mut buf = [0u8; 2];
+        let n = reader.read(&mut buf).await?;
+        assert_eq!(&buf[..n], b"ef");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_current_backward() -> Result<(), anyhow::Error> {
+        let mut reader =
+            ChainedReader::try_from_iter(vec![Cursor::new(b"abcdef")].into_iter()).await?;
+
+        reader.seek(SeekFrom::Start(4)).await?;
+        let pos = reader.seek(SeekFrom::Current(-2)).await?;
+        assert_eq!(pos, 2);
+
+        let mut buf = [0u8; 2];
+        let n = reader.read(&mut buf).await?;
+        assert_eq!(&buf[..n], b"cd");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_end() -> Result<(), anyhow::Error> {
+        let mut reader =
+            ChainedReader::try_from_iter(vec![Cursor::new(b"abcdef")].into_iter()).await?;
+
+        let pos = reader.seek(SeekFrom::End(-2)).await?;
+        assert_eq!(pos, 4);
+
+        let mut buf = [0u8; 2];
+        let n = reader.read(&mut buf).await?;
+        assert_eq!(&buf[..n], b"ef");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_end_zero() -> Result<(), anyhow::Error> {
+        let mut reader =
+            ChainedReader::try_from_iter(vec![Cursor::new(b"abc")].into_iter()).await?;
+
+        let pos = reader.seek(SeekFrom::End(0)).await?;
+        assert_eq!(pos, 3);
+
+        let mut buf = [0u8; 10];
+        let n = reader.read(&mut buf).await?;
+        assert_eq!(n, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_past_end_error() -> Result<(), anyhow::Error> {
+        let mut reader =
+            ChainedReader::try_from_iter(vec![Cursor::new(b"abc")].into_iter()).await?;
+
+        let result = reader.seek(SeekFrom::Start(4)).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_before_start_error() -> Result<(), anyhow::Error> {
+        let mut reader =
+            ChainedReader::try_from_iter(vec![Cursor::new(b"abc")].into_iter()).await?;
+
+        let result = reader.seek(SeekFrom::Current(-1)).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_back_and_forth() -> Result<(), anyhow::Error> {
+        let mut reader = ChainedReader::try_from_iter(
+            vec![
+                Cursor::new(b"aaa"),
+                Cursor::new(b"bbb"),
+                Cursor::new(b"ccc"),
+            ]
+            .into_iter(),
+        )
+        .await?;
+
+        let mut buf = [0u8; 1];
+
+        reader.seek(SeekFrom::Start(7)).await?;
+        reader.read(&mut buf).await?;
+        assert_eq!(&buf, b"c");
+
+        reader.seek(SeekFrom::Start(1)).await?;
+        reader.read(&mut buf).await?;
+        assert_eq!(&buf, b"a");
+
+        reader.seek(SeekFrom::Start(4)).await?;
+        reader.read(&mut buf).await?;
+        assert_eq!(&buf, b"b");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_across_boundary() -> Result<(), anyhow::Error> {
+        let mut reader =
+            ChainedReader::try_from_iter(vec![Cursor::new(b"aa"), Cursor::new(b"bb")].into_iter())
+                .await?;
+
+        reader.seek(SeekFrom::Start(1)).await?;
+
+        let mut buf = [0u8; 10];
+        let n = reader.read(&mut buf).await?;
+        // Should only return up to end of first reader
+        assert_eq!(&buf[..n], b"a");
+
+        let n = reader.read(&mut buf).await?;
+        assert_eq!(&buf[..n], b"bb");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_to_exact_boundary() -> Result<(), anyhow::Error> {
+        let mut reader = ChainedReader::try_from_iter(
+            vec![Cursor::new(b"aaa"), Cursor::new(b"bbb")].into_iter(),
+        )
+        .await?;
+
+        reader.seek(SeekFrom::Start(3)).await?;
+
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf).await?;
+        assert_eq!(buf.as_slice(), b"bbb");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unexpected_eof() -> Result<(), anyhow::Error> {
+        // Lie about length - say 10 bytes but only have 3
+        let mut reader =
+            ChainedReader::from_iter(vec![(Cursor::new(b"abc".to_vec()), 10)].into_iter());
+
+        let mut buf = [0u8; 10];
+        let n = reader.read(&mut buf).await?;
+        assert_eq!(n, 3);
+
+        let result = reader.read(&mut buf).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_empty_reader_to_zero() -> Result<(), anyhow::Error> {
+        let mut reader =
+            ChainedReader::<Cursor<Vec<u8>>>::try_from_iter(std::iter::empty()).await?;
+
+        let pos = reader.seek(SeekFrom::Start(0)).await?;
+        assert_eq!(pos, 0);
+
+        let pos = reader.seek(SeekFrom::End(0)).await?;
+        assert_eq!(pos, 0);
+
+        let pos = reader.seek(SeekFrom::Current(0)).await?;
+        assert_eq!(pos, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_empty_reader_nonzero_error() -> Result<(), anyhow::Error> {
+        let mut reader =
+            ChainedReader::<Cursor<Vec<u8>>>::try_from_iter(std::iter::empty()).await?;
+
+        let result = reader.seek(SeekFrom::Start(1)).await;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn larger_file_test() -> Result<(), anyhow::Error> {
+        let expected_total_len = (tokio::fs::metadata(FILE_1_PATH).await?.len() * 2)
+            + tokio::fs::metadata(FILE_2_PATH).await?.len()
+            + tokio::fs::metadata(FILE_3_PATH).await?.len()
+            + tokio::fs::metadata(FILE_4_PATH).await?.len();
+
+        let readers = vec![
+            tokio::fs::File::open(FILE_1_PATH).await?.compat(),
+            tokio::fs::File::open(FILE_2_PATH).await?.compat(),
+            tokio::fs::File::open(FILE_3_PATH).await?.compat(),
+            tokio::fs::File::open(FILE_4_PATH).await?.compat(),
+            tokio::fs::File::open(FILE_1_PATH).await?.compat(),
+        ];
+
+        let mut reader = ChainedReader::try_from_iter(readers).await?;
+        assert_eq!(reader.len(), expected_total_len);
+
+        let mut expected = Vec::with_capacity(expected_total_len as usize);
+        expected.append(&mut tokio::fs::read(FILE_1_PATH).await?);
+        expected.append(&mut tokio::fs::read(FILE_2_PATH).await?);
+        expected.append(&mut tokio::fs::read(FILE_3_PATH).await?);
+        expected.append(&mut tokio::fs::read(FILE_4_PATH).await?);
+        expected.append(&mut tokio::fs::read(FILE_1_PATH).await?);
+
+        let mut actual = Vec::with_capacity(reader.len() as usize);
+        reader.read_to_end(&mut actual).await?;
+
+        assert_eq!(expected, actual);
 
         Ok(())
     }
