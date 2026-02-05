@@ -49,7 +49,7 @@ mod item;
 mod reader;
 mod tag;
 
-const MAX_ITEM_COUNT: u16 = 4096;
+const MAX_ITEM_COUNT: u16 = 16384;
 const MAX_ITEM_SIZE: u64 = 1024 * 1024 * 1024 * 50;
 const MAX_BUNDLE_SIZE: u64 = 1024 * 1024 * 1024 * 250;
 const MAX_TAG_COUNT: u16 = 128;
