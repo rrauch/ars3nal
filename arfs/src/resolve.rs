@@ -137,8 +137,9 @@ pub async fn find_drive_by_id_owner(
     drive_id: &DriveId,
     owner: &WalletAddress,
     key_ring: Option<&KeyRing>,
+    max_block: Option<BlockNumber>,
 ) -> Result<DriveEntity, Error> {
-    let (drive_id, item) = _find_drive_by_id_owner(client, drive_id, owner).await?;
+    let (drive_id, item) = _find_drive_by_id_owner(client, drive_id, owner, max_block).await?;
     let location = client.location_by_item_id(&item.id()).await?;
     Ok(drive_entity(client, &drive_id, &location, owner, key_ring).await?)
 }
@@ -147,6 +148,7 @@ async fn _find_drive_by_id_owner(
     client: &Client,
     drive_id: &DriveId,
     owner: &WalletAddress,
+    max_block: Option<BlockNumber>,
 ) -> Result<(DriveId, TxQueryItem), Error> {
     client
         .query_transactions_with_fields::<TagsBlockOnly>(
@@ -164,6 +166,7 @@ async fn _find_drive_by_id_owner(
                                 .values([drive_id.to_string()])
                                 .build(),
                         ])
+                        .maybe_block_range(max_block.map(|b| BlockRange::max(b)))
                         .build(),
                 )
                 .sort_order(SortOrder::HeightDescending)

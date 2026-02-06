@@ -530,7 +530,8 @@ async fn bootstrap(
 ) -> Result<Config, super::Error> {
     let owner = scope.owner();
     let drive_entity =
-        resolve::find_drive_by_id_owner(client, drive_id, owner.as_ref(), scope.key_ring()).await?;
+        resolve::find_drive_by_id_owner(client, drive_id, owner.as_ref(), scope.key_ring(), None)
+            .await?;
 
     if let Some(key_ring) = scope.key_ring()
         && drive_entity.privacy() == Privacy::Private

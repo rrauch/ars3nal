@@ -670,6 +670,7 @@ impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
                 current_drive_config.drive.id(),
                 &current_drive_config.owner,
                 key_ring,
+                block_range.end,
             )
             .await?;
 
@@ -778,9 +779,11 @@ impl<PRIVACY, MODE> BackgroundTask<PRIVACY, MODE> {
         drive_id: &DriveId,
         owner: &WalletAddress,
         key_ring: Option<&KeyRing>,
+        max_block: BlockNumber,
     ) -> Result<DriveEntity, crate::Error> {
         tracing::debug!("finding latest drive entity");
-        resolve::find_drive_by_id_owner(&self.client, drive_id, owner, key_ring).await
+        resolve::find_drive_by_id_owner(&self.client, drive_id, owner, key_ring, Some(max_block))
+            .await
     }
 
     #[tracing::instrument(skip(self))]

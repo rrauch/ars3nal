@@ -326,6 +326,15 @@ pub struct BlockRange {
     pub end: BlockNumber,
 }
 
+impl BlockRange {
+    pub fn max(end: BlockNumber) -> Self {
+        Self {
+            start: BlockNumber::from_inner(0),
+            end,
+        }
+    }
+}
+
 impl From<BlockNumber> for BlockRange {
     fn from(value: BlockNumber) -> Self {
         Self {
