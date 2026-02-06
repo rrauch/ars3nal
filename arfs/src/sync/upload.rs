@@ -10,6 +10,7 @@ use crate::{
 };
 use ario_client::bundle::bundler;
 use ario_client::bundle::bundler::{AcceptingItems, AsyncBundler};
+use ario_client::graphql::{TxQuery, TxQueryFilterCriteria};
 use ario_client::location::{Arl, TxArl};
 use ario_client::tx::Status as TxStatus;
 use ario_client::{ByteSize, Client, RawItemId};
@@ -27,11 +28,12 @@ use async_trait::async_trait;
 use blocking::unblock;
 use bon::bon;
 use chrono::{DateTime, Utc};
-use futures_lite::{AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+use futures_lite::{AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, StreamExt};
 use maybe_owned::MaybeOwnedMut;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::{IoSlice, IoSliceMut, SeekFrom};
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -159,6 +161,36 @@ impl Uploader {
     }
 }
 
+async fn graphql_test(
+    client: &Client,
+    item_id: &ItemId,
+    block: BlockNumber,
+) -> Result<bool, Error> {
+    // this does a test graphql query and expects at least 1 bundle_item
+    // for the above item_id + block to succeed.
+    // the goal here is to ensure the bundle we are interested in has been
+    // indexed by the graphql endpoint and can be found during syncing
+    if client.any_gateway_info().await?.height < block {
+        // gw not ready yet
+        return Ok(false);
+    }
+    let count = client
+        .query_transactions(
+            TxQuery::builder()
+                .filter_criteria(
+                    TxQueryFilterCriteria::builder()
+                        .block_range(block.into())
+                        .bundled_in([item_id])
+                        .build(),
+                )
+                .max_results(NonZeroUsize::new(1).unwrap())
+                .build(),
+        )
+        .try_fold(0usize, |count, _| Ok(count + 1))
+        .await?;
+    Ok(count > 0)
+}
+
 impl Uploader {
     pub async fn process_pending(
         &mut self,
@@ -181,10 +213,13 @@ impl Uploader {
                 {
                     if accepted.number_of_confirmations >= self.min_confirmations as u64 {
                         // found on blockchain
-                        tx.mark_upload_success(upload_id, accepted.block_height)
-                            .await?;
-                        settled_checks.remove(&upload_id);
-                        continue;
+                        // make sure it can be queried via graphql
+                        if graphql_test(&self.client, &item_id, accepted.block_height).await? {
+                            tx.mark_upload_success(upload_id, accepted.block_height)
+                                .await?;
+                            settled_checks.remove(&upload_id);
+                            continue;
+                        }
                     }
                 }
             }
@@ -588,7 +623,7 @@ impl WalEntry {
 fn maybe_metadata_enc(
     key_ring: Option<&KeyRing>,
 ) -> (Option<Cipher>, Option<OwnedBlob>, ContentType) {
-    if let Some(key_ring) = key_ring {
+    if let Some(_) = key_ring {
         let cipher = Cipher::Aes256Gcm; // metadata encryption always uses GCM mode
         let nonce = cipher.generate_nonce();
         (Some(cipher), Some(nonce), ContentType::Binary)

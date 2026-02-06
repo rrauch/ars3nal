@@ -298,10 +298,10 @@ pub struct TxQueryFilterCriteria<'a> {
             iter.into_iter().map(|v| v.into()).collect()
         }, default)]
     tags: Vec<TagFilter<'a>>,
-    #[builder(with = |iter: impl IntoIterator<Item: Into<MaybeOwned<'a, TxId>>>| {
+    #[builder(with = |iter: impl IntoIterator<Item: Into<MaybeOwned<'a, ItemId>>>| {
             iter.into_iter().map(|v| v.into()).collect()
         }, default)]
-    bundled_in: Vec<MaybeOwned<'a, TxId>>,
+    bundled_in: Vec<MaybeOwned<'a, ItemId>>,
     block_range: Option<BlockRange>,
 }
 
