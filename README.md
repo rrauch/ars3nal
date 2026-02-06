@@ -1,6 +1,6 @@
 # ArS3nal
 
-[![Status](https://img.shields.io/badge/latest_release-0.4.0-green)](https://github.com/rrauch/ars3nal)
+[![Status](https://img.shields.io/badge/latest_release-0.4.2-green)](https://github.com/rrauch/ars3nal)
 [![License](https://img.shields.io/badge/License-Apache_2.0_and_MIT-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ArS3nal (pronounced *arsenal*) is an S3-compatible gateway for the [AR.IO network](https://ar.io), distributed as a

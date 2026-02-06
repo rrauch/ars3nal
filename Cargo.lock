@@ -127,7 +127,7 @@ checksum = "69f7f8c3906b62b754cd5326047894316021dcfe5a194c8ea52bdd94934a3457"
 
 [[package]]
 name = "arfs"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "ario-client",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "ario-client"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "ario-core",
@@ -281,7 +281,7 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
 name = "ars3nal"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "arfs",
