@@ -342,6 +342,7 @@ mode = "direct" # either "direct" or "turbo"
 wallet = "<<name of upload signing wallet>>" # e.g., "wallet1"
 price_adjustment = "<<adjust reward by a certain percentage; see below>>" # "direct" mode only, optional
 price_limit = "<<max acceptable price; see details below>>" # optional cost control price limit
+min_confirmations = 3 # minimum number of confirmations needed before upload is considered accepted 
 dry_run = false # disables actual data upload; mainly for testing/development
 ```
 

@@ -362,6 +362,7 @@ struct UploaderConfig {
     mode: UploadType,
     price_adjustment: PriceAdjustment,
     price_limit: Option<PriceLimit>,
+    min_confirmations: Option<usize>,
     dry_run: bool,
 }
 
@@ -383,6 +384,7 @@ impl TryFrom<TomlUploaderConfig> for UploaderConfig {
             price_adjustment: value.price_adjustment.unwrap_or_default(),
             price_limit: value.price_limit,
             dry_run: value.dry_run,
+            min_confirmations: value.min_confirmations,
         })
     }
 }
@@ -398,6 +400,8 @@ struct TomlUploaderConfig {
     price_limit: Option<PriceLimit>,
     #[serde(default = "default_false")]
     dry_run: bool,
+    #[serde(default)]
+    min_confirmations: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -1104,6 +1108,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             .maybe_fx_service(fx)
             .temp_dir(temp_dir.path().to_path_buf())
             .dry_run(conf.dry_run)
+            .maybe_min_confirmations(conf.min_confirmations)
             .build()
             .await?;
 

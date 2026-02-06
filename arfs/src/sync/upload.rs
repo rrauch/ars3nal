@@ -54,6 +54,7 @@ static PLACEHOLDER_ARL: LazyLock<Arl> = LazyLock::new(|| {
 pub struct Uploader {
     temp_dir: Arc<TempDir>,
     client: Client,
+    min_confirmations: usize,
     mode: Box<dyn UploadMode + Send + Sync + 'static>,
     price_limit: Option<PriceLimit>,
     fx_service: Option<Arc<FxService>>,
@@ -119,6 +120,7 @@ impl Uploader {
         fx_service: Option<Arc<FxService>>,
         temp_dir: Option<PathBuf>,
         #[builder(default = Duration::from_secs(86400))] settlement_timeout: Duration,
+        #[builder(default = 3)] min_confirmations: usize,
         #[builder(default = false)] dry_run: bool,
     ) -> Result<Self, Error> {
         if let Some(price_limit) = price_limit.as_ref() {
@@ -140,6 +142,7 @@ impl Uploader {
             fx_service,
             temp_dir: Arc::new(temp_dir),
             settled_checks: HashMap::default(),
+            min_confirmations,
             settlement_timeout,
             dry_run,
         })
@@ -176,11 +179,13 @@ impl Uploader {
                 if let Some(TxStatus::Accepted(accepted)) =
                     self.client.tx_status(location.tx_id()).await?
                 {
-                    // found on blockchain
-                    tx.mark_upload_success(upload_id, accepted.block_height)
-                        .await?;
-                    settled_checks.remove(&upload_id);
-                    continue;
+                    if accepted.number_of_confirmations >= self.min_confirmations as u64 {
+                        // found on blockchain
+                        tx.mark_upload_success(upload_id, accepted.block_height)
+                            .await?;
+                        settled_checks.remove(&upload_id);
+                        continue;
+                    }
                 }
             }
 
